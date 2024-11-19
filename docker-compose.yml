@@ -1,0 +1,59 @@
+services:
+  indexer:
+    build: .
+    ports:
+      - "${INDEXER_PORT:-8080}:8080"
+    environment:
+      - DATABASE__USERNAME=postgres
+      - DATABASE__PASSWORD=yourpassword
+      - DATABASE__HOST=db
+      - DATABASE__PORT=5432
+      - DATABASE__DATABASE_NAME=archindexer
+      - DATABASE__MAX_CONNECTIONS=20
+      - DATABASE__MIN_CONNECTIONS=5
+      - APPLICATION__PORT=8080
+      - APPLICATION__HOST=0.0.0.0
+      - ARCH_NODE__URL=${ARCH_NODE_URL:-http://leader:9002}
+      - REDIS__URL=redis://redis:6379
+      - INDEXER__BATCH_SIZE=100
+      - INDEXER__CONCURRENT_BATCHES=5
+      - RUST_LOG=info
+    depends_on:
+      - db
+      - redis
+    networks:
+      - arch-network
+      - internal
+
+  db:
+    image: postgres:13
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=yourpassword
+      - POSTGRES_DB=archindexer
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    networks:
+      - internal
+
+volumes:
+  pgdata:
+
+networks:
+  arch-network:
+    external: true
+    name: arch-cli_arch-network
+  internal:
