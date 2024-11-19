@@ -83,6 +83,24 @@ Initialize the database schema:
 cargo run --bin init_db
 ```
 
+## Security Setup
+
+Before running the indexer:
+
+1. Copy the example environment file:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Copy the example configuration:
+   ```bash
+   cp config/config.example.yml config/config.yml
+   ```
+
+3. Update the `.env` and `config.yml` files with your secure values
+
+⚠️ Never commit `.env` or `config.yml` files containing real credentials to the repository.
+
 ## Running the Service
 
 ```

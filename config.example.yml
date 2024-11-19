@@ -1,0 +1,12 @@
+database:
+  max_connections: 20
+  min_connections: 5
+  timeout_seconds: 30
+
+redis:
+  ttl_seconds: 3600
+  max_connections: 10
+
+metrics:
+  enabled: true
+  port: 9090

@@ -4,13 +4,13 @@ services:
     ports:
       - "${INDEXER_PORT:-8080}:8080"
     environment:
-      - DATABASE__USERNAME=postgres
-      - DATABASE__PASSWORD=yourpassword
+      - DATABASE__USERNAME=${DB_USERNAME:-postgres}
+      - DATABASE__PASSWORD=${DB_PASSWORD}
       - DATABASE__HOST=db
-      - DATABASE__PORT=5432
-      - DATABASE__DATABASE_NAME=archindexer
-      - DATABASE__MAX_CONNECTIONS=20
-      - DATABASE__MIN_CONNECTIONS=5
+      - DATABASE__PORT=${DB_PORT:-5432}
+      - DATABASE__DATABASE_NAME=${DB_NAME:-archindexer}
+      - DATABASE__MAX_CONNECTIONS=${DB_MAX_CONNECTIONS:-20}
+      - DATABASE__MIN_CONNECTIONS=${DB_MIN_CONNECTIONS:-5}
       - APPLICATION__PORT=8080
       - APPLICATION__HOST=0.0.0.0
       - ARCH_NODE__URL=${ARCH_NODE_URL:-http://leader:9002}
@@ -28,9 +28,9 @@ services:
   db:
     image: postgres:13
     environment:
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=yourpassword
-      - POSTGRES_DB=archindexer
+      - POSTGRES_USER=${DB_USERNAME:-postgres}
+      - POSTGRES_PASSWORD=${DB_PASSWORD}
+      - POSTGRES_DB=${DB_NAME:-archindexer}
     ports:
       - "5432:5432"
     volumes:
@@ -46,11 +46,21 @@ services:
 
   redis:
     image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
     networks:
       - internal
 
 volumes:
   pgdata:
+  redis_data:
 
 networks:
   arch-network:

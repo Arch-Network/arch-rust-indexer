@@ -20,6 +20,7 @@ use crate::config::Settings;
 use crate::indexer::{BlockProcessor, ChainSync};
 use crate::metrics::Metrics;
 use dotenv::dotenv;
+use crate::config::validation;
 
 
 #[tokio::main]
@@ -39,6 +40,10 @@ async fn main() -> Result<()> {
     // Set up metrics
     let prometheus_handle = metrics::setup_metrics_recorder();
     let metrics = Metrics::new(prometheus_handle);
+
+    // Validate environment and settings
+    config::validation::validate_required_env_vars()?;
+    config::validation::validate_database_settings(&settings)?;
 
     // Initialize database connection pool
     let pool = PgPoolOptions::new()

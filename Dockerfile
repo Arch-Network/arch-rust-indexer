@@ -3,9 +3,6 @@ FROM rustlang/rust:nightly-slim AS builder
 
 WORKDIR /usr/src/app
 
-# Update Rust and Cargo
-RUN rustup update stable
-
 # Install build dependencies
 RUN apt-get update && apt-get install -y \
     pkg-config \
@@ -14,9 +11,9 @@ RUN apt-get update && apt-get install -y \
 
 # Copy manifests
 COPY Cargo.toml Cargo.lock ./
-
-# Copy source code
+COPY migrations ./migrations
 COPY src ./src
+COPY .sqlx ./.sqlx
 
 # Build application
 RUN cargo build --release
@@ -32,10 +29,10 @@ RUN apt-get update && apt-get install -y \
     libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy the binary from builder
+# Copy the binary and migrations
 COPY --from=builder /usr/src/app/target/release/arch-indexer .
+COPY --from=builder /usr/src/app/migrations ./migrations
 
-# Set environment variables
 ENV RUST_LOG=info
 
 EXPOSE 8080
