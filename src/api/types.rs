@@ -20,8 +20,8 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "Resource not found"),
-            ApiError::Database(ref e) => (StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
-            ApiError::Internal(ref e) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
+            ApiError::Database(ref _e) => (StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
+            ApiError::Internal(ref _e) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
         };
 
         let body = Json(ErrorResponse {
@@ -37,7 +37,7 @@ struct ErrorResponse {
     error: String,
 }
 
-#[derive(Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct NetworkStats {
     pub total_transactions: i64,
     pub block_height: i64,

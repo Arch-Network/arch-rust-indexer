@@ -4,10 +4,9 @@ use axum::{
 };
 use std::sync::Arc;
 use sqlx::PgPool;
-use tracing::error;
 use axum::response::IntoResponse;
 use std::time::{SystemTime, UNIX_EPOCH};
-use std::sync::atomic::Ordering;
+use chrono::{DateTime, NaiveDateTime, Utc};
 
 use super::types::{ApiError, NetworkStats, SyncStatus};
 use crate::{db::models::{Block, Transaction}, indexer::BlockProcessor};
@@ -17,7 +16,16 @@ pub async fn get_blocks(
 ) -> Result<Json<Vec<Block>>, ApiError> {
     let blocks = sqlx::query_as!(
         Block,
-        "SELECT * FROM blocks ORDER BY height DESC LIMIT 200"
+        r#"
+        SELECT 
+            height,
+            hash,
+            timestamp as "timestamp!: DateTime<Utc>",
+            bitcoin_block_height
+        FROM blocks 
+        ORDER BY height DESC 
+        LIMIT 200
+        "#
     )
     .fetch_all(&*pool)
     .await?;
@@ -90,7 +98,11 @@ pub async fn get_block_by_hash(
     let block = sqlx::query_as!(
         Block,
         r#"
-        SELECT b.* 
+        SELECT 
+            b.height,
+            b.hash,
+            b.timestamp as "timestamp!: DateTime<Utc>",
+            b.bitcoin_block_height
         FROM blocks b 
         WHERE b.hash = $1
         "#,
@@ -101,9 +113,19 @@ pub async fn get_block_by_hash(
     .ok_or(ApiError::NotFound)?;
 
     // Fetching transactions for the block
-    let transactions = sqlx::query_as!(
+    let _transactions = sqlx::query_as!(
         Transaction,
-        "SELECT * FROM transactions WHERE block_height = $1",
+        r#"
+        SELECT 
+            txid, 
+            block_height, 
+            data, 
+            status, 
+            bitcoin_txids,
+            created_at as "created_at!: NaiveDateTime"
+        FROM transactions 
+        WHERE block_height = $1
+        "#,
         block.height
     )
     .fetch_all(&*pool)
@@ -121,7 +143,11 @@ pub async fn get_block_by_height(
     let block = sqlx::query_as!(
         Block,
         r#"
-        SELECT height, hash, timestamp, bitcoin_block_height
+        SELECT 
+            height,
+            hash,
+            timestamp as "timestamp!: DateTime<Utc>",
+            bitcoin_block_height
         FROM blocks
         WHERE height = $1
         "#,
@@ -141,10 +167,16 @@ pub async fn get_transactions(
     let transactions = sqlx::query_as!(
         Transaction,
         r#"
-        SELECT txid, block_height, data, status, bitcoin_txids, created_at
+        SELECT 
+            txid, 
+            block_height, 
+            data, 
+            status, 
+            bitcoin_txids,
+            created_at as "created_at!: NaiveDateTime"
         FROM transactions 
-        ORDER BY block_height DESC 
-        LIMIT 20
+        ORDER BY block_height DESC
+        LIMIT 100
         "#
     )
     .fetch_all(&*pool)
@@ -153,7 +185,6 @@ pub async fn get_transactions(
     Ok(Json(transactions))
 }
 
-
 pub async fn get_transaction(
     State(pool): State<Arc<PgPool>>,
     Path(txid): Path<String>,
@@ -161,7 +192,13 @@ pub async fn get_transaction(
     match sqlx::query_as!(
         Transaction,
         r#"
-        SELECT txid, block_height, data, status, bitcoin_txids, created_at
+        SELECT 
+            txid, 
+            block_height, 
+            data, 
+            status, 
+            bitcoin_txids,
+            created_at as "created_at!: NaiveDateTime"
         FROM transactions 
         WHERE txid = $1
         "#,
@@ -190,7 +227,7 @@ pub async fn get_network_stats(
             SELECT 
                 COUNT(*) as block_count,
                 MAX(height) as max_height,
-                (MAX(timestamp) - MIN(timestamp)) as time_span
+                EXTRACT(EPOCH FROM (MAX(timestamp) - MIN(timestamp))) as time_span
             FROM recent_blocks
         ),
         tx_counts AS (
@@ -199,22 +236,23 @@ pub async fn get_network_stats(
         )
         SELECT 
             tr.max_height,
-            tr.time_span,
+            tr.time_span::float8 as time_span,
             tc.total_tx
         FROM time_range tr, tx_counts tc
         "#
     )
     .fetch_one(&*pool)
     .await?;
-    // Calculate transactions per second (TPS) based on the time span and total transactions
+
+    // Calculate transactions per second (TPS)
     let tps = if let Some(time_span) = stats.time_span {
-        // Convert time_span from PgInterval to seconds
-        // Since PgInterval is a complex type, we need to manually extract the seconds from it
-        let time_span_seconds = time_span.microseconds as f64 / 1_000_000.0;
-        // Calculate TPS
-        stats.total_tx.unwrap_or(0) as f64 / time_span_seconds
+        if time_span > 0.0 {
+            stats.total_tx.unwrap_or(0) as f64 / time_span
+        } else {
+            0.0
+        }
     } else {
-        0.0 // Return 0 if time_span is None or 0
+        0.0
     };
 
     Ok(Json(NetworkStats {

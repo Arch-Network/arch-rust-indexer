@@ -1,4 +1,6 @@
 use anyhow::Result;
+use chrono::DateTime;
+use chrono::Utc;
 use dashmap::DashMap;
 use futures::stream;
 use futures::StreamExt;
@@ -95,16 +97,17 @@ impl BlockProcessor {
         // Batch insert blocks
         let mut tx = self.pool.begin().await?;
 
-        fn convert_timestamp(unix_timestamp: i64) -> NaiveDateTime {
+        fn convert_timestamp(unix_timestamp: i64) -> DateTime<Utc> {
             // If timestamp is in milliseconds, convert to seconds
             let timestamp_secs = if unix_timestamp > 1_000_000_000_000 {
                 unix_timestamp / 1000
             } else {
                 unix_timestamp
             };
-        
-            NaiveDateTime::from_timestamp_opt(timestamp_secs, 0)
-                .unwrap_or_else(|| NaiveDateTime::from_timestamp_opt(0, 0).unwrap())
+
+            // Convert the Unix timestamp to a DateTime<Utc>
+            chrono::DateTime::<Utc>::from_timestamp(timestamp_secs, 0)
+                .unwrap_or(chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap())
         }
     
         for (height, block) in &blocks {
@@ -160,7 +163,7 @@ impl BlockProcessor {
                             block_height: height,
                             data: tx.runtime_transaction,
                             status: if tx.status == "Processing" { 0 } else { 1 },
-                            bitcoin_txids: tx.bitcoin_txids.unwrap_or_default(),
+                            bitcoin_txids: Some(tx.bitcoin_txids.unwrap_or_default()),
                             created_at: chrono::Utc::now().naive_utc(),
                         }),
                         Err(e) => {
@@ -199,16 +202,17 @@ impl BlockProcessor {
         // Start a database transaction
         let mut tx = self.pool.begin().await?;
 
-        pub fn convert_timestamp(unix_timestamp: i64) -> NaiveDateTime {
+        fn convert_timestamp(unix_timestamp: i64) -> DateTime<Utc> {
             // If timestamp is in milliseconds, convert to seconds
             let timestamp_secs = if unix_timestamp > 1_000_000_000_000 {
                 unix_timestamp / 1000
             } else {
                 unix_timestamp
             };
-            
-            NaiveDateTime::from_timestamp_opt(timestamp_secs, 0)
-                .unwrap_or_else(|| NaiveDateTime::from_timestamp_opt(0, 0).unwrap())
+
+            // Convert the Unix timestamp to a DateTime<Utc>
+            chrono::DateTime::<Utc>::from_timestamp(timestamp_secs, 0)
+                .unwrap_or(chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap())
         }
 
         // Prepare block insert
@@ -234,17 +238,21 @@ impl BlockProcessor {
                 let data_json = serde_json::to_string(&tx.data).expect("Failed to serialize transaction data");
                 writeln!(
                     &mut copy,
-                    "{}\t{}\t{}\t{}\t{}",
+                    "{}\t{}\t{}\t{}\t{}\t{}",  // Added new tab for created_at
                     tx.txid,
                     tx.block_height,
                     data_json,
                     tx.status,
-                    tx.bitcoin_txids.join(",")
+                    tx.bitcoin_txids
+                        .as_ref()
+                        .map(|txids| txids.join(","))
+                        .unwrap_or_default(),
+                    tx.created_at  // Add created_at to the COPY
                 )?;
             }
-
+        
             let copy_statement = format!(
-                "COPY transactions (txid, block_height, data, status, bitcoin_txids) FROM STDIN"
+                "COPY transactions (txid, block_height, data, status, bitcoin_txids, created_at) FROM STDIN"  // Added created_at
             );
             
             sqlx::query(&copy_statement)
