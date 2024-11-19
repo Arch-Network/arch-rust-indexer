@@ -49,12 +49,14 @@ async fn test_root_endpoint() -> Result<(), anyhow::Error> {
 
     assert_eq!(response.status(), StatusCode::OK);
     
-    let body = read_body::<Vec<u8>>(response).await;
-    let json: Value = serde_json::from_slice(&body).unwrap();
+    // Use the existing read_body function but specify Value as the type
+    let json: Value = read_body(response).await;
     
     assert_eq!(
         json,
-        serde_json::json!({"message": "Arch Indexer API is running"})
+        serde_json::json!({
+            "message": "Arch Indexer API is running"
+        })
     );
 
     cleanup_test_db(&pool).await?;
@@ -66,26 +68,27 @@ async fn test_get_network_stats() -> Result<(), anyhow::Error> {
     let (app, pool) = create_test_app().await?;
     
     // Insert test block
-    sqlx::query(
+    sqlx::query!(
         "INSERT INTO blocks (height, hash, timestamp, bitcoin_block_height)
-         VALUES ($1, $2, $3, $4)"
+         VALUES ($1, $2, $3, $4)",
+        1_i64,
+        "test_hash",
+        chrono::DateTime::from_timestamp(1234567890, 0).unwrap(),
+        100_i64
     )
-    .bind(1_i64)
-    .bind("test_hash")
-    .bind(chrono::DateTime::from_timestamp(1234567890, 0).unwrap())
-    .bind(100_i64)
     .execute(&*pool)
     .await?;
 
     // Insert test transaction
-    sqlx::query(
-        "INSERT INTO transactions (txid, block_height, data, status)
-         VALUES ($1, $2, $3, $4)"
+    sqlx::query!(
+        "INSERT INTO transactions (txid, block_height, data, status, created_at)
+         VALUES ($1, $2, $3, $4, $5)",
+        "test_txid",
+        1_i64,
+        serde_json::json!({"test": "data"}),
+        0_i32,
+        chrono::DateTime::<chrono::Utc>::from_timestamp(1234567890, 0).unwrap()
     )
-    .bind("test_txid")
-    .bind(1_i64)
-    .bind(serde_json::json!({"test": "data"}))
-    .bind(0_i32)
     .execute(&*pool)
     .await?;
 
@@ -101,11 +104,13 @@ async fn test_get_network_stats() -> Result<(), anyhow::Error> {
 
     assert_eq!(response.status(), StatusCode::OK);
     
-    let body = read_body::<Vec<u8>>(response).await;
-    let stats: NetworkStats = serde_json::from_slice(&body).unwrap();
+    let stats: NetworkStats = read_body(response).await;
     
     assert_eq!(stats.block_height, 1);
     assert_eq!(stats.total_transactions, 1);
+    assert_eq!(stats.slot_height, 1);
+    assert_eq!(stats.tps, 0.0);
+    assert_eq!(stats.true_tps, 0.0);
 
     cleanup_test_db(&pool).await?;
     Ok(())
@@ -118,5 +123,6 @@ where
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap();
+    println!("Response body: {:?}", String::from_utf8_lossy(&bytes));
     serde_json::from_slice(&bytes).unwrap()
 }

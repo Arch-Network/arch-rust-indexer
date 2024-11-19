@@ -13,17 +13,22 @@ pub async fn setup_test_db() -> Result<PgPool> {
         .await
         .map_err(|e| anyhow::anyhow!("Failed to connect to database: {}", e))?;
 
-    // Clean up any existing data
+    // Clean up any existing data and schema
     cleanup_test_db(&pool).await?;
     
     // Initialize schema
+    sqlx::query("DROP TYPE IF EXISTS transaction_status CASCADE")
+        .execute(&pool)
+        .await?;
+
+    // Initialize database schema
     crate::db::schema::initialize_database(&pool).await?;
 
     Ok(pool)
 }
 
 pub async fn cleanup_test_db(pool: &PgPool) -> Result<()> {
-    // Drop tables if they exist
+    // Drop all tables and types
     sqlx::query("DROP TABLE IF EXISTS transactions CASCADE")
         .execute(pool)
         .await?;
