@@ -1,6 +1,9 @@
 #!/bin/bash
 set -e
 
+# Store the root directory of the project
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+
 # Check required environment variables
 if [ -z "$PROJECT_ID" ] || [ -z "$DB_USER" ] || [ -z "$DB_PASSWORD" ]; then
     echo "Error: Required environment variables not set"
@@ -9,12 +12,13 @@ if [ -z "$PROJECT_ID" ] || [ -z "$DB_USER" ] || [ -z "$DB_PASSWORD" ]; then
 fi
 
 # Create terraform.tfvars
-cd deploy/gcp/terraform
+cd "$ROOT_DIR/deploy/gcp/terraform"
 cat > terraform.tfvars << EOF
-project_id  = "$PROJECT_ID"
-region      = "us-central1"
-db_username = "$DB_USER"
-db_password = "$DB_PASSWORD"
+project_id    = "$PROJECT_ID"
+region        = "us-central1"
+db_username   = "$DB_USER"
+db_password   = "$DB_PASSWORD"
+arch_node_url = "${ARCH_NODE_URL:-http://leader:9002}"
 EOF
 
 # Deploy infrastructure
@@ -32,6 +36,7 @@ sleep 5
 
 # Run migrations first
 echo "Running database migrations..."
+cd "$ROOT_DIR"  # Return to root directory for migrations
 DATABASE_URL="postgresql://$DB_USER:$DB_PASSWORD@localhost:5433/archindexer" \
 sqlx migrate run
 
@@ -40,11 +45,12 @@ echo "Generating SQLx prepare files..."
 DATABASE_URL="postgresql://$DB_USER:$DB_PASSWORD@localhost:5433/archindexer" \
 cargo sqlx prepare
 
-# Kill the proxy
-kill $PROXY_PID
+# Clean up proxy process
+if ps -p $PROXY_PID > /dev/null; then
+    kill $PROXY_PID
+fi
 
 # Build and push Docker image
-cd ../../..
 docker build -t gcr.io/$PROJECT_ID/arch-indexer:latest .
 docker push gcr.io/$PROJECT_ID/arch-indexer:latest
 

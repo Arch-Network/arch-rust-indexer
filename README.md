@@ -3,8 +3,6 @@
 A high-performance indexing service built in Rust for archiving and querying data. This service utilizes PostgreSQL for storage, Redis for caching, and exposes metrics via Prometheus.
 
 ## Features
-
-```
 - RESTful API powered by Axum
 - PostgreSQL database integration with SQLx
 - Redis caching layer
@@ -13,51 +11,90 @@ A high-performance indexing service built in Rust for archiving and querying dat
 - Configuration via YAML
 - Comprehensive error handling
 - Thread-safe concurrent operations with DashMap
-```
 
 ## Prerequisites
-
-```
 - Rust (latest stable version)
 - PostgreSQL (13 or higher)
 - Redis server
 - Docker (optional, for containerized deployment)
-```
 
-## Installation
+## Local Development Setup
 
-```
 1. Clone the repository:
+   ```bash
+   git clone https://github.com/yourusername/arch-indexer.git
+   cd arch-indexer
+   ```
 
-    git clone https://github.com/yourusername/arch-indexer.git
-    cd arch-indexer
+2. Create and configure your local database:
+   ```bash
+   # Create the database
+   createdb archindexer
 
-2. Copy the example configuration:
+   # Initialize the schema
+   cargo run --bin init_schema
+   ```
 
-    cp config/config.example.yml config/config.yml
+3. Set up your environment variables in `.env`:
+   ```bash
+   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/archindexer
+   ARCH_NODE_URL=http://your-arch-node:9002
+   REDIS_URL=redis://localhost:6379
+   RUST_LOG=info
+   ```
 
-3. Set up your environment variables:
+4. Start Redis (if not already running):
+   ```bash
+   # Using Docker
+   docker run -d -p 6379:6379 redis:alpine
+   # Or use your system's Redis service
+   ```
 
-    cp .env.example .env
-```
+5. Run the indexer in development mode:
+   ```bash
+   cargo run
+   ```
+
+   Or build and run in release mode:
+   ```bash
+   cargo build --release
+   ./target/release/arch-indexer
+   ```
+
+6. Verify the service is running:
+   ```bash
+   curl http://localhost:8080/
+   # Should return: {"message": "Arch Indexer API is running"}
+   ```
+
+## Docker Development Setup
+
+If you prefer using Docker for local development:
+
+1. Build and start all services:
+   ```bash
+   docker-compose up --build
+   ```
+
+2. The services will be available at:
+   - Indexer API: http://localhost:8080
+   - PostgreSQL: localhost:5432
+   - Redis: localhost:6379
 
 ## Configuration
 
 ### Environment Variables
-
-```
-Create a .env file with the following variables:
-
-DATABASE_URL=postgresql://username:password@localhost:5432/arch_indexer
+Required environment variables:
+```bash
+DATABASE_URL=postgresql://username:password@localhost:5432/archindexer
 REDIS_URL=redis://localhost:6379
+ARCH_NODE_URL=http://your-arch-node:9002
 RUST_LOG=info
 ```
 
 ### Configuration File
-
-```
-The config.yml file supports the following options:
-
+The `config.yml` file supports the following options:
+```yaml
 server:
   host: "127.0.0.1"
   port: 8080
@@ -77,11 +114,17 @@ metrics:
 
 ## Database Setup
 
-```
 Initialize the database schema:
 
-cargo run --bin init_db
+```bash
+# Option 1: Using the binary
+cargo run --bin init_schema
+
+# Option 2: Using SQLx migrations
+sqlx migrate run
 ```
+
+Both methods will create the necessary database tables. The migrations method is preferred for production environments.
 
 ## Security Setup
 

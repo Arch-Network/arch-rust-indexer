@@ -19,3 +19,9 @@ variable "db_password" {
   type        = string
   sensitive   = true
 }
+
+variable "arch_node_url" {
+  description = "URL of the Arch Node RPC endpoint"
+  type        = string
+  default     = "http://leader:9002"  # Default value, should be overridden
+}

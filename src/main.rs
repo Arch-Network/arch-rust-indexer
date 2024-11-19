@@ -42,8 +42,8 @@ async fn main() -> Result<()> {
     let metrics = Metrics::new(prometheus_handle);
 
     // Validate environment and settings
-    config::validation::validate_required_env_vars()?;
-    config::validation::validate_database_settings(&settings)?;
+    crate::config::validate_required_env_vars()?;
+    crate::config::validate_database_settings(&settings)?;
 
     // Initialize database connection pool
     let pool = PgPoolOptions::new()
@@ -119,9 +119,6 @@ async fn main() -> Result<()> {
     });
 
     // Start the HTTP server
-    let addr = SocketAddr::from(([0, 0, 0, 0], settings.application.port));
-    info!("listening on {}", addr);
-
     let addr = SocketAddr::from(([0, 0, 0, 0], settings.application.port));
     info!("listening on {}", addr);
 
