@@ -20,11 +20,8 @@ jobs:
     steps:
       - uses: actions/checkout@v3
       
-      - name: Cache SQLx offline data
-        uses: actions/cache@v3
-        with:
-          path: .sqlx
-          key: sqlx-${{ hashFiles('**/sqlx-data.json') }}
+      - name: Set SQLx offline mode
+        run: echo "SQLX_OFFLINE=true" >> $GITHUB_ENV
 
       - name: Install Rust toolchain
         uses: actions-rs/toolchain@v1
