@@ -36,6 +36,41 @@ jobs:
         run: |
           cd target/${{ matrix.target }}/release
           tar -czf ../../../arch-indexer-${{ matrix.target }}.tar.gz arch-indexer
+          # Include a README with environment variable documentation
+          cat > ../../../README.release.md << EOL
+          # Arch Indexer Binary Release
+
+          ## Running the Binary
+
+          The binary can be configured using environment variables:
+
+          Required environment variables:
+          - DATABASE__USERNAME: Database username
+          - DATABASE__PASSWORD: Database password
+          - DATABASE__HOST: Database host
+          - DATABASE__PORT: Database port (default: 5432)
+          - DATABASE__DATABASE_NAME: Database name
+          - DATABASE__MAX_CONNECTIONS: Max DB connections (default: 20)
+          - DATABASE__MIN_CONNECTIONS: Min DB connections (default: 5)
+          - APPLICATION__PORT: Application port (default: 8080)
+          - APPLICATION__HOST: Application host (default: 0.0.0.0)
+          - ARCH_NODE__URL: Arch node URL
+          - REDIS__URL: Redis URL
+          - INDEXER__BATCH_SIZE: Indexer batch size (default: 100)
+          - INDEXER__CONCURRENT_BATCHES: Concurrent batches (default: 5)
+
+          Example usage:
+          \`\`\`bash
+          DATABASE__USERNAME=postgres \\
+          DATABASE__PASSWORD=your_password \\
+          DATABASE__HOST=localhost \\
+          DATABASE__PORT=5432 \\
+          DATABASE__DATABASE_NAME=archindexer \\
+          ARCH_NODE__URL=http://leader:9002 \\
+          REDIS__URL=redis://localhost:6379 \\
+          ./arch-indexer
+          \`\`\`
+          EOL
           cd -
       
       - name: Create Release
@@ -43,5 +78,6 @@ jobs:
         with:
           files: |
             arch-indexer-${{ matrix.target }}.tar.gz
+          body_path: README.release.md
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
