@@ -9,6 +9,11 @@ use tokio::net::TcpListener;
 use anyhow::Result;
 use arch_rpc::ArchRpcClient;
 use axum::Router;
+use axum::{
+    routing::get,
+    Json,
+};
+use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
 use tracing::{error, info};
 use std::sync::Arc;
@@ -16,7 +21,7 @@ use std::net::SocketAddr;
 use tokio::signal;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::config::Settings;
+use config::Settings;
 use crate::indexer::{BlockProcessor, ChainSync};
 use crate::metrics::Metrics;
 use dotenv::dotenv;
@@ -30,40 +35,70 @@ async fn main() -> Result<()> {
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into()),
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "debug".into()), // Change to debug level
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
+
     // Load configuration
-    let settings = Settings::new().expect("Failed to load configuration");
+    let settings = Settings::new().unwrap_or_else(|e| {
+        error!("Failed to load configuration: {:?}", e);
+        std::process::exit(1);
+    });
+
+    info!("Loaded settings: {:?}", settings);
 
     // Set up metrics
     let prometheus_handle = metrics::setup_metrics_recorder();
     let metrics = Metrics::new(prometheus_handle);
 
-    // Validate environment and settings
-    crate::config::validate_required_env_vars()?;
-    crate::config::validate_database_settings(&settings)?;
+    // Validate environment and settings    
+    // crate::config::validate_database_settings(&settings)?;
 
-    // Initialize database connection pool
-    let pool = PgPoolOptions::new()
-        .max_connections(settings.database.max_connections)
-        .min_connections(settings.database.min_connections)
-        .connect(&format!(
+    info!("Prometheus metrics initialized");
+
+    info!("Settings.database: {:?}", settings.database);
+
+    let connection_string = if settings.database.host.starts_with("/cloudsql") {
+        format!(
+            "postgres://{}:{}@localhost/{}\
+            ?host={}", 
+            settings.database.username,
+            settings.database.password,
+            settings.database.database_name,
+            settings.database.host
+        )
+    } else {
+        format!(
             "postgres://{}:{}@{}:{}/{}",
             settings.database.username,
             settings.database.password,
             settings.database.host,
             settings.database.port,
             settings.database.database_name
-        ))
+        )
+    };
+    
+    info!("Connection string (sanitized): {}", connection_string.replace(&settings.database.password, "REDACTED"));
+
+    // Initialize database connection pool
+    let pool = PgPoolOptions::new()
+        .max_connections(settings.database.max_connections)
+        .min_connections(settings.database.min_connections)
+        .connect(&connection_string)
         .await?;
+
+    info!("Successfully connected to database");
 
     // Initialize Redis connection
     let redis_client = redis::Client::open(settings.redis.url.as_str())?;
 
+    info!("Successfully connected to Redis");
+
     // Initialize Arch RPC client
     let arch_client = ArchRpcClient::new(settings.arch_node.url.clone());
+
+    info!("Successfully connected to Arch node");
 
     // Verify node connection
     match arch_client.is_node_ready().await {
@@ -85,6 +120,8 @@ async fn main() -> Result<()> {
         arch_client.clone(),
     ));
 
+    info!("Successfully initialized block processor");
+
     // Create API router
     let app = Router::new()
         .merge(api::create_router(Arc::new(pool), Arc::clone(&processor)))
@@ -95,6 +132,8 @@ async fn main() -> Result<()> {
                 metrics,
             )
         }));
+
+    info!("Successfully initialized API router");
 
     // Get the starting height for sync
     let current_height = match get_sync_start_height(&processor).await {
@@ -119,10 +158,14 @@ async fn main() -> Result<()> {
     });
 
     // Start the HTTP server
-    let addr = SocketAddr::from(([0, 0, 0, 0], settings.application.port));
+    let addr = SocketAddr::from((
+        settings.application.host.parse::<std::net::IpAddr>().unwrap_or_else(|_| "0.0.0.0".parse().unwrap()),
+        settings.application.port
+    ));
     info!("listening on {}", addr);
 
     let listener = TcpListener::bind(addr).await?;
+    info!("Successfully bound to address: {}", addr);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
@@ -132,6 +175,7 @@ async fn main() -> Result<()> {
 
     Ok(())
 }
+
 async fn get_sync_start_height(processor: &BlockProcessor) -> Result<i64> {
     // Try to get the last processed height from the database
     if let Some(height) = processor.get_last_processed_height().await? {

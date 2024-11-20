@@ -36,43 +36,122 @@ resource "google_project_service" "run" {
   disable_on_destroy = false
 }
 
+// Enable Redis API
+resource "google_project_service" "redis" {
+  service = "redis.googleapis.com"
+  disable_on_destroy = false
+}
+
+// Create Redis instance
+resource "google_redis_instance" "cache" {
+  name           = "arch-indexer-cache"
+  tier           = "BASIC"
+  memory_size_gb = 1
+  
+  region = var.region
+  
+  depends_on = [google_project_service.redis]
+}
+
 # Cloud Run service
 resource "google_cloud_run_service" "indexer" {
   name     = "arch-rust-indexer"
   location = var.region
 
   template {
+    metadata {
+      annotations = {
+        "run.googleapis.com/cloudsql-instances" = google_sql_database_instance.instance.connection_name
+      }
+    }
+    
     spec {
       containers {
-        image = "gcr.io/${var.project_id}/arch-indexer:latest"
-        
+        image = "gcr.io/${var.project_id}/arch-rust-indexer:latest"
+
+        # DatabaseSettings
         env {
-          name  = "DATABASE_URL"
-          value = "postgresql://${var.db_username}:${var.db_password}@${google_sql_database_instance.instance.connection_name}/archindexer"
+          name  = "DATABASE__USERNAME"
+          value = var.db_username
         }
-        
         env {
-          name  = "RUST_LOG"
-          value = "info"
+          name  = "DATABASE__PASSWORD"
+          value = var.db_password
+        }
+        env {
+          name  = "DATABASE__HOST"
+          value = "/cloudsql/${google_sql_database_instance.instance.connection_name}"
+        }
+        env {
+          name  = "DATABASE__PORT"
+          value = "5432"
+        }
+        env {
+          name  = "DATABASE__DATABASE_NAME"
+          value = "archindexer"
+        }
+        env {
+          name  = "DATABASE__MAX_CONNECTIONS"
+          value = "20"
+        }
+        env {
+          name  = "DATABASE__MIN_CONNECTIONS"
+          value = "5"
         }
 
-        env {
-          name  = "ARCH_NODE_URL"
-          value = var.arch_node_url
-        }
-
+        # ApplicationSettings
         env {
           name  = "APPLICATION__PORT"
           value = "8080"
         }
-
         env {
           name  = "APPLICATION__HOST"
           value = "0.0.0.0"
         }
 
+        # ArchNodeSettings
+        env {
+          name  = "ARCH_NODE__URL"
+          value = var.arch_node_url
+        }
+
+        # RedisSettings
+        env {
+          name  = "REDIS__URL"
+          value = "redis://${google_redis_instance.cache.host}:${google_redis_instance.cache.port}"
+        }
+
+        # IndexerSettings
+        env {
+          name  = "INDEXER__BATCH_SIZE"
+          value = "100"
+        }
+        env {
+          name  = "INDEXER__CONCURRENT_BATCHES"
+          value = "5"
+        }
+
         ports {
           container_port = 8080
+        }
+
+        startup_probe {
+          http_get {
+            path = "/"
+          }
+          initial_delay_seconds = 10
+          timeout_seconds = 3
+          period_seconds = 5
+          failure_threshold = 12  # Allow up to 1 minute for startup
+        }
+
+        liveness_probe {
+          http_get {
+            path = "/"
+          }
+          initial_delay_seconds = 15
+          timeout_seconds = 3
+          period_seconds = 30
         }
       }
     }

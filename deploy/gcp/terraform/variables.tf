@@ -25,3 +25,9 @@ variable "arch_node_url" {
   type        = string
   default     = "http://leader:9002"  # Default value, should be overridden
 }
+
+variable "redis_url" {
+  description = "URL for Redis connection"
+  type        = string
+  default     = "redis://localhost:6379"  # You might want to change this default
+}

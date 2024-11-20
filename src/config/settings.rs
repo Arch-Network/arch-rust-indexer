@@ -45,8 +45,19 @@ pub struct IndexerSettings {
 
 impl Settings {
     pub fn new() -> Result<Self, ConfigError> {
+        // Add debug prints
+        println!("Environment variables:");
+        for (key, value) in std::env::vars() {
+            println!("{}: {}", key, value);
+        }
+        
         let config = Config::builder()
             .add_source(Environment::default().separator("__"))
+            // Add default values for critical settings
+            .set_default("application.host", "0.0.0.0")?
+            .set_default("application.port", 8080)?
+            .set_default("indexer.batch_size", 100)?
+            .set_default("indexer.concurrent_batches", 5)?
             .build()?;
 
         config.try_deserialize()

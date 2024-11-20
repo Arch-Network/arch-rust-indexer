@@ -11,6 +11,12 @@ if [ -z "$PROJECT_ID" ] || [ -z "$DB_USER" ] || [ -z "$DB_PASSWORD" ]; then
     exit 1
 fi
 
+# Build and push Docker image first
+export DOCKER_BUILDKIT=1
+echo "Building and pushing Docker image..."
+docker build --platform linux/amd64 -t gcr.io/$PROJECT_ID/arch-rust-indexer:latest .
+docker push gcr.io/$PROJECT_ID/arch-rust-indexer:latest
+
 # Create terraform.tfvars
 cd "$ROOT_DIR/deploy/gcp/terraform"
 cat > terraform.tfvars << EOF
@@ -19,14 +25,8 @@ region        = "us-central1"
 db_username   = "$DB_USER"
 db_password   = "$DB_PASSWORD"
 arch_node_url = "${ARCH_NODE_URL:-http://leader:9002}"
+redis_url     = "${REDIS_URL:-redis://localhost:6379}"
 EOF
-
-# Deploy infrastructure
-terraform init
-terraform apply -auto-approve
-
-# Get database instance connection name
-DB_INSTANCE=$(terraform output -raw instance_connection_name)
 
 # Start Cloud SQL Proxy for local database access
 echo "Starting Cloud SQL Proxy..."
@@ -50,8 +50,9 @@ if ps -p $PROXY_PID > /dev/null; then
     kill $PROXY_PID
 fi
 
-# Build and push Docker image
-docker build -t gcr.io/$PROJECT_ID/arch-indexer:latest .
-docker push gcr.io/$PROJECT_ID/arch-indexer:latest
+# Deploy infrastructure (after image is available)
+cd "$ROOT_DIR/deploy/gcp/terraform"
+terraform init
+terraform apply -auto-approve
 
 echo "Deployment complete!"
