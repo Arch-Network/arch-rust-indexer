@@ -9,7 +9,7 @@ resource "google_sql_database_instance" "instance" {
   region           = var.region
   
   settings {
-    tier = "db-f1-micro"
+    tier = "db-custom-2-7680"
     
     backup_configuration {
       enabled = true
@@ -69,6 +69,17 @@ resource "google_cloud_run_service" "indexer" {
       containers {
         image = "gcr.io/${var.project_id}/arch-rust-indexer:latest"
 
+        resources {
+          limits = {
+            cpu    = "2000m"     # 2 vCPUs
+            memory = "4Gi"       # 4GB RAM
+          }
+          requests = {
+            cpu    = "1000m"     # 1 vCPU minimum
+            memory = "2Gi"       # 2GB RAM minimum
+          }
+        }
+
         # DatabaseSettings
         env {
           name  = "DATABASE__USERNAME"
@@ -124,11 +135,11 @@ resource "google_cloud_run_service" "indexer" {
         # IndexerSettings
         env {
           name  = "INDEXER__BATCH_SIZE"
-          value = "100"
+          value = "500"
         }
         env {
           name  = "INDEXER__CONCURRENT_BATCHES"
-          value = "5"
+          value = "10"
         }
 
         ports {
