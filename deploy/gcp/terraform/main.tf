@@ -60,15 +60,28 @@ resource "google_cloud_run_service" "indexer" {
 
   template {
     metadata {
-      annotations = {
-        "run.googleapis.com/cloudsql-instances" = google_sql_database_instance.instance.connection_name
-      }
-    }
+          annotations = {
+            "run.googleapis.com/cloudsql-instances" = google_sql_database_instance.instance.connection_name
+          }
+        }
     
     spec {
       containers {
         image = "gcr.io/${var.project_id}/arch-rust-indexer:latest"
 
+        env {
+          name  = "APPLICATION__CORS_ALLOW_ORIGIN"
+          value = "*"  # Or "https://graffiti.arch.network" for production
+        }
+        env {
+          name  = "APPLICATION__CORS_ALLOW_METHODS"
+          value = "GET, POST, OPTIONS"
+        }
+        env {
+          name  = "APPLICATION__CORS_ALLOW_HEADERS"
+          value = "Content-Type, Authorization"
+        }
+        
         resources {
           limits = {
             cpu    = "2000m"     # 2 vCPUs

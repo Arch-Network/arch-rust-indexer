@@ -25,6 +25,25 @@ pub struct DatabaseSettings {
 pub struct ApplicationSettings {
     pub port: u16,
     pub host: String,
+    #[serde(default = "default_cors_origin")]
+    pub cors_allow_origin: String,
+    #[serde(default = "default_cors_methods")]
+    pub cors_allow_methods: String,
+    #[serde(default = "default_cors_headers")]
+    pub cors_allow_headers: String,
+}
+
+// Default functions for CORS settings
+fn default_cors_origin() -> String {
+    "*".to_string()
+}
+
+fn default_cors_methods() -> String {
+    "GET, POST, OPTIONS".to_string()
+}
+
+fn default_cors_headers() -> String {
+    "Content-Type, Authorization".to_string()
 }
 
 #[derive(Debug, Deserialize)]

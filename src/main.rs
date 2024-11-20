@@ -20,6 +20,8 @@ use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::signal;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
+use tower_http::cors::CorsLayer;
+use axum::http::{header, HeaderValue, Method};
 
 use config::Settings;
 use crate::indexer::{BlockProcessor, ChainSync};
@@ -122,6 +124,27 @@ async fn main() -> Result<()> {
 
     info!("Successfully initialized block processor");
 
+    let cors = CorsLayer::new()
+    .allow_origin(settings.application.cors_allow_origin.parse::<HeaderValue>().unwrap_or_else(|_| {
+        HeaderValue::from_static("*")
+    }))
+    .allow_methods(
+        settings.application.cors_allow_methods
+            .split(',')
+            .map(|s| s.trim().parse::<Method>().unwrap_or(Method::GET))
+            .collect::<Vec<Method>>()
+    )
+    .allow_headers(
+        settings.application.cors_allow_headers
+            .split(',')
+            .map(|s| match s.trim().to_lowercase().as_str() {
+                "content-type" => header::CONTENT_TYPE,
+                "authorization" => header::AUTHORIZATION,
+                _ => header::HeaderName::from_lowercase(s.trim().to_lowercase().as_bytes()).unwrap_or(header::CONTENT_TYPE),
+            })
+            .collect::<Vec<_>>()
+    );
+
     // Create API router
     let app = Router::new()
         .merge(api::create_router(Arc::new(pool), Arc::clone(&processor)))
@@ -131,7 +154,8 @@ async fn main() -> Result<()> {
                 [(axum::http::header::CONTENT_TYPE, "text/plain; version=0.0.4")],
                 metrics,
             )
-        }));
+        }))
+        .layer(cors);
 
     info!("Successfully initialized API router");
 
