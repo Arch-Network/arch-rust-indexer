@@ -30,10 +30,21 @@ impl ChainSync {
     }
 
     pub async fn start(&self) -> Result<()> {
-        let target_height = self.processor.arch_client.get_block_count().await?;
         let mut current = self.current_height.load(Ordering::Relaxed);
+        let mut target_height = self.processor.arch_client.get_block_count().await?;
 
-        while current <= target_height {
+        loop {
+            // Continuously check for a new target_height every second
+            sleep(Duration::from_secs(1)).await;
+            let new_target_height = self.processor.arch_client.get_block_count().await?;
+            if new_target_height > target_height {
+                target_height = new_target_height;
+            }
+
+            if current > target_height {
+                break; // Exit the loop if we're already ahead of the target height
+            }
+
             let batch_starts: Vec<_> = (0..self.concurrent_batches)
                 .map(|i| current + (i as i64 * self.batch_size as i64))
                 .filter(|&start| start <= target_height)
@@ -49,9 +60,9 @@ impl ChainSync {
                     async move {
                         match processor.process_blocks_batch(heights).await {
                             Ok(blocks) => {
-                                for block in &blocks {
-                                    info!("Processed block {}", block.height);
-                                }
+                                // for block in &blocks {
+                                //     info!("Processed block {}", block.height);
+                                // }
                                 Ok(blocks)
                             }
                             Err(e) => {
@@ -117,7 +128,7 @@ impl ChainSync {
                     match result {
                         Ok(block) => {
                             self.current_height.store(block.height, Ordering::Relaxed);
-                            info!("Processed block {}", block.height);
+                            // info!("Processed block {}", block.height);
                         }
                         Err(e) => warn!("Failed to process block: {:?}", e),
                     }

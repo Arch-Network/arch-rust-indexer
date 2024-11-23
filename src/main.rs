@@ -28,16 +28,27 @@ use crate::indexer::{BlockProcessor, ChainSync};
 use crate::metrics::Metrics;
 use dotenv::dotenv;
 use crate::config::validation;
+use clap::Parser;
+
+#[derive(Parser)]
+struct Args {
+    /// Reset the database before starting the sync
+    #[arg(long)]
+    reset: bool,
+}
 
 
 #[tokio::main]
 async fn main() -> Result<()> {
     dotenv().ok();
 
+    // Parse command-line arguments
+    let args = Args::parse();
+
     // Initialize tracing
     tracing_subscriber::registry()
         .with(tracing_subscriber::EnvFilter::new(
-            std::env::var("RUST_LOG").unwrap_or_else(|_| "debug".into()), // Change to debug level
+            std::env::var("RUST_LOG").unwrap_or_else(|_| "debug".into()),
         ))
         .with(tracing_subscriber::fmt::layer())
         .init();
@@ -54,17 +65,11 @@ async fn main() -> Result<()> {
     let prometheus_handle = metrics::setup_metrics_recorder();
     let metrics = Metrics::new(prometheus_handle);
 
-    // Validate environment and settings    
-    // crate::config::validate_database_settings(&settings)?;
-
     info!("Prometheus metrics initialized");
-
-    info!("Settings.database: {:?}", settings.database);
 
     let connection_string = if settings.database.host.starts_with("/cloudsql") {
         format!(
-            "postgres://{}:{}@localhost/{}\
-            ?host={}", 
+            "postgres://{}:{}@localhost/{}?host={}",
             settings.database.username,
             settings.database.password,
             settings.database.database_name,
@@ -80,7 +85,7 @@ async fn main() -> Result<()> {
             settings.database.database_name
         )
     };
-    
+
     info!("Connection string (sanitized): {}", connection_string.replace(&settings.database.password, "REDACTED"));
 
     // Initialize database connection pool
@@ -91,6 +96,12 @@ async fn main() -> Result<()> {
         .await?;
 
     info!("Successfully connected to database");
+
+    // Reset the database if the --reset flag is provided
+    if args.reset {
+        reset_database(&pool).await?;
+        info!("Database reset successfully");
+    }
 
     // Initialize Redis connection
     let redis_client = redis::Client::open(settings.redis.url.as_str())?;
@@ -125,25 +136,25 @@ async fn main() -> Result<()> {
     info!("Successfully initialized block processor");
 
     let cors = CorsLayer::new()
-    .allow_origin(settings.application.cors_allow_origin.parse::<HeaderValue>().unwrap_or_else(|_| {
-        HeaderValue::from_static("*")
-    }))
-    .allow_methods(
-        settings.application.cors_allow_methods
-            .split(',')
-            .map(|s| s.trim().parse::<Method>().unwrap_or(Method::GET))
-            .collect::<Vec<Method>>()
-    )
-    .allow_headers(
-        settings.application.cors_allow_headers
-            .split(',')
-            .map(|s| match s.trim().to_lowercase().as_str() {
-                "content-type" => header::CONTENT_TYPE,
-                "authorization" => header::AUTHORIZATION,
-                _ => header::HeaderName::from_lowercase(s.trim().to_lowercase().as_bytes()).unwrap_or(header::CONTENT_TYPE),
-            })
-            .collect::<Vec<_>>()
-    );
+        .allow_origin(settings.application.cors_allow_origin.parse::<HeaderValue>().unwrap_or_else(|_| {
+            HeaderValue::from_static("*")
+        }))
+        .allow_methods(
+            settings.application.cors_allow_methods
+                .split(',')
+                .map(|s| s.trim().parse::<Method>().unwrap_or(Method::GET))
+                .collect::<Vec<Method>>()
+        )
+        .allow_headers(
+            settings.application.cors_allow_headers
+                .split(',')
+                .map(|s| match s.trim().to_lowercase().as_str() {
+                    "content-type" => header::CONTENT_TYPE,
+                    "authorization" => header::AUTHORIZATION,
+                    _ => header::HeaderName::from_lowercase(s.trim().to_lowercase().as_bytes()).unwrap_or(header::CONTENT_TYPE),
+                })
+                .collect::<Vec<_>>()
+        );
 
     // Create API router
     let app = Router::new()
@@ -167,6 +178,8 @@ async fn main() -> Result<()> {
             std::process::exit(1);
         }
     };
+
+    let current_height = 97935;
 
     // Start the chain sync process
     let sync = ChainSync::new(
@@ -197,6 +210,13 @@ async fn main() -> Result<()> {
     // Wait for sync to complete
     sync_handle.await??;
 
+    Ok(())
+}
+
+async fn reset_database(pool: &sqlx::PgPool) -> Result<()> {
+    sqlx::query("TRUNCATE TABLE blocks, transactions RESTART IDENTITY CASCADE")
+        .execute(pool)
+        .await?;
     Ok(())
 }
 

@@ -4,6 +4,8 @@ use chrono::Utc;
 use dashmap::DashMap;
 use futures::stream;
 use futures::StreamExt;
+use sqlx::Postgres;
+use sqlx::QueryBuilder;
 use std::fmt::Write;
 use std::sync::Arc;
 use tracing::error;
@@ -89,12 +91,10 @@ impl BlockProcessor {
 
     pub async fn process_blocks_batch(&self, heights: Vec<i64>) -> Result<Vec<Block>> {
         let start_time = std::time::Instant::now();
-
-        let start = std::time::Instant::now();
         let heights_clone = heights.clone();
         let blocks = self.fetch_blocks_batch(heights_clone).await?;
     
-        // Batch insert blocks
+        // Start database transaction
         let mut tx = self.pool.begin().await?;
 
         fn convert_timestamp(unix_timestamp: i64) -> DateTime<Utc> {
@@ -110,7 +110,9 @@ impl BlockProcessor {
                 .unwrap_or(chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap())
         }
     
+        // Process blocks and their transactions
         for (height, block) in &blocks {
+            // Insert block (existing code)
             sqlx::query!(
                 r#"
                 INSERT INTO blocks (height, hash, timestamp, bitcoin_block_height)
@@ -120,27 +122,62 @@ impl BlockProcessor {
                 "#,
                 height,
                 block.hash,
-                convert_timestamp(block.timestamp),
+                convert_timestamp(block.timestamp).naive_utc(),
                 block.bitcoin_block_height
             )
             .execute(&mut *tx)
             .await?;
-        }
 
+            // println!("Processed block {}", height);
+    
+            // Process transactions if present
+            if !block.transactions.is_empty() {
+                println!("Fetching transactions for block {}", height);
+                println!("Block transactions: {:?}", block.transactions);
+
+                let transactions = self.fetch_block_transactions(*height).await?;
+
+                println!("Found {} transactions in block {}", transactions.len(), height);
+                
+                // Use batch insert for efficient insertion
+                if !transactions.is_empty() {
+                    for transaction in &transactions {
+                        let data_json = serde_json::to_string(&transaction.data)
+                            .expect("Failed to serialize transaction data");
+                        
+                        let bitcoin_txids: Option<&[String]> = transaction.bitcoin_txids.as_deref();
+
+                        // Convert
+                
+                        sqlx::query!(
+                            r#"
+                            INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at)
+                            VALUES ($1, $2, $3, $4, $5, $6)
+                            "#,
+                            transaction.txid,
+                            transaction.block_height,
+                            serde_json::Value::String(data_json),
+                            transaction.status,
+                            bitcoin_txids,
+                            transaction.created_at
+                        )
+                        .execute(&mut *tx)
+                        .await?;
+                    }
+                }
+            }
+        }
+    
         tx.commit().await?;
     
-        metrics::histogram!("batch_processing_time", start.elapsed().as_secs_f64(), 
-            "batch_size" => heights.len().to_string()
-        );
-
+        // Update metrics
         if let Some(&max_height) = heights.iter().max() {
             let avg_time = start_time.elapsed().div_f64(heights.len() as f64);
             self.update_sync_metrics(max_height, avg_time);
         }
-
+    
         Ok(blocks.into_iter().map(|(_, block)| block).collect())
     }
-
     pub fn update_sync_metrics(&self, height: i64, block_time: Duration) {
         self.current_block_height.store(height, Ordering::Relaxed);
         self.average_block_time.store(block_time.as_millis() as u64, Ordering::Relaxed);
@@ -151,35 +188,39 @@ impl BlockProcessor {
         let block = self.arch_client.get_block(&block_hash, height).await?;
         
         let transactions = stream::iter(block.transactions)
-            .map(|txid| {
-                // Clone the Arc reference to the ArchRpcClient to ensure it's not dropped before the async task completes
-                let client: Arc<ArchRpcClient> = Arc::clone(&self.arch_client);
-                // Clone the txid to use within the async closure
-                let txid_clone = txid.clone();
-                async move {
-                    match client.get_processed_transaction(&txid_clone).await {
-                        Ok(tx) => Some(Transaction {
+        .map(|txid| {
+            let client: Arc<ArchRpcClient> = Arc::clone(&self.arch_client);
+            let txid_clone = txid.clone();
+            async move {
+                match client.get_processed_transaction(&txid_clone).await {
+                    Ok(tx) => {
+                        // Handle bitcoin_txids similar to Node.js code
+                        //let bitcoin_txids = tx.bitcoin_txids.as_ref().map(|txids| txids.join(",")).unwrap_or_else(|| "{}".to_string());
+
+                        Some(Transaction {
                             txid: txid_clone,
                             block_height: height,
                             data: tx.runtime_transaction,
                             status: if tx.status == "Processing" { 0 } else { 1 },
-                            bitcoin_txids: Some(tx.bitcoin_txids.unwrap_or_default()),
+                            bitcoin_txids: tx.bitcoin_txids,
                             created_at: chrono::Utc::now().naive_utc(),
-                        }),
-                        Err(e) => {
-                            error!("Failed to fetch transaction {}: {:?}", txid, e);
-                            None
-                        }
+                        })
+                    },
+                    Err(e) => {
+                        error!("Failed to fetch transaction {}: {:?}", txid, e);
+                        None
                     }
                 }
-            })
-            .buffer_unordered(10) // Process 10 transactions concurrently
-            .filter_map(|result| async move { result })
-            .collect()
-            .await;
-
+            }
+        })
+        .buffer_unordered(10)
+        .filter_map(|result| async move { result })
+        .collect()
+        .await;
+    
         Ok(transactions)
     }
+
     pub async fn get_last_processed_height(&self) -> Result<Option<i64>> {
         let height = sqlx::query!(
             "SELECT MAX(height) as last_height FROM blocks"
@@ -225,7 +266,7 @@ impl BlockProcessor {
             "#,
             height,
             block_hash,
-            convert_timestamp(block.timestamp),
+            convert_timestamp(block.timestamp).naive_utc(),
             block.bitcoin_block_height
         )
         .execute(&mut *tx)

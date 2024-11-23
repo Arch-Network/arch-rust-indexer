@@ -30,9 +30,10 @@ struct BlockResponse {
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProcessedTransaction {
-    pub runtime_transaction: serde_json::Value,
-    pub status: String,
-    pub bitcoin_txids: Option<Vec<String>>,
+    pub runtime_transaction: serde_json::Value, // Keep as serde_json::Value if structure is complex
+    pub status: serde_json::Value, // Change to serde_json::Value to handle nested objects
+    pub bitcoin_txids: Option<Vec<String>>, // This can remain as is
+    pub accounts_tags: Vec<serde_json::Value>, // Adjust to match the array structure
 }
 
 impl ArchRpcClient {
@@ -138,15 +139,18 @@ impl ArchRpcClient {
             .json(&json!({
                 "jsonrpc": "2.0",
                 "method": "get_processed_transaction",
-                "params": [txid],
+                "params": txid,
                 "id": 1
             }))
             .send()
             .await?
             .json::<serde_json::Value>()
             .await?;
-
+    
+        // Deserialize the JSON response into a ProcessedTransaction struct
         let tx: ProcessedTransaction = serde_json::from_value(response["result"].clone())?;
+        
+        // Return the deserialized transaction
         Ok(tx)
     }
 }

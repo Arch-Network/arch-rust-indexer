@@ -10,7 +10,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     block_height bigint NOT NULL REFERENCES blocks(height),
     data jsonb NOT NULL,
     status smallint NOT NULL,
-    bitcoin_txids text[] NOT NULL,
+    bitcoin_txids text[],
     created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 

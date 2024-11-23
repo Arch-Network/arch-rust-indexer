@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 tokio = { version = "1.28", features = ["full"] }
 axum = "0.7.9" 
+clap = {  version = "4.3.1", features = ["derive"] }
 sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "json", "chrono"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

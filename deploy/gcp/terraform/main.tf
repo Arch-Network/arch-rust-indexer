@@ -9,7 +9,22 @@ resource "google_sql_database_instance" "instance" {
   region           = var.region
   
   settings {
-    tier = "db-custom-2-7680"
+    tier = "db-custom-4-15360"
+    
+    database_flags {
+      name  = "max_connections"
+      value = "100"
+    }
+    
+    database_flags {
+      name  = "shared_buffers"
+      value = "384000"
+    }
+    
+    database_flags {
+      name  = "effective_cache_size"
+      value = "196608"
+    }
     
     backup_configuration {
       enabled = true
@@ -45,8 +60,8 @@ resource "google_project_service" "redis" {
 // Create Redis instance
 resource "google_redis_instance" "cache" {
   name           = "arch-indexer-cache"
-  tier           = "BASIC"
-  memory_size_gb = 1
+  tier           = "STANDARD_HA"
+  memory_size_gb = 5
   
   region = var.region
   
@@ -62,6 +77,8 @@ resource "google_cloud_run_service" "indexer" {
     metadata {
           annotations = {
             "run.googleapis.com/cloudsql-instances" = google_sql_database_instance.instance.connection_name
+            "run.googleapis.com/cpu-throttling"     = "false"
+            "run.googleapis.com/execution-environment" = "gen2"
           }
         }
     
@@ -84,12 +101,12 @@ resource "google_cloud_run_service" "indexer" {
         
         resources {
           limits = {
-            cpu    = "2000m"     # 2 vCPUs
-            memory = "4Gi"       # 4GB RAM
+            cpu    = "4000m"     # 4 vCPUs
+            memory = "8Gi"       # 8GB RAM
           }
           requests = {
-            cpu    = "1000m"     # 1 vCPU minimum
-            memory = "2Gi"       # 2GB RAM minimum
+            cpu    = "2000m"     # 2 vCPU minimum
+            memory = "4Gi"       # 4GB RAM minimum
           }
         }
 
@@ -116,11 +133,11 @@ resource "google_cloud_run_service" "indexer" {
         }
         env {
           name  = "DATABASE__MAX_CONNECTIONS"
-          value = "20"
+          value = "50"
         }
         env {
           name  = "DATABASE__MIN_CONNECTIONS"
-          value = "5"
+          value = "10"
         }
 
         # ApplicationSettings
@@ -148,11 +165,11 @@ resource "google_cloud_run_service" "indexer" {
         # IndexerSettings
         env {
           name  = "INDEXER__BATCH_SIZE"
-          value = "500"
+          value = "1000"
         }
         env {
           name  = "INDEXER__CONCURRENT_BATCHES"
-          value = "10"
+          value = "20"
         }
 
         ports {
