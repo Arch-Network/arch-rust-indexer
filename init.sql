@@ -9,7 +9,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     txid text PRIMARY KEY,
     block_height bigint NOT NULL REFERENCES blocks(height),
     data jsonb NOT NULL,
-    status smallint NOT NULL,
+    status jsonb NOT NULL, -- Change this line
     bitcoin_txids text[],
     created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
 );

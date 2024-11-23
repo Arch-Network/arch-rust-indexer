@@ -5,6 +5,9 @@ use std::sync::Arc;
 use tokio::time::{Duration, sleep};
 use tracing::{info, warn, error};
 
+use tokio_retry::strategy::{ExponentialBackoff, jitter};
+use tokio_retry::Retry;
+
 use super::block_processor::BlockProcessor;
 
 pub struct ChainSync {
@@ -42,7 +45,8 @@ impl ChainSync {
             }
 
             if current > target_height {
-                break; // Exit the loop if we're already ahead of the target height
+                // If current is greater than target, continue polling for new blocks
+                continue;
             }
 
             let batch_starts: Vec<_> = (0..self.concurrent_batches)
@@ -56,27 +60,23 @@ impl ChainSync {
                     let end = (start + self.batch_size as i64 - 1).min(target_height);
                     let heights: Vec<_> = (start..=end).collect();
                     let processor = Arc::clone(&self.processor);
-                    
+
                     async move {
-                        match processor.process_blocks_batch(heights).await {
-                            Ok(blocks) => {
-                                // for block in &blocks {
-                                //     info!("Processed block {}", block.height);
-                                // }
-                                Ok(blocks)
-                            }
-                            Err(e) => {
-                                error!("Failed to process batch starting at {}: {:?}", start, e);
-                                Err(e)
-                            }
-                        }
+                        let retry_strategy = ExponentialBackoff::from_millis(10)
+                            .map(jitter) // add jitter to delays
+                            .take(5); // retry up to 5 times
+
+                        Retry::spawn(retry_strategy, || async {
+                            processor.process_blocks_batch(heights.clone()).await
+                        })
+                        .await
                     }
                 })
                 .collect();
 
             // Process batches concurrently
             let results = futures::future::join_all(batch_futures).await;
-            
+
             // Update progress
             for result in results {
                 if let Ok(blocks) = result {
@@ -88,8 +88,6 @@ impl ChainSync {
 
             current = self.current_height.load(Ordering::Relaxed);
         }
-
-        Ok(())
     }
 
     async fn sync_blocks(&self) -> Result<()> {

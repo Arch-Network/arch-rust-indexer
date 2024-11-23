@@ -21,7 +21,7 @@
       {
         "ordinal": 3,
         "name": "status",
-        "type_info": "Int4"
+        "type_info": "Jsonb"
       },
       {
         "ordinal": 4,
@@ -31,7 +31,7 @@
       {
         "ordinal": 5,
         "name": "created_at!: NaiveDateTime",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamp"
       }
     ],
     "parameters": {

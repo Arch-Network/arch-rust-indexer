@@ -179,8 +179,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    let current_height = 97935;
-
     // Start the chain sync process
     let sync = ChainSync::new(
         Arc::clone(&processor),

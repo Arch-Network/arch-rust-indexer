@@ -4,16 +4,12 @@ use chrono::Utc;
 use dashmap::DashMap;
 use futures::stream;
 use futures::StreamExt;
-use sqlx::Postgres;
-use sqlx::QueryBuilder;
 use std::fmt::Write;
 use std::sync::Arc;
 use tracing::error;
-use crate::arch_rpc::Block as ArchBlock;
 use crate::arch_rpc::ArchRpcClient;
 use crate::arch_rpc::Block;
 use crate::db::models::Transaction;
-use chrono::NaiveDateTime;
 use sqlx::PgPool;
 use std::sync::atomic::{AtomicU64, AtomicI64};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -146,8 +142,6 @@ impl BlockProcessor {
                             .expect("Failed to serialize transaction data");
                         
                         let bitcoin_txids: Option<&[String]> = transaction.bitcoin_txids.as_deref();
-
-                        // Convert
                 
                         sqlx::query!(
                             r#"
@@ -157,7 +151,7 @@ impl BlockProcessor {
                             transaction.txid,
                             transaction.block_height,
                             serde_json::Value::String(data_json),
-                            transaction.status,
+                            serde_json::Value::String(transaction.status.to_string()),
                             bitcoin_txids,
                             transaction.created_at
                         )
@@ -201,7 +195,7 @@ impl BlockProcessor {
                             txid: txid_clone,
                             block_height: height,
                             data: tx.runtime_transaction,
-                            status: if tx.status == "Processing" { 0 } else { 1 },
+                            status: tx.status,
                             bitcoin_txids: tx.bitcoin_txids,
                             created_at: chrono::Utc::now().naive_utc(),
                         })

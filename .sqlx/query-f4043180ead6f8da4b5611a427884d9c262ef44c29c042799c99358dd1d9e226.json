@@ -16,7 +16,7 @@
       {
         "ordinal": 2,
         "name": "timestamp!: DateTime<Utc>",
-        "type_info": "Timestamptz"
+        "type_info": "Timestamp"
       },
       {
         "ordinal": 3,
