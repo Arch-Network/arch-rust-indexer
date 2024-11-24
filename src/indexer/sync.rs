@@ -45,11 +45,6 @@ impl ChainSync {
                 target_height = new_target_height;
             }
 
-            if current >= target_height {
-                // If current is greater than or equal to target, continue polling for new blocks
-                continue;
-            }
-
             // Check for missing blocks every 10 iterations
             if current % 10 == 0 {
                 if let Ok(missing_blocks) = self.check_for_missing_blocks().await {
