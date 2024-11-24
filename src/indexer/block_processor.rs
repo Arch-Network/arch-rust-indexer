@@ -161,6 +161,11 @@ impl BlockProcessor {
                     for transaction in &transactions {
                         let data_json = serde_json::to_string(&transaction.data)
                             .expect("Failed to serialize transaction data");
+
+                        // Print the bitcoin_txids if they exist
+                        if let Some(bitcoin_txids) = &transaction.bitcoin_txids {
+                            println!("Bitcoin txids: {:?}", bitcoin_txids);
+                        }
                         
                         let bitcoin_txids: Option<&[String]> = transaction.bitcoin_txids.as_deref();
                 
