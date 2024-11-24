@@ -1,5 +1,6 @@
 use anyhow::Result;
 use chrono::DateTime;
+use chrono::TimeZone;
 use chrono::Utc;
 use dashmap::DashMap;
 use futures::stream;
@@ -118,7 +119,7 @@ impl BlockProcessor {
                 "#,
                 height,
                 block.hash,
-                convert_timestamp(block.timestamp).naive_utc(),
+                convert_timestamp(block.timestamp),
                 block.bitcoin_block_height
             )
             .execute(&mut *tx)
@@ -143,6 +144,9 @@ impl BlockProcessor {
                         
                         let bitcoin_txids: Option<&[String]> = transaction.bitcoin_txids.as_deref();
                 
+                        // Convert NaiveDateTime to DateTime<Utc>
+                        let created_at_utc = Utc.from_utc_datetime(&transaction.created_at);
+                
                         sqlx::query!(
                             r#"
                             INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at)
@@ -153,7 +157,7 @@ impl BlockProcessor {
                             serde_json::Value::String(data_json),
                             serde_json::Value::String(transaction.status.to_string()),
                             bitcoin_txids,
-                            transaction.created_at
+                            created_at_utc
                         )
                         .execute(&mut *tx)
                         .await?;
@@ -260,7 +264,7 @@ impl BlockProcessor {
             "#,
             height,
             block_hash,
-            convert_timestamp(block.timestamp).naive_utc(),
+            convert_timestamp(block.timestamp),
             block.bitcoin_block_height
         )
         .execute(&mut *tx)

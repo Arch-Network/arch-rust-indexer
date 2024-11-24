@@ -37,12 +37,16 @@ resource "google_sql_database_instance" "instance" {
 resource "google_sql_database" "database" {
   name     = "archindexer"
   instance = google_sql_database_instance.instance.name
+  
+  depends_on = [google_sql_database_instance.instance]
 }
 
 resource "google_sql_user" "user" {
   name     = var.db_username
   instance = google_sql_database_instance.instance.name
   password = var.db_password
+  
+  depends_on = [google_sql_database_instance.instance]
 }
 
 # Enable required APIs

@@ -11,6 +11,18 @@ if [ -z "$PROJECT_ID" ] || [ -z "$DB_USER" ] || [ -z "$DB_PASSWORD" ]; then
     exit 1
 fi
 
+# Retrieve the instance connection name from Terraform outputs
+cd "$ROOT_DIR/deploy/gcp/terraform"
+DB_INSTANCE=$(terraform output -raw instance_connection_name)
+if [ -z "$DB_INSTANCE" ]; then
+    echo "Error: DB_INSTANCE is not set"
+    exit 1
+fi
+echo "DB_INSTANCE: $DB_INSTANCE"
+
+# Change back to directory
+cd "$ROOT_DIR"
+
 # Build and push Docker image first
 export DOCKER_BUILDKIT=1
 echo "Building and pushing Docker image..."
@@ -18,7 +30,6 @@ docker build --platform linux/amd64 -t gcr.io/$PROJECT_ID/arch-rust-indexer:late
 docker push gcr.io/$PROJECT_ID/arch-rust-indexer:latest
 
 # Create terraform.tfvars
-cd "$ROOT_DIR/deploy/gcp/terraform"
 cat > terraform.tfvars << EOF
 project_id    = "$PROJECT_ID"
 region        = "us-central1"

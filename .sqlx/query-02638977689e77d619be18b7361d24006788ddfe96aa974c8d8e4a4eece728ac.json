@@ -10,7 +10,7 @@
         "Jsonb",
         "Jsonb",
         "TextArray",
-        "Timestamp"
+        "Timestamptz"
       ]
     },
     "nullable": []

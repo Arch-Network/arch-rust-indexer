@@ -31,7 +31,7 @@
       {
         "ordinal": 5,
         "name": "created_at!: NaiveDateTime",
-        "type_info": "Timestamp"
+        "type_info": "Timestamptz"
       }
     ],
     "parameters": {
