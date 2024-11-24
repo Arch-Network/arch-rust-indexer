@@ -1,8 +1,9 @@
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     Json,
 };
-use std::sync::Arc;
+use serde_json::json;
+use std::{collections::HashMap, sync::Arc};
 use sqlx::PgPool;
 use axum::response::IntoResponse;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -262,4 +263,45 @@ pub async fn get_network_stats(
         tps,
         true_tps: tps,
     }))
+}
+
+pub async fn search_handler(
+    Query(params): Query<HashMap<String, String>>,
+    State(pool): State<Arc<PgPool>>,
+) -> impl IntoResponse {
+    // Extract the search term from the query parameters
+    println!("Search params: {:?}", params);
+    if let Some(term) = params.get("term") {
+        // Query the database for transactions with the given term as the transaction ID
+        match sqlx::query!(
+            "SELECT * FROM transactions WHERE txid = $1",
+            term
+        )
+        .fetch_optional(&*pool)
+        .await
+        {
+            Ok(Some(transaction)) => {
+                // Return the transaction details in a JSON response
+                Json(json!({
+                    "txid": transaction.txid,
+                    "block_height": transaction.block_height,
+                    "data": transaction.data,
+                    "status": transaction.status,
+                    "bitcoin_txids": transaction.bitcoin_txids,
+                    "created_at": transaction.created_at,
+                }))
+            }
+            Ok(None) => {
+                // Return an error response if no transaction is found
+                Json(json!({ "error": "Transaction not found" }))
+            }
+            Err(e) => {
+                // Return an error response if the query fails
+                Json(json!({ "error": format!("Database query failed: {:?}", e) }))
+            }
+        }
+    } else {
+        // Return an error response if the term is missing
+        Json(json!({ "error": "Missing search term" }))
+    }
 }

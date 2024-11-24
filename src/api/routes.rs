@@ -17,6 +17,7 @@ pub fn create_router(pool: Arc<PgPool>, processor: Arc<BlockProcessor>) -> Route
             "message": "Arch Indexer API is running"
         }))
     }))
+        .route("/api/search", get(handlers::search_handler))
         .route("/api/blocks", get(handlers::get_blocks))
         .route("/api/blocks/:blockhash", get(handlers::get_block_by_hash))
         .route("/api/blocks/height/:height", get(handlers::get_block_by_height))
