@@ -92,6 +92,16 @@ pub async fn get_sync_status(
     }))
 }
 
+#[derive(serde::Serialize)]
+struct TransactionRecord {
+    txid: String,
+    block_height: i64,
+    data: serde_json::Value,  // Assuming this is also JSONB
+    status: serde_json::Value, // Changed from String to serde_json::Value
+    bitcoin_txids: Option<Vec<String>>,
+    created_at: NaiveDateTime,
+}
+
 pub async fn get_block_by_hash(
     State(pool): State<Arc<PgPool>>,
     Path(blockhash): Path<String>,
@@ -265,43 +275,81 @@ pub async fn get_network_stats(
     }))
 }
 
+
+
 pub async fn search_handler(
     Query(params): Query<HashMap<String, String>>,
     State(pool): State<Arc<PgPool>>,
 ) -> impl IntoResponse {
-    // Extract the search term from the query parameters
-    println!("Search params: {:?}", params);
     if let Some(term) = params.get("term") {
-        // Query the database for transactions with the given term as the transaction ID
-        match sqlx::query!(
-            "SELECT * FROM transactions WHERE txid = $1",
+        // Check if the term is a transaction ID
+        if let Ok(Some(transaction)) = sqlx::query_as!(
+            TransactionRecord,
+            r#"
+            SELECT 
+                txid,
+                block_height,
+                data,
+                status,
+                bitcoin_txids, 
+                created_at as "created_at!: NaiveDateTime"
+            FROM transactions 
+            WHERE txid = $1
+            "#,
             term
         )
         .fetch_optional(&*pool)
         .await
         {
-            Ok(Some(transaction)) => {
-                // Return the transaction details in a JSON response
-                Json(json!({
-                    "txid": transaction.txid,
-                    "block_height": transaction.block_height,
-                    "data": transaction.data,
-                    "status": transaction.status,
-                    "bitcoin_txids": transaction.bitcoin_txids,
-                    "created_at": transaction.created_at,
-                }))
-            }
-            Ok(None) => {
-                // Return an error response if no transaction is found
-                Json(json!({ "error": "Transaction not found" }))
-            }
-            Err(e) => {
-                // Return an error response if the query fails
-                Json(json!({ "error": format!("Database query failed: {:?}", e) }))
+            return Json(json!({ "type": "transaction", "data": transaction }));
+        }
+
+        // Check if the term is a block hash
+        if let Ok(Some(block)) = sqlx::query_as!(
+            Block,
+            r#"
+            SELECT 
+                height,
+                hash,
+                timestamp as "timestamp!: DateTime<Utc>",
+                bitcoin_block_height
+            FROM blocks 
+            WHERE hash = $1
+            "#,
+            term
+        )
+        .fetch_optional(&*pool)
+        .await
+        {
+            return Json(json!({ "type": "block", "data": block }));
+        }
+
+        // Check if the term is a block height
+        if let Ok(height) = term.parse::<i64>() {
+            if let Ok(Some(block)) = sqlx::query_as!(
+                Block,
+                r#"
+                SELECT 
+                    height,
+                    hash,
+                    timestamp as "timestamp!: DateTime<Utc>",
+                    bitcoin_block_height
+                FROM blocks 
+                WHERE height = $1
+                "#,
+                height
+            )
+            .fetch_optional(&*pool)
+            .await
+            {
+                return Json(json!({ "type": "block", "data": block }));
             }
         }
+
+        // If no match is found
+        return Json(json!({ "error": "No matching transaction or block found" }));
     } else {
         // Return an error response if the term is missing
-        Json(json!({ "error": "Missing search term" }))
+        return Json(json!({ "error": "Missing search term" }));
     }
 }
