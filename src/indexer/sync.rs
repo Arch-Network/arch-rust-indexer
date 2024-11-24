@@ -44,7 +44,7 @@ impl ChainSync {
             if new_target_height > target_height {
                 target_height = new_target_height;
             }
-
+    
             // Check for missing blocks every 10 iterations
             if current % 10 == 0 {
                 if let Ok(missing_blocks) = self.check_for_missing_blocks().await {
@@ -57,25 +57,24 @@ impl ChainSync {
                     }
                 }
             }
-
-            // Existing batch processing logic
+    
+            // Adjusted batch processing logic
             let batch_starts: Vec<_> = (0..self.concurrent_batches)
                 .map(|i| current + (i as i64 * self.batch_size as i64))
-                .filter(|&start| start <= target_height)
-                .collect();
-
+                .collect(); // Removed the filter
+    
             let batch_futures: Vec<_> = batch_starts
                 .into_iter()
                 .map(|start| {
                     let end = (start + self.batch_size as i64 - 1).min(target_height);
                     let heights: Vec<_> = (start..=end).collect();
                     let processor = Arc::clone(&self.processor);
-
+    
                     async move {
                         let retry_strategy = ExponentialBackoff::from_millis(10)
                             .map(jitter) // add jitter to delays
                             .take(5); // retry up to 5 times
-
+    
                         Retry::spawn(retry_strategy, || async {
                             processor.process_blocks_batch(heights.clone()).await
                         })
@@ -83,10 +82,10 @@ impl ChainSync {
                     }
                 })
                 .collect();
-
+    
             // Process batches concurrently
             let results = futures::future::join_all(batch_futures).await;
-
+    
             // Update progress
             for result in results {
                 if let Ok(blocks) = result {
@@ -95,7 +94,7 @@ impl ChainSync {
                     }
                 }
             }
-
+    
             current = self.current_height.load(Ordering::Relaxed);
         }
     }
