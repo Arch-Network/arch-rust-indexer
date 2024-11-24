@@ -1,5 +1,6 @@
 use anyhow::Result;
 use futures::stream::{self, StreamExt};
+use sqlx::query_scalar;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::sync::Arc;
 use tokio::time::{Duration, sleep};
@@ -11,7 +12,7 @@ use tokio_retry::Retry;
 use super::block_processor::BlockProcessor;
 
 pub struct ChainSync {
-    processor: Arc<BlockProcessor>,
+    pub processor: Arc<BlockProcessor>,
     current_height: AtomicI64,
     batch_size: usize,
     concurrent_batches: usize,
@@ -49,6 +50,20 @@ impl ChainSync {
                 continue;
             }
 
+            // Check for missing blocks every 10 iterations
+            if current % 10 == 0 {
+                if let Ok(missing_blocks) = self.check_for_missing_blocks().await {
+                    if !missing_blocks.is_empty() {
+                        info!("Found missing blocks: {:?}", missing_blocks);
+                        // Fetch and process missing blocks
+                        for height in missing_blocks {
+                            self.processor.process_block(height).await?;
+                        }
+                    }
+                }
+            }
+
+            // Existing batch processing logic
             let batch_starts: Vec<_> = (0..self.concurrent_batches)
                 .map(|i| current + (i as i64 * self.batch_size as i64))
                 .filter(|&start| start <= target_height)
@@ -88,6 +103,31 @@ impl ChainSync {
 
             current = self.current_height.load(Ordering::Relaxed);
         }
+    }
+
+
+    async fn check_for_missing_blocks(&self) -> Result<Vec<i64>> {
+        // Query to find missing block heights
+        let missing_blocks: Vec<i64> = query_scalar!(
+            r#"
+            WITH bounds AS (
+                SELECT MIN(height) AS min_height, MAX(height) AS max_height
+                FROM blocks
+            )
+            SELECT gs.height
+            FROM generate_series((SELECT min_height FROM bounds), (SELECT max_height FROM bounds)) AS gs(height)
+            WHERE NOT EXISTS (
+                SELECT 1 FROM blocks WHERE height = gs.height
+            )
+            "#
+        )
+        .fetch_all(&self.processor.pool)
+        .await?
+        .into_iter()
+        .filter_map(|height| height) // Filter out None values
+        .collect();
+    
+        Ok(missing_blocks)
     }
 
     async fn sync_blocks(&self) -> Result<()> {

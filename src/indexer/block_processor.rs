@@ -18,7 +18,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 pub struct BlockProcessor {
-    pool: PgPool,
+    pub pool: PgPool,
     block_cache: DashMap<i64, Block>,
     redis: redis::Client,
     pub arch_client: Arc<ArchRpcClient>,
@@ -56,20 +56,40 @@ impl BlockProcessor {
     }
 
     async fn fetch_blocks_batch(&self, heights: Vec<i64>) -> Result<Vec<(i64, Block)>> {
+        let retry_limit = 3;
+        let retry_delay = Duration::from_secs(1);
+
         let futures: Vec<_> = heights
             .into_iter()
             .map(|height| {
                 let client = Arc::clone(&self.arch_client);
                 async move {
-                    match async {
-                        let block_hash = client.get_block_hash(height).await?;
-                        let block = client.get_block(&block_hash, height).await?;
-                        Ok::<_, anyhow::Error>((height, block))
-                    }.await {
-                        Ok(result) => Some(result),
-                        Err(e) => {
-                            error!("Failed to fetch block {}: {:?}", height, e);
-                            None
+                    let mut attempts = 0;
+                    loop {
+                        match async {
+                            let block_hash = client.get_block_hash(height).await?;
+                            let block = client.get_block(&block_hash, height).await?;
+                            Ok::<_, anyhow::Error>((height, block))
+                        }.await {
+                            Ok(result) => return Some(result),
+                            Err(e) => {
+                                attempts += 1;
+                                if attempts >= retry_limit {
+                                    if let Some(e) = e.downcast_ref::<serde_json::Error>() {
+                                        if e.is_eof() {
+                                            error!("Failed to fetch block {}: expected value at line 1 column 1", height);
+                                        } else {
+                                            error!("Failed to fetch block {}: {:?}", height, e);
+                                        }
+                                    } else {
+                                        error!("Failed to fetch block {}: {:?}", height, e);
+                                    }
+                                    return None;
+                                } else {
+                                    error!("Error fetching block {}: {:?}. Retrying {}/{}", height, e, attempts, retry_limit);
+                                    tokio::time::sleep(retry_delay).await;
+                                }
+                            }
                         }
                     }
                 }
