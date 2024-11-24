@@ -36,32 +36,40 @@ impl ChainSync {
     pub async fn start(&self) -> Result<()> {
         let mut current = self.current_height.load(Ordering::Relaxed);
         let mut target_height = self.processor.arch_client.get_block_count().await?;
-
+    
         loop {
-            // Continuously check for a new target_height every second
-            sleep(Duration::from_secs(1)).await;
+            // sleep(Duration::from_secs(1)).await;
             let new_target_height = self.processor.arch_client.get_block_count().await?;
+            
+            // Update target height if new blocks exist
             if new_target_height > target_height {
                 target_height = new_target_height;
             }
     
-            // Check for missing blocks every 10 iterations
-            if current % 10 == 0 {
-                if let Ok(missing_blocks) = self.check_for_missing_blocks().await {
-                    if !missing_blocks.is_empty() {
-                        info!("Found missing blocks: {:?}", missing_blocks);
-                        // Fetch and process missing blocks
-                        for height in missing_blocks {
-                            self.processor.process_block(height).await?;
-                        }
-                    }
-                }
+            // Skip processing if we're caught up
+            if current >= target_height {
+                continue;
             }
     
-            // Adjusted batch processing logic
-            let batch_starts: Vec<_> = (0..self.concurrent_batches)
-                .map(|i| current + (i as i64 * self.batch_size as i64))
-                .collect(); // Removed the filter
+            // Use smaller batches when near the tip
+            let remaining_blocks = target_height - current;
+            let effective_batch_size = if remaining_blocks < (self.batch_size as i64) {
+                1 // Process one by one when near the tip
+            } else {
+                self.batch_size
+            };
+    
+            let effective_concurrent_batches = if remaining_blocks < (self.batch_size as i64) {
+                1 // Use single batch when near the tip
+            } else {
+                self.concurrent_batches
+            };
+    
+            // Rest of the batch processing logic...
+            let batch_starts: Vec<_> = (0..effective_concurrent_batches)
+                .map(|i| current + (i as i64 * effective_batch_size as i64))
+                .filter(|&start| start <= target_height)
+                .collect();
     
             let batch_futures: Vec<_> = batch_starts
                 .into_iter()
