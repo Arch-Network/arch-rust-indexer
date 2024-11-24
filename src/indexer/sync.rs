@@ -45,8 +45,8 @@ impl ChainSync {
                 target_height = new_target_height;
             }
 
-            if current > target_height {
-                // If current is greater than target, continue polling for new blocks
+            if current >= target_height {
+                // If current is greater than or equal to target, continue polling for new blocks
                 continue;
             }
 
