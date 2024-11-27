@@ -8,6 +8,7 @@ pub struct Block {
     pub hash: String,
     pub timestamp: DateTime<Utc>,
     pub bitcoin_block_height: Option<i64>,
+    pub transaction_count: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -27,4 +28,5 @@ pub struct BlockWithTransactions {
     pub timestamp: DateTime<Utc>,
     pub bitcoin_block_height: Option<i64>,
     pub transaction_count: i64,
+    pub transactions: Option<Vec<Transaction>>,
 }

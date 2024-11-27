@@ -14,9 +14,9 @@ use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::Bl
 
 pub async fn get_blocks(
     State(pool): State<Arc<PgPool>>,
-) -> Result<Json<Vec<BlockWithTransactions>>, ApiError> {
+) -> Result<Json<Vec<Block>>, ApiError> {
     let blocks = sqlx::query_as!(
-        BlockWithTransactions,
+        Block,
         r#"
         SELECT 
             b.height,
@@ -108,41 +108,71 @@ struct TransactionRecord {
 pub async fn get_block_by_hash(
     State(pool): State<Arc<PgPool>>,
     Path(blockhash): Path<String>,
-) -> Result<Json<Block>, ApiError> {
-    let block = sqlx::query_as!(
-        Block,
+) -> Result<Json<BlockWithTransactions>, ApiError> {
+    let rows = sqlx::query!(
         r#"
+        WITH block_info AS (
+            SELECT 
+                b.height,
+                b.hash,
+                b.timestamp,
+                b.bitcoin_block_height,
+                COUNT(DISTINCT t.txid) as transaction_count
+            FROM blocks b 
+            LEFT JOIN transactions t ON b.height = t.block_height
+            WHERE b.hash = $1
+            GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height
+        )
         SELECT 
             b.height,
             b.hash,
             b.timestamp as "timestamp!: DateTime<Utc>",
-            b.bitcoin_block_height
-        FROM blocks b 
-        WHERE b.hash = $1
+            b.bitcoin_block_height,
+            b.transaction_count as "transaction_count!: i64",
+            t.txid,
+            t.block_height,
+            t.data,
+            t.status,
+            t.bitcoin_txids,
+            t.created_at as "created_at!: NaiveDateTime"
+        FROM block_info b
+        LEFT JOIN transactions t ON b.height = t.block_height
         "#,
         blockhash
     )
-    .fetch_optional(&*pool)
-    .await?
-    .ok_or(ApiError::NotFound)?;
-    let _transactions = sqlx::query_as!(
-        Transaction,
-        r#"
-            SELECT 
-            txid, 
-            block_height, 
-            data, 
-            status, 
-            bitcoin_txids,
-            created_at as "created_at!: NaiveDateTime"
-        FROM transactions 
-        WHERE block_height = $1
-        "#,
-        block.height
-    )
     .fetch_all(&*pool)
     .await?;
-    // Returning the block with its transactions
+
+    if rows.is_empty() {
+        return Err(ApiError::NotFound);
+    }
+
+    let first_row = &rows[0];
+    let mut block = BlockWithTransactions {
+        height: first_row.height,
+        hash: first_row.hash.clone(),
+        timestamp: first_row.timestamp,
+        bitcoin_block_height: first_row.bitcoin_block_height,
+        transaction_count: first_row.transaction_count,
+        transactions: Some(Vec::new()),
+    };
+
+    let transactions: Vec<Transaction> = rows
+        .iter()
+        .filter_map(|row| {
+            row.txid.as_ref().map(|txid| Transaction {
+                txid: txid.clone(),
+                block_height: row.block_height.unwrap_or_default(),
+                data: row.data.clone().unwrap_or_default(),
+                status: row.status.clone().unwrap_or_default(),
+                bitcoin_txids: row.bitcoin_txids.clone(),
+                created_at: row.created_at,
+            })
+        })
+        .collect();
+
+    block.transactions = Some(transactions);
+
     Ok(Json(block))
 }
 
@@ -155,12 +185,15 @@ pub async fn get_block_by_height(
         Block,
         r#"
         SELECT 
-            height,
-            hash,
-            timestamp as "timestamp!: DateTime<Utc>",
-            bitcoin_block_height
-        FROM blocks
-        WHERE height = $1
+            b.height,
+            b.hash,
+            b.timestamp as "timestamp!: DateTime<Utc>",
+            b.bitcoin_block_height,
+            COUNT(t.txid) as "transaction_count!: i64"
+        FROM blocks b
+        LEFT JOIN transactions t ON b.height = t.block_height
+        WHERE b.height = $1
+        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height
         "#,
         height as i64
     )
@@ -306,7 +339,7 @@ pub async fn search_handler(
 
         // Check if the term is a block hash
         if let Ok(Some(block)) = sqlx::query_as!(
-            BlockWithTransactions,  // Changed from Block to BlockWithTransactions
+            Block,
             r#"
             SELECT 
                 b.height,
@@ -330,7 +363,7 @@ pub async fn search_handler(
         // Check if the term is a block height
         if let Ok(height) = term.parse::<i64>() {
             if let Ok(Some(block)) = sqlx::query_as!(
-                BlockWithTransactions,  // Changed from Block to BlockWithTransactions
+                Block,
                 r#"
                 SELECT 
                     b.height,
