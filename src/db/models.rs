@@ -19,3 +19,12 @@ pub struct Transaction {
     pub bitcoin_txids: Option<Vec<String>>,
     pub created_at: chrono::NaiveDateTime,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct BlockWithTransactions {
+    pub height: i64,
+    pub hash: String,
+    pub timestamp: DateTime<Utc>,
+    pub bitcoin_block_height: Option<i64>,
+    pub transaction_count: i64,
+}

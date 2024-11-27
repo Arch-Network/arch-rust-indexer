@@ -16,6 +16,7 @@ pub struct Block {
     pub timestamp: i64,
     pub bitcoin_block_height: Option<i64>,
     pub transactions: Vec<String>,
+    pub transaction_count: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -127,6 +128,7 @@ impl ArchRpcClient {
             timestamp: block_response.timestamp,
             bitcoin_block_height: block_response.bitcoin_block_height,
             transactions: block_response.transactions,
+            transaction_count: block_response.transaction_count,
         };
     
         // tracing::info!("Block in get_block: {:?}", block);
