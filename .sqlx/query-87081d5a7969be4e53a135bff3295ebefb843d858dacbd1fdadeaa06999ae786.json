@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at)\n            VALUES ($1, $2, $3, $4, $5, $6)\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Jsonb",
+        "Jsonb",
+        "TextArray",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "87081d5a7969be4e53a135bff3295ebefb843d858dacbd1fdadeaa06999ae786"
+}

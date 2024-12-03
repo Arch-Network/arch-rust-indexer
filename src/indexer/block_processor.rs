@@ -43,6 +43,81 @@ impl BlockProcessor {
         }
     }
 
+    pub async fn process_transaction(&self, transaction: &Transaction, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<(), anyhow::Error> {
+        // First insert the transaction
+        let data_json = serde_json::to_string(&transaction.data)
+            .expect("Failed to serialize transaction data");
+        
+        let bitcoin_txids: Option<&[String]> = transaction.bitcoin_txids.as_deref();
+        let created_at_utc = Utc.from_utc_datetime(&transaction.created_at);
+        
+        // Insert the transaction
+        sqlx::query!(
+            r#"
+            INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            "#,
+            transaction.txid,
+            transaction.block_height,
+            serde_json::Value::String(data_json),
+            serde_json::Value::String(transaction.status.to_string()),
+            bitcoin_txids,
+            created_at_utc
+        )
+        .execute(&mut **tx)
+        .await?;
+
+        // Extract and process program IDs from the transaction data
+        if let Some(message) = transaction.data.get("message") {
+            if let Some(instructions) = message.get("instructions") {
+                if let Some(instructions_array) = instructions.as_array() {
+                    for instruction in instructions_array {
+                        if let Some(program_id) = instruction.get("program_id") {
+                            if let Some(program_id_array) = program_id.as_array() {
+                                // Convert byte array to base58 string
+                                let bytes: Vec<u8> = program_id_array
+                                    .iter()
+                                    .filter_map(|v| v.as_u64().map(|n| n as u8))
+                                    .collect();
+                                let program_id_str = bs58::encode(bytes).into_string();
+                                
+                                // Update programs table
+                                sqlx::query!(
+                                    r#"
+                                    INSERT INTO programs (program_id)
+                                    VALUES ($1)
+                                    ON CONFLICT (program_id) 
+                                    DO UPDATE SET 
+                                        last_seen_at = CURRENT_TIMESTAMP,
+                                        transaction_count = programs.transaction_count + 1
+                                    "#,
+                                    program_id_str
+                                )
+                                .execute(&mut **tx)
+                                .await?;
+                                
+                                // Insert into transaction_programs
+                                sqlx::query!(
+                                    r#"
+                                    INSERT INTO transaction_programs (txid, program_id)
+                                    VALUES ($1, $2)
+                                    ON CONFLICT DO NOTHING
+                                    "#,
+                                    transaction.txid,
+                                    program_id_str
+                                )
+                                .execute(&mut **tx)
+                                .await?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn get_current_block_height(&self) -> i64 {
         self.current_block_height.load(Ordering::Relaxed)
     }
@@ -159,34 +234,8 @@ impl BlockProcessor {
                 // Use batch insert for efficient insertion
                 if !transactions.is_empty() {
                     for transaction in &transactions {
-                        let data_json = serde_json::to_string(&transaction.data)
-                            .expect("Failed to serialize transaction data");
-
-                        // Print the bitcoin_txids if they exist
-                        if let Some(bitcoin_txids) = &transaction.bitcoin_txids {
-                            println!("Bitcoin txids: {:?}", bitcoin_txids);
-                        }
-                        
-                        let bitcoin_txids: Option<&[String]> = transaction.bitcoin_txids.as_deref();
-                
-                        // Convert NaiveDateTime to DateTime<Utc>
-                        let created_at_utc = Utc.from_utc_datetime(&transaction.created_at);
-                
-                        sqlx::query!(
-                            r#"
-                            INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at)
-                            VALUES ($1, $2, $3, $4, $5, $6)
-                            "#,
-                            transaction.txid,
-                            transaction.block_height,
-                            serde_json::Value::String(data_json),
-                            serde_json::Value::String(transaction.status.to_string()),
-                            bitcoin_txids,
-                            created_at_utc
-                        )
-                        .execute(&mut *tx)
-                        .await?;
-                    }
+                        self.process_transaction(transaction, &mut tx).await?;
+                    } 
                 }
             }
         }
@@ -297,31 +346,9 @@ impl BlockProcessor {
 
         // Batch insert transactions using COPY
         if !transactions.is_empty() {
-            let mut copy = String::new();
-            for tx in &transactions {
-                let data_json = serde_json::to_string(&tx.data).expect("Failed to serialize transaction data");
-                writeln!(
-                    &mut copy,
-                    "{}\t{}\t{}\t{}\t{}\t{}",  // Added new tab for created_at
-                    tx.txid,
-                    tx.block_height,
-                    data_json,
-                    tx.status,
-                    tx.bitcoin_txids
-                        .as_ref()
-                        .map(|txids| txids.join(","))
-                        .unwrap_or_default(),
-                    tx.created_at  // Add created_at to the COPY
-                )?;
+            for transaction in &transactions {
+                self.process_transaction(transaction, &mut tx).await?;
             }
-        
-            let copy_statement = format!(
-                "COPY transactions (txid, block_height, data, status, bitcoin_txids, created_at) FROM STDIN"  // Added created_at
-            );
-            
-            sqlx::query(&copy_statement)
-                .execute(&mut *tx)
-                .await?;
         }
 
         tx.commit().await?;

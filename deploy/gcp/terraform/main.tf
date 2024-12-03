@@ -88,7 +88,7 @@ resource "google_cloud_run_service" "indexer" {
     
     spec {
       containers {
-        image = "gcr.io/${var.project_id}/arch-rust-indexer:latest"
+        image = "gcr.io/${var.project_id}/arch-rust-indexer:fe2ab9c"
 
         env {
           name  = "APPLICATION__CORS_ALLOW_ORIGIN"

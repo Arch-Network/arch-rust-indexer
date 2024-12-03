@@ -256,6 +256,34 @@ pub async fn get_transaction(
     }
 }
 
+fn extract_program_ids(data: &serde_json::Value) -> Vec<String> {
+    let mut program_ids = Vec::new();
+    
+    if let Some(message) = data.get("message") {
+        if let Some(instructions) = message.get("instructions") {
+            if let Some(instructions_array) = instructions.as_array() {
+                for instruction in instructions_array {
+                    if let Some(program_id) = instruction.get("program_id") {
+                        if let Some(program_id_array) = program_id.as_array() {
+                            // Convert byte array to base58 string
+                            let bytes: Vec<u8> = program_id_array
+                                .iter()
+                                .filter_map(|v| v.as_u64().map(|n| n as u8))
+                                .collect();
+                            let program_id_str = bs58::encode(bytes).into_string();
+                            program_ids.push(program_id_str);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    
+    program_ids.sort();
+    program_ids.dedup();
+    program_ids
+}
+
 
 pub async fn get_network_stats(
     State(pool): State<Arc<PgPool>>,
@@ -391,4 +419,43 @@ pub async fn search_handler(
         // Return an error response if the term is missing
         return Json(json!({ "error": "Missing search term" }));
     }
+}
+
+pub async fn get_transactions_by_program(
+    State(pool): State<Arc<PgPool>>,
+    Path(program_id): Path<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<Vec<Transaction>>, ApiError> {
+    let limit = params.get("limit")
+        .and_then(|l| l.parse::<i64>().ok())
+        .unwrap_or(100);
+    
+    let offset = params.get("offset")
+        .and_then(|o| o.parse::<i64>().ok())
+        .unwrap_or(0);
+
+    let transactions = sqlx::query_as!(
+        Transaction,
+        r#"
+        SELECT DISTINCT 
+            t.txid,
+            t.block_height,
+            t.data,
+            t.status,
+            t.bitcoin_txids,
+            t.created_at as "created_at!: NaiveDateTime"
+        FROM transactions t
+        JOIN transaction_programs tp ON t.txid = tp.txid
+        WHERE tp.program_id = $1
+        ORDER BY t.block_height DESC
+        LIMIT $2 OFFSET $3
+        "#,
+        program_id,
+        limit,
+        offset
+    )
+    .fetch_all(&*pool)
+    .await?;
+
+    Ok(Json(transactions))
 }
