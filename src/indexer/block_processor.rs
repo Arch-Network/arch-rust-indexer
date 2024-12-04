@@ -119,7 +119,7 @@ impl BlockProcessor {
     }
 
     pub fn get_current_block_height(&self) -> i64 {
-        self.current_block_height.load(Ordering::Relaxed)
+        self.current_block_height.load(Ordering::SeqCst)
     }
 
     pub fn get_average_block_time(&self) -> u64 {
@@ -305,7 +305,7 @@ impl BlockProcessor {
     }
 
 
-    pub async fn process_block(&self, height: i64) -> Result<Block> {
+    pub async fn process_block(&self, height: i64) -> Result<Block, anyhow::Error> {
         let start_time = std::time::Instant::now();
 
         let block_hash = self.arch_client.get_block_hash(height).await?;
@@ -353,8 +353,14 @@ impl BlockProcessor {
 
         tx.commit().await?;
 
+        self.update_current_height(height);
+        
         self.update_sync_metrics(height, start_time.elapsed());
         
         Ok(block)
+    }
+
+    pub fn update_current_height(&self, height: i64) {
+        self.current_block_height.store(height, Ordering::SeqCst);
     }
 }
