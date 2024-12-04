@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at)\n            VALUES ($1, $2, $3, $4, $5, $6)\n            ON CONFLICT (txid) DO UPDATE \n            SET block_height = $2, data = $3, status = $4, bitcoin_txids = $5, created_at = $6\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Jsonb",
+        "Jsonb",
+        "TextArray",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "da254273d28a53c84451fd5415459b2b51f14d5ad417ec1d4e206a0b4785d461"
+}

@@ -135,6 +135,14 @@ async fn main() -> Result<()> {
 
     info!("Successfully initialized block processor");
 
+    // Run sync_missing_program_data in a separate task
+    let processor_clone = Arc::clone(&processor);
+    tokio::spawn(async move {
+        if let Err(e) = processor_clone.sync_missing_program_data().await {
+            error!("Failed to sync missing program data: {:?}", e);
+        }
+    });
+
     let cors = CorsLayer::new()
         .allow_origin(settings.application.cors_allow_origin.parse::<HeaderValue>().unwrap_or_else(|_| {
             HeaderValue::from_static("*")

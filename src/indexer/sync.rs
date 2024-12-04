@@ -36,9 +36,47 @@ impl ChainSync {
     pub async fn start(&self) -> Result<()> {
         let mut current = self.current_height.load(Ordering::Relaxed);
         let mut target_height = self.processor.arch_client.get_block_count().await?;
-    
+        let missing_blocks_check_interval = Duration::from_secs(300); // Check every 5 minutes
+
+        // Run initial missing blocks check on startup
+        info!("Running initial missing blocks check on startup...");
+        let missing_blocks = self.check_for_missing_blocks().await?;
+        
+        if !missing_blocks.is_empty() {
+            info!("Found {} missing blocks, resyncing...", missing_blocks.len());
+            for chunk in missing_blocks.chunks(self.batch_size) {
+                let heights: Vec<i64> = chunk.to_vec();
+                match self.processor.process_blocks_batch(heights).await {
+                    Ok(_) => info!("Resynced blocks {}-{}", chunk[0], chunk[chunk.len()-1]),
+                    Err(e) => error!("Error resyncing blocks: {}", e),
+                }
+            }
+        } else {
+            info!("No missing blocks found on startup");
+        }
+
+        let mut last_missing_check = std::time::Instant::now();
+
         loop {
-            // sleep(Duration::from_secs(1)).await;
+            // Check for missing blocks periodically
+            if last_missing_check.elapsed() >= missing_blocks_check_interval {
+                info!("Checking for missing blocks...");
+                let missing_blocks = self.check_for_missing_blocks().await?;
+                
+                if !missing_blocks.is_empty() {
+                    info!("Found {} missing blocks, resyncing...", missing_blocks.len());
+                    // Process missing blocks in batches
+                    for chunk in missing_blocks.chunks(self.batch_size) {
+                        let heights: Vec<i64> = chunk.to_vec();
+                        match self.processor.process_blocks_batch(heights).await {
+                            Ok(_) => info!("Resynced blocks {}-{}", chunk[0], chunk[chunk.len()-1]),
+                            Err(e) => error!("Error resyncing blocks: {}", e),
+                        }
+                    }
+                }
+                last_missing_check = std::time::Instant::now();
+            }
+
             let new_target_height = self.processor.arch_client.get_block_count().await?;
             
             // Update target height if new blocks exist
@@ -48,6 +86,7 @@ impl ChainSync {
     
             // Skip processing if we're caught up
             if current >= target_height {
+                sleep(Duration::from_secs(1)).await;
                 continue;
             }
     
@@ -109,26 +148,61 @@ impl ChainSync {
 
 
     async fn check_for_missing_blocks(&self) -> Result<Vec<i64>> {
-        // Query to find missing block heights
-        let missing_blocks: Vec<i64> = query_scalar!(
+        // Get the overall bounds
+        let bounds = sqlx::query!(
             r#"
-            WITH bounds AS (
-                SELECT MIN(height) AS min_height, MAX(height) AS max_height
-                FROM blocks
-            )
-            SELECT gs.height
-            FROM generate_series((SELECT min_height FROM bounds), (SELECT max_height FROM bounds)) AS gs(height)
-            WHERE NOT EXISTS (
-                SELECT 1 FROM blocks WHERE height = gs.height
-            )
+            SELECT MIN(height) AS min_height, MAX(height) AS max_height
+            FROM blocks
             "#
         )
-        .fetch_all(&self.processor.pool)
-        .await?
-        .into_iter()
-        .filter_map(|height| height) // Filter out None values
-        .collect();
-    
+        .fetch_one(&self.processor.pool)
+        .await?;
+
+        let min_height = bounds.min_height.unwrap_or(0);
+        let max_height = bounds.max_height.unwrap_or(0);
+        let chunk_size = 100_000; // Check 100k blocks at a time
+        let mut missing_blocks = Vec::new();
+
+        // Process in chunks
+        for chunk_start in (min_height..=max_height).step_by(chunk_size) {
+            let chunk_end = (chunk_start + chunk_size as i64 - 1).min(max_height);
+            
+            let chunk_missing = sqlx::query_scalar!(
+                r#"
+                WITH chunk_bounds AS (
+                    SELECT 
+                        $1::bigint as chunk_start,
+                        $2::bigint as chunk_end
+                ),
+                expected AS (
+                    SELECT generate_series(chunk_start, chunk_end) as height
+                    FROM chunk_bounds
+                )
+                SELECT e.height
+                FROM expected e
+                LEFT JOIN blocks b ON b.height = e.height
+                WHERE b.height IS NULL
+                ORDER BY e.height
+                "#,
+                chunk_start,
+                chunk_end
+            )
+            .fetch_all(&self.processor.pool)
+            .await?;
+
+            missing_blocks.extend(chunk_missing.into_iter().flatten());
+
+            // Log progress periodically
+            if missing_blocks.len() % 1000 == 0 {
+                info!(
+                    "Checking for gaps: {:.1}% ({}/{})", 
+                    (chunk_end - min_height) as f64 / (max_height - min_height) as f64 * 100.0,
+                    chunk_end,
+                    max_height
+                );
+            }
+        }
+
         Ok(missing_blocks)
     }
 

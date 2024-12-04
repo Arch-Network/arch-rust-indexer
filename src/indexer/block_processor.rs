@@ -45,7 +45,7 @@ impl BlockProcessor {
 
     pub async fn process_transaction(&self, transaction: &Transaction, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<(), anyhow::Error> {
         // First insert the transaction
-        let data_json = serde_json::to_string(&transaction.data)
+        let data_json = serde_json::to_value(&transaction.data)
             .expect("Failed to serialize transaction data");
         
         let bitcoin_txids: Option<&[String]> = transaction.bitcoin_txids.as_deref();
@@ -56,10 +56,12 @@ impl BlockProcessor {
             r#"
             INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at)
             VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (txid) DO UPDATE 
+            SET block_height = $2, data = $3, status = $4, bitcoin_txids = $5, created_at = $6
             "#,
             transaction.txid,
             transaction.block_height,
-            serde_json::Value::String(data_json),
+            data_json,
             serde_json::Value::String(transaction.status.to_string()),
             bitcoin_txids,
             created_at_utc
@@ -67,20 +69,24 @@ impl BlockProcessor {
         .execute(&mut **tx)
         .await?;
 
-        // Extract and process program IDs from the transaction data
+        // Extract program IDs directly from the transaction data
         if let Some(message) = transaction.data.get("message") {
             if let Some(instructions) = message.get("instructions") {
                 if let Some(instructions_array) = instructions.as_array() {
                     for instruction in instructions_array {
                         if let Some(program_id) = instruction.get("program_id") {
-                            if let Some(program_id_array) = program_id.as_array() {
-                                // Convert byte array to base58 string
-                                let bytes: Vec<u8> = program_id_array
-                                    .iter()
-                                    .filter_map(|v| v.as_u64().map(|n| n as u8))
-                                    .collect();
-                                let program_id_str = bs58::encode(bytes).into_string();
-                                
+                            let program_id_str = match program_id {
+                                serde_json::Value::String(s) => Some(s.clone()),
+                                serde_json::Value::Array(arr) => {
+                                    let bytes: Vec<u8> = arr.iter()
+                                        .filter_map(|v| v.as_u64().map(|n| n as u8))
+                                        .collect();
+                                    Some(bs58::encode(bytes).into_string())
+                                },
+                                _ => None
+                            };
+
+                            if let Some(program_id) = program_id_str {
                                 // Update programs table
                                 sqlx::query!(
                                     r#"
@@ -91,7 +97,7 @@ impl BlockProcessor {
                                         last_seen_at = CURRENT_TIMESTAMP,
                                         transaction_count = programs.transaction_count + 1
                                     "#,
-                                    program_id_str
+                                    program_id
                                 )
                                 .execute(&mut **tx)
                                 .await?;
@@ -104,7 +110,7 @@ impl BlockProcessor {
                                     ON CONFLICT DO NOTHING
                                     "#,
                                     transaction.txid,
-                                    program_id_str
+                                    program_id
                                 )
                                 .execute(&mut **tx)
                                 .await?;
@@ -133,6 +139,7 @@ impl BlockProcessor {
     async fn fetch_blocks_batch(&self, heights: Vec<i64>) -> Result<Vec<(i64, Block)>> {
         let retry_limit = 3;
         let retry_delay = Duration::from_secs(1);
+        let backoff_multiplier = 2; // Each retry will wait longer
 
         let futures: Vec<_> = heights
             .into_iter()
@@ -140,6 +147,8 @@ impl BlockProcessor {
                 let client = Arc::clone(&self.arch_client);
                 async move {
                     let mut attempts = 0;
+                    let mut current_delay = retry_delay;
+
                     loop {
                         match async {
                             let block_hash = client.get_block_hash(height).await?;
@@ -150,19 +159,23 @@ impl BlockProcessor {
                             Err(e) => {
                                 attempts += 1;
                                 if attempts >= retry_limit {
-                                    if let Some(e) = e.downcast_ref::<serde_json::Error>() {
-                                        if e.is_eof() {
-                                            error!("Failed to fetch block {}: expected value at line 1 column 1", height);
-                                        } else {
-                                            error!("Failed to fetch block {}: {:?}", height, e);
-                                        }
-                                    } else {
-                                        error!("Failed to fetch block {}: {:?}", height, e);
-                                    }
+                                    error!(
+                                        "Failed to fetch block {} after {} attempts: {}",
+                                        height, retry_limit, e
+                                    );
                                     return None;
                                 } else {
-                                    error!("Error fetching block {}: {:?}. Retrying {}/{}", height, e, attempts, retry_limit);
-                                    tokio::time::sleep(retry_delay).await;
+                                    error!(
+                                        "Error fetching block {}: {}. Retrying {}/{} after {} ms",
+                                        height,
+                                        e,
+                                        attempts,
+                                        retry_limit,
+                                        current_delay.as_millis()
+                                    );
+                                    tokio::time::sleep(current_delay).await;
+                                    // Increase delay for next retry
+                                    current_delay *= backoff_multiplier;
                                 }
                             }
                         }
@@ -182,9 +195,14 @@ impl BlockProcessor {
     }
 
     pub async fn process_blocks_batch(&self, heights: Vec<i64>) -> Result<Vec<Block>> {
+
+        println!("Processing blocks batch {:?}", heights);
+        
         let start_time = std::time::Instant::now();
         let heights_clone = heights.clone();
         let blocks = self.fetch_blocks_batch(heights_clone).await?;
+
+        println!("Fetched {} blocks", blocks.len());
     
         // Start database transaction
         let mut tx = self.pool.begin().await?;
@@ -238,6 +256,9 @@ impl BlockProcessor {
                     } 
                 }
             }
+
+            // Add this line to update the height
+            self.update_current_height(*height);
         }
     
         tx.commit().await?;
@@ -362,5 +383,75 @@ impl BlockProcessor {
 
     pub fn update_current_height(&self, height: i64) {
         self.current_block_height.store(height, Ordering::SeqCst);
+    }
+
+    pub async fn sync_missing_program_data(&self) -> Result<(), anyhow::Error> {
+        println!("Starting to sync missing program data...");
+        
+        let mut tx = self.pool.begin().await?;
+        
+        // Simplified query that doesn't rely on CTEs
+        let rows = sqlx::query!(
+            r#"
+            SELECT 
+                t.txid,
+                jsonb_array_elements(
+                    CASE 
+                        WHEN jsonb_typeof(t.data#>'{message,instructions}') = 'array' 
+                        THEN t.data#>'{message,instructions}' 
+                        ELSE '[]'::jsonb 
+                    END
+                )->>'program_id' as program_id
+            FROM transactions t
+            WHERE NOT EXISTS (
+                SELECT 1 FROM transaction_programs tp 
+                WHERE tp.txid = t.txid
+            )
+            "#
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+
+        let mut count = 0;
+        for row in rows {
+            if let Some(program_id) = row.program_id {
+                // Insert into programs and transaction_programs tables
+                sqlx::query!(
+                    r#"
+                    INSERT INTO programs (program_id)
+                    VALUES ($1)
+                    ON CONFLICT (program_id) DO UPDATE SET 
+                        last_seen_at = CURRENT_TIMESTAMP,
+                        transaction_count = programs.transaction_count + 1
+                    "#,
+                    program_id
+                )
+                .execute(&mut *tx)
+                .await?;
+                
+                sqlx::query!(
+                    r#"
+                    INSERT INTO transaction_programs (txid, program_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT DO NOTHING
+                    "#,
+                    row.txid,
+                    program_id
+                )
+                .execute(&mut *tx)
+                .await?;
+
+                count += 1;
+                if count % 1000 == 0 {
+                    println!("Processed {} transactions", count);
+                    tx.commit().await?;
+                    tx = self.pool.begin().await?;
+                }
+            }
+        }
+
+        tx.commit().await?;
+        println!("Finished syncing program data. Processed {} total transactions", count);
+        Ok(())
     }
 }
