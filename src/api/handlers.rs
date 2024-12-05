@@ -9,7 +9,7 @@ use axum::response::IntoResponse;
 use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, NaiveDateTime, Utc};
 
-use super::types::{ApiError, NetworkStats, SyncStatus};
+use super::types::{ApiError, NetworkStats, SyncStatus, ProgramStats};
 use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::BlockProcessor};
 
 pub async fn get_blocks(
@@ -458,4 +458,26 @@ pub async fn get_transactions_by_program(
     .await?;
 
     Ok(Json(transactions))
+}
+
+pub async fn get_program_leaderboard(
+    State(pool): State<Arc<PgPool>>,
+) -> Result<Json<Vec<ProgramStats>>, ApiError> {
+    let programs = sqlx::query_as!(
+        ProgramStats,
+        r#"
+        SELECT 
+            program_id,
+            transaction_count,
+            first_seen_at as "first_seen_at!: DateTime<Utc>",
+            last_seen_at as "last_seen_at!: DateTime<Utc>"
+        FROM programs
+        ORDER BY transaction_count DESC
+        LIMIT 10
+        "#
+    )
+    .fetch_all(&*pool)
+    .await?;
+
+    Ok(Json(programs))
 }

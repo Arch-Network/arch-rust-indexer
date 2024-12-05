@@ -25,6 +25,7 @@ pub fn create_router(pool: Arc<PgPool>, processor: Arc<BlockProcessor>) -> Route
         .route("/api/transactions/:txid", get(handlers::get_transaction))
         .route("/api/network-stats", get(handlers::get_network_stats))
         .route("/api/programs/:program_id/transactions", get(handlers::get_transactions_by_program))
+        .route("/api/programs/leaderboard", get(handlers::get_program_leaderboard))
         .with_state(pool)
         .nest("/api", Router::new()
             .route("/sync-status", get(handlers::get_sync_status))

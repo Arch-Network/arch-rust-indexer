@@ -56,3 +56,11 @@ pub struct SyncStatus {
     pub elapsed_time: String,
     pub average_block_time: String,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProgramStats {
+    pub program_id: String,
+    pub transaction_count: i64,
+    pub first_seen_at: chrono::DateTime<chrono::Utc>,
+    pub last_seen_at: chrono::DateTime<chrono::Utc>,
+}
