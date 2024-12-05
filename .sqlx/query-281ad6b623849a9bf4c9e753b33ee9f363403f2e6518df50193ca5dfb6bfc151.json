@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n        SELECT \n            b.height,\n            b.hash,\n            b.timestamp as \"timestamp!: DateTime<Utc>\",\n            b.bitcoin_block_height,\n            COUNT(t.txid) as \"transaction_count!: i64\"\n        FROM blocks b \n        LEFT JOIN transactions t ON b.height = t.block_height\n        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height\n        ORDER BY b.height DESC \n        LIMIT 200\n        ",
+  "query": "\n            SELECT \n                b.height,\n                b.hash,\n                b.timestamp as \"timestamp!: DateTime<Utc>\",\n                b.bitcoin_block_height,\n                COUNT(t.txid) as \"transaction_count!: i64\"\n            FROM blocks b \n            LEFT JOIN transactions t ON b.height = t.block_height\n            WHERE t.txid IS NOT NULL\n            GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height\n            ORDER BY b.height DESC \n            LIMIT $1 OFFSET $2\n            ",
   "describe": {
     "columns": [
       {
@@ -30,7 +30,10 @@
       }
     ],
     "parameters": {
-      "Left": []
+      "Left": [
+        "Int8",
+        "Int8"
+      ]
     },
     "nullable": [
       false,
@@ -40,5 +43,5 @@
       null
     ]
   },
-  "hash": "d9826b9a2c79ca46e132d09df2628b5025b4da2a8653d05296ee0dfc200eeeee"
+  "hash": "281ad6b623849a9bf4c9e753b33ee9f363403f2e6518df50193ca5dfb6bfc151"
 }

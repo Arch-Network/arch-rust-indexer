@@ -12,9 +12,25 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use super::types::{ApiError, NetworkStats, SyncStatus, ProgramStats};
 use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::BlockProcessor};
 
+impl From<serde_json::Error> for ApiError {
+    fn from(err: serde_json::Error) -> Self {
+        ApiError::Serialization(err.to_string())
+    }
+}
+
 pub async fn get_blocks(
     State(pool): State<Arc<PgPool>>,
-) -> Result<Json<Vec<Block>>, ApiError> {
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<HashMap<String, serde_json::Value>>, ApiError> {
+    let limit = params.get("limit")
+        .and_then(|l| l.parse::<i64>().ok())
+        .unwrap_or(200); // Default limit
+
+    let offset = params.get("offset")
+        .and_then(|o| o.parse::<i64>().ok())
+        .unwrap_or(0); // Default offset
+
+    // Query to get the paginated blocks
     let blocks = sqlx::query_as!(
         Block,
         r#"
@@ -28,13 +44,29 @@ pub async fn get_blocks(
         LEFT JOIN transactions t ON b.height = t.block_height
         GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height
         ORDER BY b.height DESC 
-        LIMIT 200
-        "#
+        LIMIT $1 OFFSET $2
+        "#,
+        limit,
+        offset
     )
     .fetch_all(&*pool)
     .await?;
 
-    Ok(Json(blocks))
+    // Query to get the total count of blocks
+    let total_count = sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(*) FROM blocks
+        "#
+    )
+    .fetch_one(&*pool)
+    .await?;
+
+    // Prepare the response
+    let mut response = HashMap::new();
+    response.insert("total_count".to_string(), serde_json::Value::from(total_count));
+    response.insert("blocks".to_string(), serde_json::to_value(blocks)?);
+
+    Ok(Json(response))
 }
 
 fn format_time(seconds: f64) -> String {

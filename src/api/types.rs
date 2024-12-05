@@ -14,6 +14,8 @@ pub enum ApiError {
     Database(#[from] sqlx::Error),
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
+    #[error("Serialization error: {0}")]
+    Serialization(String),
 }
 
 impl IntoResponse for ApiError {
@@ -22,6 +24,7 @@ impl IntoResponse for ApiError {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "Resource not found"),
             ApiError::Database(ref _e) => (StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
             ApiError::Internal(ref _e) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
+            ApiError::Serialization(ref _e) => (StatusCode::INTERNAL_SERVER_ERROR, "Serialization error"),
         };
 
         let body = Json(ErrorResponse {
