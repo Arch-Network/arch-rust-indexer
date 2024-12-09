@@ -9,11 +9,11 @@ resource "google_sql_database_instance" "instance" {
   region           = var.region
   
   settings {
-    tier = "db-custom-4-15360"
+    tier = "db-custom-2-7680"
     
     database_flags {
       name  = "max_connections"
-      value = "100"
+      value = "200"
     }
     
     database_flags {
@@ -64,8 +64,8 @@ resource "google_project_service" "redis" {
 // Create Redis instance
 resource "google_redis_instance" "cache" {
   name           = "arch-indexer-cache"
-  tier           = "STANDARD_HA"
-  memory_size_gb = 5
+  tier           = "BASIC"
+  memory_size_gb = 2
   
   region = var.region
   
@@ -88,7 +88,7 @@ resource "google_cloud_run_service" "indexer" {
     
     spec {
       containers {
-        image = "gcr.io/${var.project_id}/arch-rust-indexer:fe2ab9c"
+        image = "gcr.io/${var.project_id}/arch-rust-indexer:latest"
 
         env {
           name  = "APPLICATION__CORS_ALLOW_ORIGIN"
@@ -105,12 +105,12 @@ resource "google_cloud_run_service" "indexer" {
         
         resources {
           limits = {
-            cpu    = "4000m"     # 4 vCPUs
-            memory = "8Gi"       # 8GB RAM
+            cpu    = "4000m"     # Reduced from 8 to 4 vCPUs
+            memory = "8Gi"       # Reduced from 16GB to 8GB
           }
           requests = {
-            cpu    = "2000m"     # 2 vCPU minimum
-            memory = "4Gi"       # 4GB RAM minimum
+            cpu    = "2000m"     # Reduced from 4 to 2 vCPUs
+            memory = "4Gi"       # Reduced from 8GB to 4GB
           }
         }
 
@@ -137,11 +137,11 @@ resource "google_cloud_run_service" "indexer" {
         }
         env {
           name  = "DATABASE__MAX_CONNECTIONS"
-          value = "50"
+          value = "30"
         }
         env {
           name  = "DATABASE__MIN_CONNECTIONS"
-          value = "10"
+          value = "5"
         }
 
         # ApplicationSettings
@@ -169,11 +169,11 @@ resource "google_cloud_run_service" "indexer" {
         # IndexerSettings
         env {
           name  = "INDEXER__BATCH_SIZE"
-          value = "1000"
+          value = "2000"
         }
         env {
           name  = "INDEXER__CONCURRENT_BATCHES"
-          value = "20"
+          value = "40"
         }
 
         ports {
@@ -216,4 +216,12 @@ resource "google_cloud_run_service_iam_member" "public" {
 # Add service URL to outputs
 output "service_url" {
   value = google_cloud_run_service.indexer.status[0].url
+}
+
+output "redis_host" {
+  value = google_redis_instance.cache.host
+}
+
+output "redis_port" {
+  value = google_redis_instance.cache.port
 }
