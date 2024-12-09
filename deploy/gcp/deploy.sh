@@ -24,10 +24,10 @@ echo "DB_INSTANCE: $DB_INSTANCE"
 cd "$ROOT_DIR"
 
 # Build and push Docker image first
-export DOCKER_BUILDKIT=1
-echo "Building and pushing Docker image..."
-docker build --platform linux/amd64 -t gcr.io/$PROJECT_ID/arch-rust-indexer:latest .
-docker push gcr.io/$PROJECT_ID/arch-rust-indexer:latest
+# export DOCKER_BUILDKIT=1
+# echo "Building and pushing Docker image..."
+# docker build --platform linux/amd64 -t gcr.io/$PROJECT_ID/arch-rust-indexer:latest .
+# docker push gcr.io/$PROJECT_ID/arch-rust-indexer:latest
 
 # Create terraform.tfvars
 cat > terraform.tfvars << EOF

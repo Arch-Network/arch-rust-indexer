@@ -8,6 +8,7 @@ use sqlx::PgPool;
 use axum::response::IntoResponse;
 use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, NaiveDateTime, Utc};
+use hex;
 
 use super::types::{ApiError, NetworkStats, SyncStatus, ProgramStats};
 use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::BlockProcessor};
@@ -30,6 +31,10 @@ pub async fn get_blocks(
         .and_then(|o| o.parse::<i64>().ok())
         .unwrap_or(0); // Default offset
 
+    let filter_no_transactions = params.get("filter_no_transactions")
+        .map(|v| v == "true")
+        .unwrap_or(false);
+
     // Query to get the paginated blocks
     let blocks = sqlx::query_as!(
         Block,
@@ -43,23 +48,39 @@ pub async fn get_blocks(
         FROM blocks b 
         LEFT JOIN transactions t ON b.height = t.block_height
         GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height
+        HAVING COUNT(t.txid) > 0 OR NOT $3
         ORDER BY b.height DESC 
         LIMIT $1 OFFSET $2
         "#,
         limit,
-        offset
+        offset,
+        filter_no_transactions
     )
     .fetch_all(&*pool)
     .await?;
 
     // Query to get the total count of blocks
-    let total_count = sqlx::query_scalar!(
-        r#"
-        SELECT COUNT(*) FROM blocks
-        "#
-    )
-    .fetch_one(&*pool)
-    .await?;
+    let total_count = if filter_no_transactions {
+        sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(DISTINCT b.height) 
+            FROM blocks b
+            LEFT JOIN transactions t ON b.height = t.block_height
+            GROUP BY b.height
+            HAVING COUNT(t.txid) > 0
+            "#
+        )
+        .fetch_one(&*pool)
+        .await?
+    } else {
+        sqlx::query_scalar!(
+            r#"
+            SELECT COUNT(*) FROM blocks
+            "#
+        )
+        .fetch_one(&*pool)
+        .await?
+    };
 
     // Prepare the response
     let mut response = HashMap::new();
@@ -296,15 +317,19 @@ fn extract_program_ids(data: &serde_json::Value) -> Vec<String> {
             if let Some(instructions_array) = instructions.as_array() {
                 for instruction in instructions_array {
                     if let Some(program_id) = instruction.get("program_id") {
-                        if let Some(program_id_array) = program_id.as_array() {
-                            // Convert byte array to base58 string
-                            let bytes: Vec<u8> = program_id_array
-                                .iter()
-                                .filter_map(|v| v.as_u64().map(|n| n as u8))
-                                .collect();
-                            let program_id_str = bs58::encode(bytes).into_string();
-                            program_ids.push(program_id_str);
-                        }
+                        let program_id_str = match program_id {
+                            serde_json::Value::String(s) => s.clone(),
+                            serde_json::Value::Array(arr) => {
+                                // Convert byte array to hex string
+                                let bytes: Vec<u8> = arr
+                                    .iter()
+                                    .filter_map(|v| v.as_i64().map(|n| n as u8))
+                                    .collect();
+                                hex::encode(bytes)
+                            }
+                            _ => continue,
+                        };
+                        program_ids.push(program_id_str);
                     }
                 }
             }
@@ -322,49 +347,49 @@ pub async fn get_network_stats(
 ) -> Result<Json<NetworkStats>, ApiError> {
     let stats = sqlx::query!(
         r#"
-        WITH recent_blocks AS (
-            SELECT height, timestamp
-            FROM blocks
-            WHERE height > (SELECT MAX(height) - 100 FROM blocks)
-        ),
-        time_range AS (
+        WITH time_windows AS (
             SELECT 
-                COUNT(*) as block_count,
-                MAX(height) as max_height,
-                EXTRACT(EPOCH FROM (MAX(timestamp) - MIN(timestamp))) as time_span
-            FROM recent_blocks
-        ),
-        tx_counts AS (
-            SELECT COUNT(*) as total_tx
+                COUNT(*) as total_tx,
+                (SELECT COUNT(*) FROM transactions 
+                 WHERE created_at >= NOW() - INTERVAL '24 hours') as daily_tx,
+                (SELECT COUNT(*) FROM transactions 
+                 WHERE created_at >= NOW() - INTERVAL '1 hour') as hourly_tx,
+                (SELECT COUNT(*) FROM transactions 
+                 WHERE created_at >= NOW() - INTERVAL '1 minute') as minute_tx,
+                (SELECT MAX(height) FROM blocks) as max_height,
+                (SELECT COUNT(*) / 60 as peak_tps FROM transactions 
+                 WHERE created_at >= NOW() - INTERVAL '24 hours'
+                 GROUP BY DATE_TRUNC('minute', created_at)
+                 ORDER BY peak_tps DESC
+                 LIMIT 1) as peak_tps
             FROM transactions
         )
         SELECT 
-            tr.max_height,
-            tr.time_span::float8 as time_span,
-            tc.total_tx
-        FROM time_range tr, tx_counts tc
+            total_tx,
+            daily_tx,
+            hourly_tx,
+            minute_tx,
+            max_height,
+            COALESCE(peak_tps, 0) as peak_tps
+        FROM time_windows
         "#
     )
     .fetch_one(&*pool)
     .await?;
 
-    // Calculate transactions per second (TPS)
-    let tps = if let Some(time_span) = stats.time_span {
-        if time_span > 0.0 {
-            stats.total_tx.unwrap_or(0) as f64 / time_span
-        } else {
-            0.0
-        }
-    } else {
-        0.0
-    };
+    // Calculate different TPS metrics
+    let current_tps = stats.minute_tx.unwrap_or(0) as f64 / 60.0;
+    let average_tps = stats.hourly_tx.unwrap_or(0) as f64 / 3600.0;
+    let peak_tps = stats.peak_tps.unwrap_or(0) as f64;
 
     Ok(Json(NetworkStats {
         total_transactions: stats.total_tx.unwrap_or(0),
         block_height: stats.max_height.unwrap_or(0),
         slot_height: stats.max_height.unwrap_or(0),
-        tps,
-        true_tps: tps,
+        current_tps,
+        average_tps,
+        peak_tps,
+        daily_transactions: stats.daily_tx.unwrap_or(0)
     }))
 }
 
@@ -457,15 +482,16 @@ pub async fn get_transactions_by_program(
     State(pool): State<Arc<PgPool>>,
     Path(program_id): Path<String>,
     Query(params): Query<HashMap<String, String>>,
-) -> Result<Json<Vec<Transaction>>, ApiError> {
+) -> Result<Json<HashMap<String, serde_json::Value>>, ApiError> {
     let limit = params.get("limit")
         .and_then(|l| l.parse::<i64>().ok())
-        .unwrap_or(100);
+        .unwrap_or(100); // Default limit of 100
     
     let offset = params.get("offset")
         .and_then(|o| o.parse::<i64>().ok())
         .unwrap_or(0);
 
+    // Get paginated transactions
     let transactions = sqlx::query_as!(
         Transaction,
         r#"
@@ -489,7 +515,26 @@ pub async fn get_transactions_by_program(
     .fetch_all(&*pool)
     .await?;
 
-    Ok(Json(transactions))
+    // Get total count of transactions for this program
+    let total_count = sqlx::query_scalar!(
+        r#"
+        SELECT COUNT(DISTINCT t.txid)
+        FROM transactions t
+        JOIN transaction_programs tp ON t.txid = tp.txid
+        WHERE tp.program_id = $1
+        "#,
+        program_id
+    )
+    .fetch_one(&*pool)
+    .await?
+    .unwrap_or(0);
+
+    // Prepare the response
+    let mut response = HashMap::new();
+    response.insert("total_count".to_string(), serde_json::Value::from(total_count));
+    response.insert("transactions".to_string(), serde_json::to_value(transactions)?);
+
+    Ok(Json(response))
 }
 
 pub async fn get_program_leaderboard(

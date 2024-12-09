@@ -37,35 +37,27 @@ impl ChainSync {
         let mut current = self.current_height.load(Ordering::Relaxed);
         let mut target_height = self.processor.arch_client.get_block_count().await?;
         let missing_blocks_check_interval = Duration::from_secs(300); // Check every 5 minutes
-
-        // Run initial missing blocks check on startup
-        info!("Running initial missing blocks check on startup...");
-        let missing_blocks = self.check_for_missing_blocks().await?;
-        
-        if !missing_blocks.is_empty() {
-            info!("Found {} missing blocks, resyncing...", missing_blocks.len());
-            for chunk in missing_blocks.chunks(self.batch_size) {
-                let heights: Vec<i64> = chunk.to_vec();
-                match self.processor.process_blocks_batch(heights).await {
-                    Ok(_) => info!("Resynced blocks {}-{}", chunk[0], chunk[chunk.len()-1]),
-                    Err(e) => error!("Error resyncing blocks: {}", e),
-                }
-            }
-        } else {
-            info!("No missing blocks found on startup");
-        }
+        let missing_programs_check_interval = Duration::from_secs(600); // Check every 10 minutes
 
         let mut last_missing_check = std::time::Instant::now();
+        let mut last_programs_check = std::time::Instant::now();
+        let mut initial_sync_complete = false;
 
         loop {
-            // Check for missing blocks periodically
-            if last_missing_check.elapsed() >= missing_blocks_check_interval {
-                info!("Checking for missing blocks...");
+            let new_target_height = self.processor.arch_client.get_block_count().await?;
+            
+            // Update target height if new blocks exist
+            if new_target_height > target_height {
+                target_height = new_target_height;
+            }
+
+            // Check if we've caught up to the chain tip
+            if current >= target_height && !initial_sync_complete {
+                info!("Initial sync complete, checking for missing blocks...");
                 let missing_blocks = self.check_for_missing_blocks().await?;
                 
                 if !missing_blocks.is_empty() {
                     info!("Found {} missing blocks, resyncing...", missing_blocks.len());
-                    // Process missing blocks in batches
                     for chunk in missing_blocks.chunks(self.batch_size) {
                         let heights: Vec<i64> = chunk.to_vec();
                         match self.processor.process_blocks_batch(heights).await {
@@ -74,22 +66,45 @@ impl ChainSync {
                         }
                     }
                 }
-                last_missing_check = std::time::Instant::now();
+                initial_sync_complete = true;
             }
 
-            let new_target_height = self.processor.arch_client.get_block_count().await?;
-            
-            // Update target height if new blocks exist
-            if new_target_height > target_height {
-                target_height = new_target_height;
+            // Only perform periodic checks after initial sync is complete
+            if initial_sync_complete {
+                // Check for missing blocks periodically
+                if last_missing_check.elapsed() >= missing_blocks_check_interval {
+                    info!("Performing periodic missing blocks check...");
+                    let missing_blocks = self.check_for_missing_blocks().await?;
+                    
+                    if !missing_blocks.is_empty() {
+                        info!("Found {} missing blocks, resyncing...", missing_blocks.len());
+                        for chunk in missing_blocks.chunks(self.batch_size) {
+                            let heights: Vec<i64> = chunk.to_vec();
+                            match self.processor.process_blocks_batch(heights).await {
+                                Ok(_) => info!("Resynced blocks {}-{}", chunk[0], chunk[chunk.len()-1]),
+                                Err(e) => error!("Error resyncing blocks: {}", e),
+                            }
+                        }
+                    }
+                    last_missing_check = std::time::Instant::now();
+                }
+
+                // Check for missing program data periodically
+                if last_programs_check.elapsed() >= missing_programs_check_interval {
+                    info!("Checking for missing program data...");
+                    if let Err(e) = self.processor.sync_missing_program_data().await {
+                        error!("Error syncing missing program data: {}", e);
+                    }
+                    last_programs_check = std::time::Instant::now();
+                }
             }
-    
+
             // Skip processing if we're caught up
             if current >= target_height {
                 sleep(Duration::from_secs(1)).await;
                 continue;
             }
-    
+
             // Use smaller batches when near the tip
             let remaining_blocks = target_height - current;
             let effective_batch_size = if remaining_blocks < (self.batch_size as i64) {

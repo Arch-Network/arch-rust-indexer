@@ -128,6 +128,7 @@ dependencies = [
  "dashmap",
  "dotenv",
  "futures",
+ "hex",
  "http-body-util",
  "hyper 0.14.31",
  "metrics",

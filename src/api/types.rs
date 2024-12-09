@@ -45,8 +45,10 @@ pub struct NetworkStats {
     pub total_transactions: i64,
     pub block_height: i64,
     pub slot_height: i64,
-    pub tps: f64,
-    pub true_tps: f64,
+    pub current_tps: f64,
+    pub average_tps: f64,
+    pub peak_tps: f64,
+    pub daily_transactions: i64
 }
 
 #[derive(Serialize)]
