@@ -17,6 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use std::sync::atomic::Ordering;
 use std::time::Duration;
 use hex;
+use tracing::info;
 
 pub struct BlockProcessor {
     pub pool: PgPool,
@@ -29,12 +30,13 @@ pub struct BlockProcessor {
 }
 
 impl BlockProcessor {
-    pub fn new(pool: PgPool, redis: redis::Client, arch_client: ArchRpcClient) -> Self {
+    pub fn new(pool: PgPool, redis: redis::Client, arch_client: Arc<ArchRpcClient>) -> Self {
+        info!("Initializing BlockProcessor...");
         Self {
             pool,
             block_cache: DashMap::new(),
             redis,
-            arch_client: Arc::new(arch_client),
+            arch_client,
             sync_start_time: AtomicU64::new(SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap()
@@ -344,7 +346,7 @@ impl BlockProcessor {
         }
 
         // Prepare block insert
-        sqlx::query!(
+        let result = sqlx::query!(
             r#"
             INSERT INTO blocks (height, hash, timestamp, bitcoin_block_height)
             VALUES ($1, $2, $3, $4)
@@ -367,6 +369,8 @@ impl BlockProcessor {
         }
 
         tx.commit().await?;
+
+        println!("Processed block {} with {} transactions", height, transactions.len());
 
         self.update_current_height(height);
         

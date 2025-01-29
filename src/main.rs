@@ -15,7 +15,7 @@ use axum::{
 };
 use serde_json::json;
 use sqlx::postgres::PgPoolOptions;
-use tracing::{error, info};
+use tracing::{error, info, warn};
 use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::signal;
@@ -130,7 +130,7 @@ async fn main() -> Result<()> {
     let processor = Arc::new(BlockProcessor::new(
         pool.clone(),
         redis_client,
-        arch_client.clone(),
+        Arc::new(arch_client.clone()),
     ));
 
     info!("Successfully initialized block processor");
@@ -215,6 +215,9 @@ async fn main() -> Result<()> {
 
     // Wait for sync to complete
     sync_handle.await??;
+
+    info!("Starting Arch Indexer service...");
+    info!("API server listening on {}", addr);
 
     Ok(())
 }
