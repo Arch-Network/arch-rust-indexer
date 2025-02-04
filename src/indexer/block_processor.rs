@@ -107,7 +107,7 @@ impl BlockProcessor {
             transaction.txid,
             transaction.block_height as i32,
             data_json,
-            serde_json::Value::Number(serde_json::Number::from(0)),
+            serde_json::Value::String(transaction.status.to_string()),
             bitcoin_txids,
             created_at_utc
         )
@@ -299,7 +299,7 @@ impl BlockProcessor {
             }
         };
         
-        let transactions = stream::iter(block.transactions)
+        let transactions: Vec<Transaction> = stream::iter(block.transactions)
             .map(|txid| {
                 let client = Arc::clone(&self.arch_client);
                 let txid_clone = txid.clone();

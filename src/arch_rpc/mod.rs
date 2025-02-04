@@ -2,6 +2,8 @@ use anyhow::Result;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
+use std::time::Duration;
+use tracing::error;
 
 #[derive(Debug, Clone)]
 pub struct ArchRpcClient {
@@ -84,23 +86,45 @@ impl ArchRpcClient {
     }
 
     pub async fn get_block_hash(&self, height: i64) -> Result<String> {
-        let response = self.client
-            .post(&self.url)
-            .json(&json!({
-                "jsonrpc": "2.0",
-                "method": "get_block_hash",
-                "params": height,
-                "id": 1
-            }))
-            .send()
-            .await?
-            .json::<serde_json::Value>()
-            .await?;
+        let mut attempts = 0;
+        let max_attempts = 3;
+        let mut delay = Duration::from_millis(500);
 
-        // tracing::info!("Response: {:?}", response);
-        println!("Hash Response: {:?}", response);
+        while attempts < max_attempts {
+            match self.client
+                .post(&self.url)
+                .json(&json!({
+                    "jsonrpc": "2.0",
+                    "method": "get_block_hash",
+                    "params": height,
+                    "id": 1
+                }))
+                .send()
+                .await
+            {
+                Ok(response) => {
+                    match response.json::<serde_json::Value>().await {
+                        Ok(json) => {
+                            if let Some(error) = json.get("error") {
+                                error!("RPC error for height {}: {:?}", height, error);
+                            } else {
+                                return Ok(json["result"].as_str().unwrap_or("").to_string());
+                            }
+                        },
+                        Err(e) => error!("JSON decode error for height {}: {}", height, e),
+                    }
+                },
+                Err(e) => error!("Request error for height {}: {}", height, e),
+            }
 
-        Ok(response["result"].as_str().unwrap_or("").to_string())
+            attempts += 1;
+            if attempts < max_attempts {
+                tokio::time::sleep(delay).await;
+                delay *= 2; // Exponential backoff
+            }
+        }
+
+        Err(anyhow::anyhow!("Failed to get block hash after {} attempts", max_attempts))
     }
 
     pub async fn get_block(&self, hash: &str, height: i64) -> Result<Block> {
