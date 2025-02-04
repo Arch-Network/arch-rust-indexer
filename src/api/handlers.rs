@@ -9,6 +9,7 @@ use axum::response::IntoResponse;
 use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use hex;
+use tracing::{info, debug, error};
 
 use super::types::{ApiError, NetworkStats, SyncStatus, ProgramStats};
 use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::BlockProcessor};
@@ -206,7 +207,7 @@ pub async fn get_block_by_hash(
         height: block.height,
         hash: block.hash,
         timestamp: block.timestamp,
-        bitcoin_block_height: block.bitcoin_block_height,
+        bitcoin_block_height: block.bitcoin_block_height.unwrap(),
         transaction_count: block.transaction_count,
         transactions: Some(transactions),
     }))
@@ -328,7 +329,9 @@ fn extract_program_ids(data: &serde_json::Value) -> Vec<String> {
 pub async fn get_network_stats(
     State(pool): State<Arc<PgPool>>,
 ) -> Result<Json<NetworkStats>, ApiError> {
-    let stats = sqlx::query!(
+    info!("Fetching network stats...");
+    
+    let stats = match sqlx::query!(
         r#"
         WITH time_windows AS (
             SELECT 
@@ -358,14 +361,29 @@ pub async fn get_network_stats(
         "#
     )
     .fetch_one(&*pool)
-    .await?;
+    .await {
+        Ok(stats) => {
+            info!("Successfully fetched network stats");
+            debug!("Raw stats: {:?}", stats);
+            stats
+        }
+        Err(e) => {
+            error!("Failed to fetch network stats: {:?}", e);
+            return Err(ApiError::Database(e));
+        }
+    };
 
-    // Calculate different TPS metrics
+    // Calculate different TPS metrics with logging
     let current_tps = stats.minute_tx.unwrap_or(0) as f64 / 60.0;
     let average_tps = stats.hourly_tx.unwrap_or(0) as f64 / 3600.0;
     let peak_tps = stats.peak_tps.unwrap_or(0) as f64;
 
-    Ok(Json(NetworkStats {
+    debug!("Calculated metrics:");
+    debug!("  Current TPS: {}", current_tps);
+    debug!("  Average TPS: {}", average_tps);
+    debug!("  Peak TPS: {}", peak_tps);
+
+    let response = NetworkStats {
         total_transactions: stats.total_tx.unwrap_or(0),
         block_height: stats.max_height.unwrap_or(0),
         slot_height: stats.max_height.unwrap_or(0),
@@ -373,7 +391,12 @@ pub async fn get_network_stats(
         average_tps,
         peak_tps,
         daily_transactions: stats.daily_tx.unwrap_or(0)
-    }))
+    };
+
+    info!("Network stats response prepared successfully");
+    debug!("Final response: {:?}", response);
+
+    Ok(Json(response))
 }
 
 

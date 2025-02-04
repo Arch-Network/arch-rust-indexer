@@ -98,6 +98,7 @@ impl ArchRpcClient {
             .await?;
 
         // tracing::info!("Response: {:?}", response);
+        println!("Hash Response: {:?}", response);
 
         Ok(response["result"].as_str().unwrap_or("").to_string())
     }
@@ -117,7 +118,7 @@ impl ArchRpcClient {
             .await?;
     
         // tracing::info!("Response result: {:?}", response["result"]);
-        
+        println!("Block response result: {:?}", response["result"]);
         // Deserialize into the intermediate struct
         let block_response: BlockResponse = serde_json::from_value(response["result"].clone())?;
         

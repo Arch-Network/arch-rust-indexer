@@ -105,9 +105,9 @@ impl BlockProcessor {
             SET block_height = $2, data = $3, status = $4, bitcoin_txids = $5, created_at = $6
             "#,
             transaction.txid,
-            transaction.block_height,
+            transaction.block_height as i32,
             data_json,
-            serde_json::Value::String(transaction.status.to_string()),
+            serde_json::Value::Number(serde_json::Number::from(0)),
             bitcoin_txids,
             created_at_utc
         )
@@ -273,40 +273,63 @@ impl BlockProcessor {
     }
 
     async fn fetch_block_transactions(&self, height: i64) -> Result<Vec<Transaction>, anyhow::Error> {
-        let block_hash = self.arch_client.get_block_hash(height).await?;
-        let block = self.arch_client.get_block(&block_hash, height).await?;
+        println!("Starting fetch_block_transactions for height: {}", height);
+        
+        let block_hash = match self.arch_client.get_block_hash(height).await {
+            Ok(hash) => {
+                println!("Successfully retrieved block hash: {}", hash);
+                hash
+            },
+            Err(e) => {
+                println!("Failed to get block hash for height {}", height);
+                println!("Error details: {:?}", e);
+                println!("Raw error: {}", e);
+                return Err(anyhow::anyhow!("Failed to get block hash: {}", e));
+            }
+        };
+        
+        let block = match self.arch_client.get_block(&block_hash, height).await {
+            Ok(block) => {
+                println!("Got block with {} transactions", block.transactions.len());
+                block
+            },
+            Err(e) => {
+                println!("Failed to get block: {:?}", e);
+                return Err(anyhow::anyhow!("Failed to get block: {}", e));
+            }
+        };
         
         let transactions = stream::iter(block.transactions)
-        .map(|txid| {
-            let client: Arc<ArchRpcClient> = Arc::clone(&self.arch_client);
-            let txid_clone = txid.clone();
-            async move {
-                match client.get_processed_transaction(&txid_clone).await {
-                    Ok(tx) => {
-                        // Handle bitcoin_txids similar to Node.js code
-                        //let bitcoin_txids = tx.bitcoin_txids.as_ref().map(|txids| txids.join(",")).unwrap_or_else(|| "{}".to_string());
-
-                        Some(Transaction {
-                            txid: txid_clone,
-                            block_height: height,
-                            data: tx.runtime_transaction,
-                            status: tx.status,
-                            bitcoin_txids: tx.bitcoin_txids,
-                            created_at: chrono::Utc::now().naive_utc(),
-                        })
-                    },
-                    Err(e) => {
-                        error!("Failed to fetch transaction {}: {:?}", txid, e);
-                        None
+            .map(|txid| {
+                let client = Arc::clone(&self.arch_client);
+                let txid_clone = txid.clone();
+                async move {
+                    println!("Fetching transaction: {}", txid_clone);
+                    match client.get_processed_transaction(&txid_clone).await {
+                        Ok(tx) => {
+                            println!("Successfully processed transaction: {}", txid_clone);
+                            Some(Transaction {
+                                txid: txid_clone,
+                                block_height: height,
+                                data: tx.runtime_transaction,
+                                status: tx.status,
+                                bitcoin_txids: tx.bitcoin_txids,
+                                created_at: chrono::Utc::now().naive_utc(),
+                            })
+                        },
+                        Err(e) => {
+                            println!("Failed to fetch transaction {}: {:?}", txid_clone, e);
+                            None
+                        }
                     }
                 }
-            }
-        })
-        .buffer_unordered(10)
-        .filter_map(|result| async move { result })
-        .collect()
-        .await;
-    
+            })
+            .buffer_unordered(10)
+            .filter_map(|result| async move { result })
+            .collect()
+            .await;
+
+        println!("Completed fetch_block_transactions for height: {}", height);
         Ok(transactions)
     }
 
@@ -321,16 +344,63 @@ impl BlockProcessor {
         Ok(height)
     }
 
-
     pub async fn process_block(&self, height: i64) -> Result<Block, anyhow::Error> {
         let start_time = std::time::Instant::now();
 
-        let block_hash = self.arch_client.get_block_hash(height).await?;
-        let block = self.arch_client.get_block(&block_hash, height).await?;
-        let transactions = self.fetch_block_transactions(height).await?;
+        // Get block hash with detailed error handling
+        println!("Fetching block hash for height: {}", height);
+        let block_hash = match self.arch_client.get_block_hash(height).await {
+            Ok(hash) => {
+                println!("Successfully retrieved block hash: {}", hash);
+                hash
+            },
+            Err(e) => {
+                println!("Failed to get block hash for height {}", height);
+                println!("Error details: {:?}", e);
+                println!("Raw error: {}", e);
+                return Err(anyhow::anyhow!("Failed to get block hash: {}", e));
+            }
+        };
+
+        // Get block with detailed error handling
+        println!("Fetching block data for hash: {}", block_hash);
+        let block = match self.arch_client.get_block(&block_hash, height).await {
+            Ok(block) => {
+                println!("Successfully retrieved block: {:?}", block);
+                block
+            },
+            Err(e) => {
+                println!("Failed to get block for hash {}: {:?}", block_hash, e);
+                return Err(anyhow::anyhow!("Failed to get block: {}", e));
+            }
+        };
+
+        // Fetch transactions with detailed error handling
+        println!("Fetching transactions for block height: {}", height);
+        let transactions = match self.fetch_block_transactions(height).await {
+            Ok(txs) => {
+                println!("Successfully retrieved {} transactions", txs.len());
+                txs
+            },
+            Err(e) => {
+                println!("Failed to fetch transactions for height {}: {:?}", height, e);
+                return Err(anyhow::anyhow!("Failed to fetch transactions: {}", e));
+            }
+        };
         
-        // Start a database transaction
-        let mut tx = self.pool.begin().await?;
+        // Start database transaction
+        let mut tx = match self.pool.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                println!("Failed to begin database transaction: {:?}", e);
+                return Err(anyhow::anyhow!("Database transaction error: {}", e));
+            }
+        };
+
+        println!("Block hash: {}", block_hash);
+        println!("Block timestamp: {}", block.timestamp);
+        println!("Block bitcoin_block_height: {:?}", block.bitcoin_block_height);
+        println!("Block transactions count: {}", block.transactions.len());
 
         fn convert_timestamp(unix_timestamp: i64) -> DateTime<Utc> {
             // If timestamp is in milliseconds, convert to seconds
@@ -345,8 +415,8 @@ impl BlockProcessor {
                 .unwrap_or(chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap())
         }
 
-        // Prepare block insert
-        let result = sqlx::query!(
+        // Insert block with detailed error handling
+        match sqlx::query!(
             r#"
             INSERT INTO blocks (height, hash, timestamp, bitcoin_block_height)
             VALUES ($1, $2, $3, $4)
@@ -359,21 +429,34 @@ impl BlockProcessor {
             block.bitcoin_block_height
         )
         .execute(&mut *tx)
-        .await?;
-
-        // Batch insert transactions using COPY
-        if !transactions.is_empty() {
-            for transaction in &transactions {
-                self.process_transaction(transaction, &mut tx).await?;
+        .await {
+            Ok(_) => println!("Successfully inserted/updated block {}", height),
+            Err(e) => {
+                println!("Failed to insert block {}: {:?}", height, e);
+                return Err(anyhow::anyhow!("Block insertion error: {}", e));
             }
         }
 
-        tx.commit().await?;
+        // Process transactions
+        if !transactions.is_empty() {
+            for (i, transaction) in transactions.iter().enumerate() {
+                println!("Processing transaction {}/{}: {}", i + 1, transactions.len(), transaction.txid);
+                if let Err(e) = self.process_transaction(transaction, &mut tx).await {
+                    println!("Failed to process transaction {}: {:?}", transaction.txid, e);
+                    return Err(anyhow::anyhow!("Transaction processing error: {}", e));
+                }
+            }
+        }
 
-        println!("Processed block {} with {} transactions", height, transactions.len());
+        // Commit transaction
+        if let Err(e) = tx.commit().await {
+            println!("Failed to commit database transaction: {:?}", e);
+            return Err(anyhow::anyhow!("Failed to commit transaction: {}", e));
+        }
 
-        self.update_current_height(height);
+        println!("Successfully processed block {} with {} transactions", height, transactions.len());
         
+        self.update_current_height(height);
         self.update_sync_metrics(height, start_time.elapsed());
         
         Ok(block)
