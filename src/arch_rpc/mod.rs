@@ -86,6 +86,23 @@ impl ArchRpcClient {
     }
 
     pub async fn get_block_hash(&self, height: i64) -> Result<String> {
+        let response = self.client
+            .post(&self.url)
+            .json(&json!({
+                "jsonrpc": "2.0",
+                "method": "get_block_hash",
+                "params": height,
+                "id": 1
+            }))
+            .send()
+            .await?
+            .json::<serde_json::Value>()
+            .await?;
+
+        Ok(response["result"].as_str().unwrap_or("").to_string())
+    }
+
+    pub async fn get_block(&self, hash: &str, height: i64) -> Result<Block> {
         let mut attempts = 0;
         let max_attempts = 3;
         let mut delay = Duration::from_millis(500);
@@ -95,8 +112,8 @@ impl ArchRpcClient {
                 .post(&self.url)
                 .json(&json!({
                     "jsonrpc": "2.0",
-                    "method": "get_block_hash",
-                    "params": height,
+                    "method": "get_block",
+                    "params": hash,
                     "id": 1
                 }))
                 .send()
@@ -106,58 +123,33 @@ impl ArchRpcClient {
                     match response.json::<serde_json::Value>().await {
                         Ok(json) => {
                             if let Some(error) = json.get("error") {
-                                error!("RPC error for height {}: {:?}", height, error);
+                                error!("RPC error for block {}: {:?}", hash, error);
                             } else {
-                                return Ok(json["result"].as_str().unwrap_or("").to_string());
+                                let block_response: BlockResponse = serde_json::from_value(json["result"].clone())?;
+                                return Ok(Block {
+                                    height,
+                                    hash: hash.to_string(),
+                                    timestamp: block_response.timestamp,
+                                    bitcoin_block_height: block_response.bitcoin_block_height,
+                                    transactions: block_response.transactions,
+                                    transaction_count: block_response.transaction_count,
+                                });
                             }
                         },
-                        Err(e) => error!("JSON decode error for height {}: {}", height, e),
+                        Err(e) => error!("JSON decode error for block {}: {}", hash, e),
                     }
                 },
-                Err(e) => error!("Request error for height {}: {}", height, e),
+                Err(e) => error!("Request error for block {}: {}", hash, e),
             }
 
             attempts += 1;
             if attempts < max_attempts {
                 tokio::time::sleep(delay).await;
-                delay *= 2; // Exponential backoff
+                delay *= 2;
             }
         }
 
-        Err(anyhow::anyhow!("Failed to get block hash after {} attempts", max_attempts))
-    }
-
-    pub async fn get_block(&self, hash: &str, height: i64) -> Result<Block> {
-        let response = self.client
-            .post(&self.url)
-            .json(&json!({
-                "jsonrpc": "2.0",
-                "method": "get_block",
-                "params": hash,
-                "id": 1
-            }))
-            .send()
-            .await?
-            .json::<serde_json::Value>()
-            .await?;
-    
-        // tracing::info!("Response result: {:?}", response["result"]);
-        println!("Block response result: {:?}", response["result"]);
-        // Deserialize into the intermediate struct
-        let block_response: BlockResponse = serde_json::from_value(response["result"].clone())?;
-        
-        // Convert to the Block struct
-        let block = Block {
-            height: height,
-            hash: hash.to_string(),
-            timestamp: block_response.timestamp,
-            bitcoin_block_height: block_response.bitcoin_block_height,
-            transactions: block_response.transactions,
-            transaction_count: block_response.transaction_count,
-        };
-    
-        // tracing::info!("Block in get_block: {:?}", block);
-        Ok(block)
+        Err(anyhow::anyhow!("Failed to get block after {} attempts", max_attempts))
     }
 
     pub async fn get_processed_transaction(&self, txid: &str) -> Result<ProcessedTransaction> {
