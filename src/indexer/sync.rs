@@ -44,123 +44,39 @@ impl ChainSync {
         let mut initial_sync_complete = false;
 
         loop {
-            let new_target_height = self.processor.arch_client.get_block_count().await?;
-            
-            // Update target height if new blocks exist
-            if new_target_height > target_height {
-                target_height = new_target_height;
-            }
-
-            // Check if we've caught up to the chain tip
-            if current >= target_height && !initial_sync_complete {
-                info!("Initial sync complete, checking for missing blocks...");
-                let missing_blocks = self.check_for_missing_blocks().await?;
-                
-                if !missing_blocks.is_empty() {
-                    info!("Found {} missing blocks, resyncing...", missing_blocks.len());
-                    for chunk in missing_blocks.chunks(self.batch_size) {
-                        let heights: Vec<i64> = chunk.to_vec();
-                        match self.processor.process_blocks_batch(heights).await {
-                            Ok(_) => info!("Resynced blocks {}-{}", chunk[0], chunk[chunk.len()-1]),
-                            Err(e) => error!("Error resyncing blocks: {}", e),
-                        }
-                    }
-                }
-                initial_sync_complete = true;
-            }
-
-            // Only perform periodic checks after initial sync is complete
-            if initial_sync_complete {
-                // Check for missing blocks periodically
-                if last_missing_check.elapsed() >= missing_blocks_check_interval {
-                    info!("Performing periodic missing blocks check...");
-                    let missing_blocks = self.check_for_missing_blocks().await?;
-                    
-                    if !missing_blocks.is_empty() {
-                        info!("Found {} missing blocks, resyncing...", missing_blocks.len());
-                        for chunk in missing_blocks.chunks(self.batch_size) {
-                            let heights: Vec<i64> = chunk.to_vec();
-                            match self.processor.process_blocks_batch(heights).await {
-                                Ok(_) => info!("Resynced blocks {}-{}", chunk[0], chunk[chunk.len()-1]),
-                                Err(e) => error!("Error resyncing blocks: {}", e),
+            match self.sync_blocks().await {
+                Ok(_) => {
+                    // Check for missing blocks periodically
+                    if last_missing_check.elapsed() >= missing_blocks_check_interval {
+                        if let Ok(missing) = self.check_for_missing_blocks().await {
+                            if !missing.is_empty() {
+                                info!("Found {} missing blocks, processing...", missing.len());
+                                // Process missing blocks...
                             }
                         }
+                        last_missing_check = std::time::Instant::now();
                     }
-                    last_missing_check = std::time::Instant::now();
+
+                    // Check for missing program data periodically
+                    if last_programs_check.elapsed() >= missing_programs_check_interval {
+                        if let Err(e) = self.processor.sync_missing_program_data().await {
+                            error!("Error syncing program data: {}", e);
+                        }
+                        last_programs_check = std::time::Instant::now();
+                    }
+
+                    continue;
                 }
-
-                // Check for missing program data periodically
-                if last_programs_check.elapsed() >= missing_programs_check_interval {
-                    info!("Checking for missing program data...");
-                    if let Err(e) = self.processor.sync_missing_program_data().await {
-                        error!("Error syncing missing program data: {}", e);
+                Err(e) => {
+                    error!("Sync error: {}. Attempting to reconnect...", e);
+                    if let Err(e) = self.wait_for_connection().await {
+                        error!("Failed to reconnect: {}", e);
                     }
-                    last_programs_check = std::time::Instant::now();
-                }
-            }
-
-            // Skip processing if we're caught up
-            if current >= target_height {
-                sleep(Duration::from_secs(1)).await;
-                continue;
-            }
-
-            // Use smaller batches when near the tip
-            let remaining_blocks = target_height - current;
-            let effective_batch_size = if remaining_blocks < (self.batch_size as i64) {
-                1 // Process one by one when near the tip
-            } else {
-                self.batch_size
-            };
-    
-            let effective_concurrent_batches = if remaining_blocks < (self.batch_size as i64) {
-                1 // Use single batch when near the tip
-            } else {
-                self.concurrent_batches
-            };
-    
-            // Rest of the batch processing logic...
-            let batch_starts: Vec<_> = (0..effective_concurrent_batches)
-                .map(|i| current + (i as i64 * effective_batch_size as i64))
-                .filter(|&start| start <= target_height)
-                .collect();
-    
-            let batch_futures: Vec<_> = batch_starts
-                .into_iter()
-                .map(|start| {
-                    let end = (start + self.batch_size as i64 - 1).min(target_height);
-                    let heights: Vec<_> = (start..=end).collect();
-                    let processor = Arc::clone(&self.processor);
-    
-                    async move {
-                        let retry_strategy = ExponentialBackoff::from_millis(10)
-                            .map(jitter) // add jitter to delays
-                            .take(5); // retry up to 5 times
-    
-                        Retry::spawn(retry_strategy, || async {
-                            processor.process_blocks_batch(heights.clone()).await
-                        })
-                        .await
-                    }
-                })
-                .collect();
-    
-            // Process batches concurrently
-            let results = futures::future::join_all(batch_futures).await;
-    
-            // Update progress
-            for result in results {
-                if let Ok(blocks) = result {
-                    if let Some(last_block) = blocks.last() {
-                        self.current_height.store(last_block.height, Ordering::Relaxed);
-                    }
+                    continue;
                 }
             }
-    
-            current = self.current_height.load(Ordering::Relaxed);
         }
     }
-
 
     async fn check_for_missing_blocks(&self) -> Result<Vec<i64>> {
         // Get the overall bounds
@@ -287,5 +203,21 @@ impl ChainSync {
         );
     
         Ok(latest_height)
+    }
+
+    async fn wait_for_connection(&self) -> Result<()> {
+        let mut delay = Duration::from_secs(1);
+        let max_delay = Duration::from_secs(60);
+
+        loop {
+            match self.processor.arch_client.is_node_ready().await {
+                Ok(true) => return Ok(()),
+                _ => {
+                    error!("Node connection lost. Retrying in {} seconds", delay.as_secs());
+                    tokio::time::sleep(delay).await;
+                    delay = std::cmp::min(delay * 2, max_delay);
+                }
+            }
+        }
     }
 }
