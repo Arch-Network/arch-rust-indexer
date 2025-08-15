@@ -18,6 +18,7 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 use hex;
 use tracing::info;
+use crate::arch_rpc::ProcessedTransaction;
 
 pub struct BlockProcessor {
     pub pool: PgPool,
@@ -83,11 +84,11 @@ impl BlockProcessor {
         .unwrap_or(false);
 
         if exists {
-            println!("Transaction {} already processed, skipping", transaction.txid);
+            tracing::debug!("Transaction {} already processed, skipping", transaction.txid);
             return Ok(());
         }
 
-        println!("Processing transaction: {}", transaction.txid);
+        tracing::debug!("Processing transaction: {}", transaction.txid);
         
         let data_json = serde_json::to_value(&transaction.data)
             .expect("Failed to serialize transaction data");
@@ -96,7 +97,7 @@ impl BlockProcessor {
         let created_at_utc = Utc.from_utc_datetime(&transaction.created_at);
         
         // Insert the transaction
-        println!("Inserting transaction into database: {}", transaction.txid);
+        tracing::debug!("Inserting transaction into database: {}", transaction.txid);
         match sqlx::query!(
             r#"
             INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at)
@@ -107,29 +108,29 @@ impl BlockProcessor {
             transaction.txid,
             transaction.block_height as i32,
             data_json,
-            serde_json::Value::String(transaction.status.to_string()),
+            transaction.status,
             bitcoin_txids,
             created_at_utc
         )
         .execute(&mut **tx)
         .await {
-            Ok(_) => println!("Successfully inserted/updated transaction: {}", transaction.txid),
+            Ok(_) => tracing::debug!("Successfully inserted/updated transaction: {}", transaction.txid),
             Err(e) => {
-                println!("Error inserting transaction {}: {}", transaction.txid, e);
+                tracing::error!("Error inserting transaction {}: {}", transaction.txid, e);
                 return Err(e.into());
             }
         }
 
         // Extract and process program IDs manually since we can't rely on trigger
-        println!("Extracting program IDs for transaction: {}", transaction.txid);
+        tracing::debug!("Extracting program IDs for transaction: {}", transaction.txid);
         if let Some(message) = transaction.data.get("message") {
             if let Some(instructions) = message.get("instructions") {
                 if let Some(instructions_array) = instructions.as_array() {
                     for (i, instruction) in instructions_array.iter().enumerate() {
                         if let Some(program_id) = instruction.get("program_id") {
-                            println!("Processing instruction {} with program_id: {:?}", i, program_id);
+                            tracing::debug!("Processing instruction {} with program_id: {:?}", i, program_id);
                             if let Some(hex_program_id) = BlockProcessor::normalize_program_id(program_id) {
-                                println!("Normalized program_id to hex: {:?}", hex_program_id);
+                                tracing::debug!("Normalized program_id to hex: {:?}", hex_program_id);
                                 // Update programs table
                                 match sqlx::query!(
                                     r#"
@@ -144,8 +145,8 @@ impl BlockProcessor {
                                 )
                                 .execute(&mut **tx)
                                 .await {
-                                    Ok(_) => println!("Successfully inserted/updated program: {:?}", hex_program_id),
-                                    Err(e) => println!("Warning: Failed to insert program {:?}: {}", hex_program_id, e)
+                                    Ok(_) => tracing::debug!("Successfully inserted/updated program: {:?}", hex_program_id),
+                                    Err(e) => tracing::warn!("Failed to insert program {:?}: {}", hex_program_id, e)
                                 };
                                 
                                 // Insert into transaction_programs
@@ -160,8 +161,8 @@ impl BlockProcessor {
                                 )
                                 .execute(&mut **tx)
                                 .await {
-                                    Ok(_) => println!("Successfully linked transaction {} to program {:?}", transaction.txid, hex_program_id),
-                                    Err(e) => println!("Warning: Failed to link transaction to program: {}", e)
+                                    Ok(_) => tracing::debug!("Successfully linked transaction {} to program {:?}", transaction.txid, hex_program_id),
+                                    Err(e) => tracing::warn!("Failed to link transaction to program: {}", e)
                                 };
                             }
                         }
@@ -170,6 +171,71 @@ impl BlockProcessor {
             }
         }
 
+        Ok(())
+    }
+
+    pub async fn process_transactions_batch(&self, transactions: Vec<Transaction>) -> Result<()> {
+        if transactions.is_empty() {
+            return Ok(());
+        }
+        
+        tracing::info!("Processing {} transactions in batch", transactions.len());
+        
+        // Use a single transaction for the entire batch
+        let mut tx = self.pool.begin().await?;
+        
+        // Check which transactions already exist
+        let txids: Vec<String> = transactions.iter().map(|t| t.txid.clone()).collect();
+        let existing_txids: Vec<String> = sqlx::query_scalar!(
+            "SELECT txid FROM transactions WHERE txid = ANY($1)",
+            &txids
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        
+        let existing_set: std::collections::HashSet<&str> = existing_txids.iter().map(|s| s.as_str()).collect();
+        
+        // Filter out existing transactions
+        let new_transactions: Vec<&Transaction> = transactions.iter()
+            .filter(|t| !existing_set.contains(t.txid.as_str()))
+            .collect();
+        
+        if new_transactions.is_empty() {
+            tracing::debug!("All {} transactions already exist", transactions.len());
+            tx.commit().await?;
+            return Ok(());
+        }
+        
+        tracing::info!("Inserting {} new transactions", new_transactions.len());
+        
+        // Build batch insert query
+        let mut query = String::from(
+            "INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at) VALUES "
+        );
+        
+        let values: Vec<String> = new_transactions.iter()
+            .map(|tx| {
+                let data_json = serde_json::to_string(&tx.data).unwrap_or_else(|_| "{}".to_string());
+                let bitcoin_txids_str = tx.bitcoin_txids.as_ref()
+                    .map(|txids| format!("{{{}}}", txids.join(",")))
+                    .unwrap_or_else(|| "{}".to_string());
+                
+                format!(
+                    "('{}', {}, '{}', {}, '{}', '{}')",
+                    tx.txid, tx.block_height, data_json, tx.status, bitcoin_txids_str, tx.created_at
+                )
+            })
+            .collect();
+        
+        query.push_str(&values.join(","));
+        query.push_str(" ON CONFLICT (txid) DO NOTHING");
+        
+        // Execute batch insert
+        sqlx::query(&query).execute(&mut *tx).await?;
+        
+        tx.commit().await?;
+        tracing::info!("Successfully processed {} transactions in batch", new_transactions.len());
+        
         Ok(())
     }
 
@@ -273,28 +339,26 @@ impl BlockProcessor {
     }
 
     async fn fetch_block_transactions(&self, height: i64) -> Result<Vec<Transaction>, anyhow::Error> {
-        println!("Starting fetch_block_transactions for height: {}", height);
+        tracing::debug!("Fetching transactions for height: {}", height);
         
         let block_hash = match self.arch_client.get_block_hash(height).await {
             Ok(hash) => {
-                println!("Successfully retrieved block hash: {}", hash);
+                tracing::debug!("Retrieved block hash: {} for height: {}", hash, height);
                 hash
             },
             Err(e) => {
-                println!("Failed to get block hash for height {}", height);
-                println!("Error details: {:?}", e);
-                println!("Raw error: {}", e);
+                tracing::error!("Failed to get block hash for height {}: {}", height, e);
                 return Err(anyhow::anyhow!("Failed to get block hash: {}", e));
             }
         };
         
         let block = match self.arch_client.get_block(&block_hash, height).await {
             Ok(block) => {
-                println!("Got block with {} transactions", block.transactions.len());
+                tracing::debug!("Retrieved block with {} transactions for height: {}", block.transactions.len(), height);
                 block
             },
             Err(e) => {
-                println!("Failed to get block: {:?}", e);
+                tracing::error!("Failed to get block for height {}: {}", height, e);
                 return Err(anyhow::anyhow!("Failed to get block: {}", e));
             }
         };
@@ -304,10 +368,10 @@ impl BlockProcessor {
                 let client = Arc::clone(&self.arch_client);
                 let txid_clone = txid.clone();
                 async move {
-                    println!("Fetching transaction: {}", txid_clone);
+                    tracing::debug!("Fetching transaction: {}", txid_clone);
                     match client.get_processed_transaction(&txid_clone).await {
                         Ok(tx) => {
-                            println!("Successfully processed transaction: {}", txid_clone);
+                            tracing::debug!("Processed transaction: {}", txid_clone);
                             Some(Transaction {
                                 txid: txid_clone,
                                 block_height: height,
@@ -318,18 +382,18 @@ impl BlockProcessor {
                             })
                         },
                         Err(e) => {
-                            println!("Failed to fetch transaction {}: {:?}", txid_clone, e);
+                            tracing::warn!("Failed to fetch transaction {}: {}", txid_clone, e);
                             None
                         }
                     }
                 }
             })
-            .buffer_unordered(10)
+            .buffer_unordered(50) // Increased from 10 to 50
             .filter_map(|result| async move { result })
             .collect()
             .await;
 
-        println!("Completed fetch_block_transactions for height: {}", height);
+        tracing::debug!("Completed fetching {} transactions for height: {}", transactions.len(), height);
         Ok(transactions)
     }
 
@@ -347,43 +411,69 @@ impl BlockProcessor {
     pub async fn process_block(&self, height: i64) -> Result<Block, anyhow::Error> {
         let start_time = std::time::Instant::now();
 
-        // Get block hash with detailed error handling
-        println!("Fetching block hash for height: {}", height);
-        let block_hash = match self.arch_client.get_block_hash(height).await {
-            Ok(hash) => {
-                println!("Successfully retrieved block hash: {}", hash);
-                hash
-            },
-            Err(e) => {
-                println!("Failed to get block hash for height {}", height);
-                println!("Error details: {:?}", e);
-                println!("Raw error: {}", e);
-                return Err(anyhow::anyhow!("Failed to get block hash: {}", e));
+        // Get block hash with detailed error handling (check cache first)
+        let block_hash = if let Some(cached_block) = self.block_cache.get(&height) {
+            tracing::debug!("Cache hit for block height {}", height);
+            cached_block.hash.clone()
+        } else {
+            tracing::debug!("Fetching block hash for height: {}", height);
+            match self.arch_client.get_block_hash(height).await {
+                Ok(hash) => {
+                    tracing::debug!("Retrieved block hash: {} for height {}", hash, height);
+                    hash
+                },
+                Err(e) => {
+                    tracing::error!("Failed to get block hash for height {}: {}", height, e);
+                    return Err(anyhow::anyhow!("Failed to get block hash: {}", e));
+                }
             }
         };
 
-        // Get block with detailed error handling
-        println!("Fetching block data for hash: {}", block_hash);
-        let block = match self.arch_client.get_block(&block_hash, height).await {
-            Ok(block) => {
-                println!("Successfully retrieved block: {:?}", block);
-                block
-            },
-            Err(e) => {
-                println!("Failed to get block for hash {}: {:?}", block_hash, e);
-                return Err(anyhow::anyhow!("Failed to get block: {}", e));
+        // Get block with detailed error handling (check cache first)
+        let block = if let Some(cached_block) = self.block_cache.get(&height) {
+            if cached_block.hash == block_hash {
+                tracing::debug!("Cache hit for block data at height {}", height);
+                cached_block.clone()
+            } else {
+                tracing::debug!("Cache miss - hash mismatch for height {}", height);
+                match self.arch_client.get_block(&block_hash, height).await {
+                    Ok(block) => {
+                        tracing::debug!("Retrieved block: height={}, tx_count={}", block.height, block.transactions.len());
+                        // Cache the block
+                        self.block_cache.insert(height, block.clone());
+                        block
+                    },
+                    Err(e) => {
+                        tracing::error!("Failed to get block for hash {}: {}", block_hash, e);
+                        return Err(anyhow::anyhow!("Failed to get block: {}", e));
+                    }
+                }
+            }
+        } else {
+            tracing::debug!("Fetching block data for hash: {}", block_hash);
+            match self.arch_client.get_block(&block_hash, height).await {
+                Ok(block) => {
+                    tracing::debug!("Retrieved block: height={}, tx_count={}", block.height, block.transactions.len());
+                    // Cache the block
+                    self.block_cache.insert(height, block.clone());
+                    block
+                },
+                Err(e) => {
+                    tracing::error!("Failed to get block for hash {}: {}", block_hash, e);
+                    return Err(anyhow::anyhow!("Failed to get block: {}", e));
+                }
             }
         };
 
         // Fetch transactions with detailed error handling
-        println!("Fetching transactions for block height: {}", height);
+        tracing::debug!("Fetching transactions for block height: {}", height);
         let transactions = match self.fetch_block_transactions(height).await {
             Ok(txs) => {
-                println!("Successfully retrieved {} transactions", txs.len());
+                tracing::debug!("Retrieved {} transactions for height {}", txs.len(), height);
                 txs
             },
             Err(e) => {
-                println!("Failed to fetch transactions for height {}: {:?}", height, e);
+                tracing::error!("Failed to fetch transactions for height {}: {}", height, e);
                 return Err(anyhow::anyhow!("Failed to fetch transactions: {}", e));
             }
         };
@@ -392,15 +482,12 @@ impl BlockProcessor {
         let mut tx = match self.pool.begin().await {
             Ok(tx) => tx,
             Err(e) => {
-                println!("Failed to begin database transaction: {:?}", e);
+                tracing::error!("Failed to begin database transaction: {}", e);
                 return Err(anyhow::anyhow!("Database transaction error: {}", e));
             }
         };
 
-        println!("Block hash: {}", block_hash);
-        println!("Block timestamp: {}", block.timestamp);
-        println!("Block bitcoin_block_height: {:?}", block.bitcoin_block_height);
-        println!("Block transactions count: {}", block.transactions.len());
+        tracing::debug!("Processing block: height={}, hash={}, tx_count={}", height, block_hash, block.transactions.len());
 
         fn convert_timestamp(unix_timestamp: i64) -> DateTime<Utc> {
             // If timestamp is in milliseconds, convert to seconds
@@ -426,23 +513,23 @@ impl BlockProcessor {
             height,
             block_hash,
             convert_timestamp(block.timestamp),
-            block.bitcoin_block_height
+            block.bitcoin_block_height.unwrap_or(0)
         )
         .execute(&mut *tx)
         .await {
-            Ok(_) => println!("Successfully inserted/updated block {}", height),
+            Ok(_) => tracing::debug!("Inserted/updated block {}", height),
             Err(e) => {
-                println!("Failed to insert block {}: {:?}", height, e);
+                tracing::error!("Failed to insert block {}: {}", height, e);
                 return Err(anyhow::anyhow!("Block insertion error: {}", e));
             }
         }
 
         // Process transactions
         if !transactions.is_empty() {
-            for (i, transaction) in transactions.iter().enumerate() {
-                println!("Processing transaction {}/{}: {}", i + 1, transactions.len(), transaction.txid);
+            tracing::debug!("Processing {} transactions for block {}", transactions.len(), height);
+            for transaction in transactions.iter() {
                 if let Err(e) = self.process_transaction(transaction, &mut tx).await {
-                    println!("Failed to process transaction {}: {:?}", transaction.txid, e);
+                    tracing::error!("Failed to process transaction {}: {}", transaction.txid, e);
                     return Err(anyhow::anyhow!("Transaction processing error: {}", e));
                 }
             }
@@ -450,11 +537,11 @@ impl BlockProcessor {
 
         // Commit transaction
         if let Err(e) = tx.commit().await {
-            println!("Failed to commit database transaction: {:?}", e);
+            tracing::error!("Failed to commit database transaction: {}", e);
             return Err(anyhow::anyhow!("Failed to commit transaction: {}", e));
         }
 
-        println!("Successfully processed block {} with {} transactions", height, transactions.len());
+        tracing::info!("Processed block {} with {} transactions", height, transactions.len());
         
         self.update_current_height(height);
         self.update_sync_metrics(height, start_time.elapsed());
@@ -462,12 +549,264 @@ impl BlockProcessor {
         Ok(block)
     }
 
+    /// Process a Block object directly (for optimized sync)
+    pub async fn process_block_direct(&self, block: Block) -> Result<(), anyhow::Error> {
+        let start_time = std::time::Instant::now();
+        let height = block.height;
+        let block_hash = &block.hash;
+
+        tracing::debug!("Processing block directly: height={}, hash={}, tx_count={}", height, block_hash, block.transactions.len());
+
+        // Start database transaction
+        let mut tx = match self.pool.begin().await {
+            Ok(tx) => tx,
+            Err(e) => {
+                tracing::error!("Failed to begin database transaction: {}", e);
+                return Err(anyhow::anyhow!("Database transaction error: {}", e));
+            }
+        };
+
+        fn convert_timestamp(unix_timestamp: i64) -> DateTime<Utc> {
+            // If timestamp is in milliseconds, convert to seconds
+            let timestamp_secs = if unix_timestamp > 1_000_000_000_000 {
+                unix_timestamp / 1000
+            } else {
+                unix_timestamp
+            };
+
+            // Convert the Unix timestamp to a DateTime<Utc>
+            chrono::DateTime::<Utc>::from_timestamp(timestamp_secs, 0)
+                .unwrap_or(chrono::DateTime::<Utc>::from_timestamp(0, 0).unwrap())
+        }
+
+        // Insert block with enhanced data
+        match sqlx::query!(
+            r#"
+            INSERT INTO blocks (height, hash, timestamp, bitcoin_block_height, merkle_root, previous_block_hash)
+            VALUES ($1, $2, $3, $4, $5, $6)
+            ON CONFLICT (height) DO UPDATE 
+            SET hash = $2, timestamp = $3, bitcoin_block_height = $4, merkle_root = $5, previous_block_hash = $6
+            "#,
+            height,
+            block_hash,
+            convert_timestamp(block.timestamp),
+            block.bitcoin_block_height.unwrap_or(0),
+            "", // TODO: Get merkle_root from RPC response
+            ""  // TODO: Get previous_block_hash from RPC response
+        )
+        .execute(&mut *tx)
+        .await {
+            Ok(_) => tracing::debug!("Inserted/updated block {}", height),
+            Err(e) => {
+                tracing::error!("Failed to insert block {}: {}", height, e);
+                return Err(anyhow::anyhow!("Block insertion error: {}", e));
+            }
+        }
+
+        // Process transactions if any
+        if !block.transactions.is_empty() {
+            tracing::debug!("Processing {} transactions for block {}", block.transactions.len(), height);
+            
+            // Fetch transaction details for each txid
+            for txid in &block.transactions {
+                if let Ok(transaction) = self.arch_client.get_processed_transaction(txid).await {
+                    if let Err(e) = self.process_transaction_direct(&transaction, &mut tx, txid, height).await {
+                        tracing::error!("Failed to process transaction {}: {}", txid, e);
+                        // Continue processing other transactions
+                    }
+                } else {
+                    tracing::warn!("Failed to fetch transaction details for {}", txid);
+                }
+            }
+        }
+
+        // Commit transaction
+        if let Err(e) = tx.commit().await {
+            tracing::error!("Failed to commit database transaction: {}", e);
+            return Err(anyhow::anyhow!("Failed to commit transaction: {}", e));
+        }
+
+        tracing::info!("Processed block {} with {} transactions", height, block.transactions.len());
+        
+        self.update_current_height(height);
+        self.update_sync_metrics(height, start_time.elapsed());
+        
+        Ok(())
+    }
+
+    /// Process a ProcessedTransaction directly (for optimized sync)
+    async fn process_transaction_direct(&self, transaction: &ProcessedTransaction, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>, actual_txid: &str, block_height: i64) -> Result<(), anyhow::Error> {
+        // Use the actual transaction ID from the block data
+        let txid = actual_txid.to_string();
+
+        // Extract compute units from logs if available
+        let compute_units = if let Some(logs) = transaction.runtime_transaction.get("logs") {
+            if let Some(logs_array) = logs.as_array() {
+                logs_array.iter()
+                    .filter_map(|log| log.as_str())
+                    .find_map(|log| {
+                        if log.contains("Consumed") {
+                            log.split_whitespace()
+                                .filter_map(|word| word.parse::<i32>().ok())
+                                .next()
+                        } else {
+                            None
+                        }
+                    })
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        // Insert transaction with enhanced data
+        match sqlx::query!(
+            r#"
+            INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at, logs, rollback_status, accounts_tags, compute_units_consumed)
+            VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, $6, $7, $8, $9)
+            ON CONFLICT (txid) DO UPDATE 
+            SET data = $3, status = $4, bitcoin_txids = $5, logs = $6, rollback_status = $7, accounts_tags = $8, compute_units_consumed = $9
+            "#,
+            txid,
+            block_height, // Use the actual block height from context
+            serde_json::to_value(&transaction.runtime_transaction)?,
+            serde_json::to_value(&transaction.status)?,
+            transaction.bitcoin_txids.as_ref().map(|txids| txids.as_slice()),
+            serde_json::to_value(&transaction.runtime_transaction.get("logs").unwrap_or(&serde_json::Value::Array(vec![])))?,
+            serde_json::to_value("NotRolledback")?, // Default rollback status
+            serde_json::to_value(&transaction.accounts_tags)?,
+            compute_units
+        )
+        .execute(&mut **tx)
+        .await {
+            Ok(_) => tracing::debug!("Inserted/updated transaction {}", txid),
+            Err(e) => {
+                tracing::error!("Failed to insert transaction {}: {}", txid, e);
+                return Err(anyhow::anyhow!("Transaction insertion error: {}", e));
+            }
+        }
+
+        // Process program IDs from accounts_tags
+        for account_tag in &transaction.accounts_tags {
+            if let Some(program_id) = account_tag.get("program_id").and_then(|id| id.as_str()) {
+                // Insert program
+                if let Err(e) = sqlx::query!(
+                    r#"
+                    INSERT INTO programs (program_id)
+                    VALUES ($1)
+                    ON CONFLICT (program_id) DO UPDATE SET 
+                        last_seen_at = CURRENT_TIMESTAMP,
+                        transaction_count = programs.transaction_count + 1
+                    "#,
+                    program_id
+                )
+                .execute(&mut **tx)
+                .await {
+                    tracing::error!("Failed to insert program {}: {}", program_id, e);
+                }
+
+                // Insert transaction-program relationship
+                if let Err(e) = sqlx::query!(
+                    r#"
+                    INSERT INTO transaction_programs (txid, program_id)
+                    VALUES ($1, $2)
+                    ON CONFLICT (txid, program_id) DO NOTHING
+                    "#,
+                    txid,
+                    program_id
+                )
+                .execute(&mut **tx)
+                .await {
+                    tracing::error!("Failed to insert transaction-program relationship: {}", e);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn update_current_height(&self, height: i64) {
         self.current_block_height.store(height, Ordering::SeqCst);
     }
 
+    pub async fn sync_mempool(&self) -> Result<(), anyhow::Error> {
+        tracing::info!("Starting mempool sync...");
+        
+        let mut tx = self.pool.begin().await?;
+        
+        // Get current mempool transaction IDs
+        let mempool_txids = self.arch_client.get_mempool_txids().await?;
+        tracing::info!("Found {} transactions in mempool", mempool_txids.len());
+        
+        // Get existing mempool transactions from database
+        let existing_txids: Vec<String> = sqlx::query_scalar!(
+            "SELECT txid FROM mempool_transactions"
+        )
+        .fetch_all(&mut *tx)
+        .await?;
+        
+        let existing_set: std::collections::HashSet<&str> = existing_txids.iter().map(|s| s.as_str()).collect();
+        
+        // Process new mempool transactions
+        let mut new_count = 0;
+        for txid in &mempool_txids {
+            if !existing_set.contains(txid.as_str()) {
+                if let Ok(Some(mempool_entry)) = self.arch_client.get_mempool_entry(txid).await {
+                    // Extract transaction data and metadata
+                    let data = serde_json::to_value(&mempool_entry)?;
+                    let fee_priority = mempool_entry.get("fee").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    let size_bytes = mempool_entry.get("size").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+                    
+                    // Insert into mempool table
+                    if let Err(e) = sqlx::query!(
+                        r#"
+                        INSERT INTO mempool_transactions (txid, data, fee_priority, size_bytes)
+                        VALUES ($1, $2, $3, $4)
+                        ON CONFLICT (txid) DO UPDATE 
+                        SET data = $2, fee_priority = $3, size_bytes = $4, added_at = CURRENT_TIMESTAMP
+                        "#,
+                        txid,
+                        data,
+                        fee_priority,
+                        size_bytes
+                    )
+                    .execute(&mut *tx)
+                    .await {
+                        tracing::warn!("Failed to insert mempool transaction {}: {}", txid, e);
+                    } else {
+                        new_count += 1;
+                    }
+                }
+            }
+        }
+        
+        // Remove transactions that are no longer in mempool
+        let mempool_set: std::collections::HashSet<&str> = mempool_txids.iter().map(|s| s.as_str()).collect();
+        let to_remove: Vec<String> = existing_txids.iter()
+            .filter(|txid| !mempool_set.contains(txid.as_str()))
+            .cloned()
+            .collect();
+        
+        if !to_remove.is_empty() {
+            sqlx::query!(
+                "DELETE FROM mempool_transactions WHERE txid = ANY($1)",
+                &to_remove
+            )
+            .execute(&mut *tx)
+            .await?;
+            
+            tracing::info!("Removed {} transactions from mempool tracking", to_remove.len());
+        }
+        
+        tx.commit().await?;
+        tracing::info!("Mempool sync completed. Added {} new transactions, removed {} old ones", new_count, to_remove.len());
+        
+        Ok(())
+    }
+
     pub async fn sync_missing_program_data(&self) -> Result<(), anyhow::Error> {
-        println!("Starting to sync missing program data...");
+        tracing::info!("Starting to sync missing program data...");
         
         let mut tx = self.pool.begin().await?;
         
@@ -524,7 +863,7 @@ impl BlockProcessor {
 
                 count += 1;
                 if count % 1000 == 0 {
-                    println!("Processed {} transactions", count);
+                    tracing::info!("Processed {} transactions", count);
                     tx.commit().await?;
                     tx = self.pool.begin().await?;
                 }
@@ -532,7 +871,7 @@ impl BlockProcessor {
         }
 
         tx.commit().await?;
-        println!("Finished syncing program data. Processed {} total transactions", count);
+        tracing::info!("Finished syncing program data. Processed {} total transactions", count);
         Ok(())
     }
 }

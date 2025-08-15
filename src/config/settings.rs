@@ -71,6 +71,7 @@ impl Settings {
         }
         
         let config = Config::builder()
+            .add_source(config::File::with_name("config").required(false))
             .add_source(Environment::default().separator("__"))
             // Add default values for critical settings
             .set_default("application.host", "0.0.0.0")?

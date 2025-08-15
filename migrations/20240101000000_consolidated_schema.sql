@@ -181,7 +181,7 @@ BEGIN
     BEGIN
         INSERT INTO programs (program_id)
         SELECT temp_programs.program_id FROM temp_programs
-        ON CONFLICT (program_id) DO UPDATE SET
+        ON CONFLICT ON CONSTRAINT programs_pkey DO UPDATE SET
             last_seen_at = CURRENT_TIMESTAMP,
             transaction_count = programs.transaction_count + 1;
     EXCEPTION WHEN OTHERS THEN

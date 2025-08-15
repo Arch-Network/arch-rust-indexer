@@ -1,0 +1,32 @@
+database:
+  username: "postgres"
+  password: "your_password_here"
+  host: "localhost"
+  port: 5432
+  database_name: "archindexer"
+  max_connections: 50
+  min_connections: 10
+  timeout_seconds: 30
+
+application:
+  host: "0.0.0.0"
+  port: 8081
+  cors_allow_origin: "*"
+  cors_allow_methods: "GET, POST, OPTIONS"
+  cors_allow_headers: "Content-Type, Authorization"
+
+arch_node:
+  url: "https://rpc-beta.test.arch.network"
+
+redis:
+  url: "redis://localhost:6379"
+  ttl_seconds: 3600
+  max_connections: 10
+
+indexer:
+  batch_size: 2000
+  concurrent_batches: 40
+
+metrics:
+  enabled: true
+  port: 9090

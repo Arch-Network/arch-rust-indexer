@@ -41,5 +41,35 @@ pub async fn initialize_database(pool: &PgPool) -> Result<(), sqlx::Error> {
     .execute(pool)
     .await?;
 
+    // Add performance indexes
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_created_at 
+            ON transactions(created_at)"
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_blocks_timestamp 
+            ON blocks(timestamp)"
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_status 
+            ON transactions(status)"
+    )
+    .execute(pool)
+    .await?;
+
+    // Composite index for common queries
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_transactions_block_height_created_at 
+            ON transactions(block_height, created_at)"
+    )
+    .execute(pool)
+    .await?;
+
     Ok(())
 }
