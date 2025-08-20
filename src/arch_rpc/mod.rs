@@ -6,6 +6,9 @@ use std::time::Duration;
 use tracing::{error, info, warn};
 use tokio::time::sleep;
 
+pub mod websocket;
+pub use websocket::{WebSocketClient, WebSocketEvent};
+
 #[derive(Debug, Clone)]
 pub struct ArchRpcClient {
     client: Client,
@@ -25,11 +28,10 @@ pub struct Block {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct BlockResponse {
     pub bitcoin_block_height: Option<i64>,
-    pub merkle_root: String,
-    pub previous_block_hash: String,
+    pub block_height: i64,
+    pub previous_block_hash: Vec<u8>, // Raw bytes array
     pub timestamp: i64,
-    pub transaction_count: i64,
-    pub transactions: Vec<String>,
+    pub transactions: Vec<serde_json::Value>, // Flexible transaction format
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -41,7 +43,7 @@ pub struct ProcessedTransaction {
 }
 
 impl ArchRpcClient {
-    pub fn new(url: String) -> Self {
+    pub fn new(_url: String) -> Self {
         // Create a client with optimized settings for high-throughput indexing
         let client = Client::builder()
             .danger_accept_invalid_certs(true)
@@ -53,9 +55,9 @@ impl ArchRpcClient {
             .unwrap_or_else(|_| Client::new());
         
         // Temporarily hardcode the beta network URL for testing
-        let url = "https://rpc-beta.test.arch.network".to_string();
-        info!("Initialized Arch RPC client for: {}", url);
-        Self { client, url }
+        let _url = "https://rpc-beta.test.arch.network".to_string();
+        info!("Initialized Arch RPC client for: {}", _url);
+        Self { client, url: _url }
     }
 
     pub async fn is_node_ready(&self) -> Result<bool> {
@@ -213,7 +215,7 @@ impl ArchRpcClient {
                 .json(&json!({
                     "jsonrpc": "2.0",
                     "method": "get_block",
-                    "params": hash,
+                    "params": [hash],
                     "id": 1
                 }))
                 .send()
@@ -242,19 +244,33 @@ impl ArchRpcClient {
                                 return Err(anyhow::anyhow!("RPC error for block {}: {:?}", hash, error));
                             }
 
+                            // Debug: Log the actual response structure
+                            info!("🔍 Raw RPC response for block {}: {:?}", hash, json_response["result"]);
+                            
                             match serde_json::from_value::<BlockResponse>(json_response["result"].clone()) {
                                 Ok(block_response) => {
+                                    // Convert raw bytes to hex string for previous_block_hash
+                                    let previous_hash = hex::encode(&block_response.previous_block_hash);
+                                    
+                                    // Convert transactions to string format
+                                    let transaction_strings: Vec<String> = block_response.transactions
+                                        .iter()
+                                        .map(|tx| tx.to_string())
+                                        .collect();
+                                    
                                     return Ok(Block {
-                                        height,
+                                        height: block_response.block_height,
                                         hash: hash.to_string(),
                                         timestamp: block_response.timestamp,
                                         bitcoin_block_height: block_response.bitcoin_block_height,
-                                        transactions: block_response.transactions,
-                                        transaction_count: block_response.transaction_count,
+                                        transactions: transaction_strings,
+                                        transaction_count: block_response.transactions.len() as i64,
                                     });
                                 },
                                 Err(e) => {
                                     error!("Block deserialization error for {}: {}", hash, e);
+                                    // Log the raw response for debugging
+                                    error!("🔍 Raw response that failed to deserialize: {:?}", json_response["result"]);
                                     attempts += 1;
                                     if attempts < max_attempts {
                                         sleep(base_delay * attempts as u32).await;

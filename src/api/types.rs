@@ -1,37 +1,40 @@
 use axum::{
-    response::{IntoResponse, Response},
     http::StatusCode,
-    Json,
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
+use serde_json::json;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
 pub enum ApiError {
     #[error("Not found")]
     NotFound,
+    
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
+    
     #[error("Internal error: {0}")]
     Internal(#[from] anyhow::Error),
+    
     #[error("Serialization error: {0}")]
-    Serialization(String),
+    Serialization(#[from] serde_json::Error),
 }
 
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
-            ApiError::NotFound => (StatusCode::NOT_FOUND, "Resource not found"),
-            ApiError::Database(ref _e) => (StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
-            ApiError::Internal(ref _e) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal server error"),
-            ApiError::Serialization(ref _e) => (StatusCode::INTERNAL_SERVER_ERROR, "Serialization error"),
+            ApiError::NotFound => (StatusCode::NOT_FOUND, "Not found"),
+            ApiError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
+            ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal error"),
+            ApiError::Serialization(_) => (StatusCode::BAD_REQUEST, "Serialization error"),
         };
 
-        let body = Json(ErrorResponse {
-            error: message.to_string(),
+        let body = json!({
+            "error": message.to_string(),
         });
 
-        (status, body).into_response()
+        (status, axum::Json(body)).into_response()
     }
 }
 

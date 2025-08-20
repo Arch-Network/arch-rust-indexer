@@ -1,17 +1,19 @@
-use anyhow::Result;
-use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::Arc;
-use tokio::time::{Duration, sleep};
-use tracing::{info, warn, error};
-
 use super::block_processor::BlockProcessor;
-use crate::arch_rpc::Block;
+use super::hybrid_sync::HybridSync;
+use anyhow::Result;
+use sqlx::PgPool;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicI64, Ordering};
+use tokio::time::{Duration, sleep};
+use tracing::{error, info, warn};
 
 pub struct ChainSync {
     pub processor: Arc<BlockProcessor>,
     current_height: AtomicI64,
     batch_size: usize,
     concurrent_batches: usize,
+    realtime_sync: Option<HybridSync>,
+    hybrid_mode: bool,
 }
 
 impl ChainSync {
@@ -20,26 +22,41 @@ impl ChainSync {
         starting_height: i64,
         batch_size: usize,
         concurrent_batches: usize,
+        realtime_sync: Option<HybridSync>,
+        hybrid_mode: bool,
     ) -> Self {
-        info!("Initializing ChainSync with starting height: {}, batch_size: {}, concurrent_batches: {}", 
-              starting_height, batch_size, concurrent_batches);
+        info!("Initializing ChainSync with starting height: {}, batch_size: {}, concurrent_batches: {}, hybrid_mode: {}", 
+              starting_height, batch_size, concurrent_batches, hybrid_mode);
         
         Self {
             processor,
             current_height: AtomicI64::new(starting_height),
             batch_size,
             concurrent_batches,
+            realtime_sync,
+            hybrid_mode,
         }
     }
 
     pub async fn start(&self) -> Result<()> {
         info!("Starting chain sync...");
         
+        // Start real-time sync if available
+        if let Some(realtime_sync) = &self.realtime_sync {
+            let realtime_sync = realtime_sync.clone();
+            tokio::spawn(async move {
+                if let Err(e) = realtime_sync.start().await {
+                    error!("Real-time sync failed: {}", e);
+                }
+            });
+            info!("Real-time sync started in background");
+        }
+        
         // Get current network height
         let network_height = self.processor.arch_client.get_block_count().await?;
         info!("Current network height: {}", network_height);
         
-        let mut current = self.current_height.load(Ordering::Relaxed);
+        let current = self.current_height.load(Ordering::Relaxed);
         let mut target_height = network_height;
         
         // Always start from the configured starting height (typically 0 for genesis)
@@ -107,8 +124,17 @@ impl ChainSync {
                         last_programs_check = std::time::Instant::now();
                     }
 
-                    // Small delay to prevent overwhelming the network
-                    sleep(Duration::from_millis(100)).await;
+                    // In hybrid mode, use shorter delays since real-time sync handles new blocks
+                    let delay = if self.hybrid_mode && self.realtime_sync.is_some() {
+                        Duration::from_millis(50) // Faster polling in hybrid mode
+                    } else {
+                        Duration::from_millis(100) // Standard polling
+                    };
+                    
+                    // Only add delay if we're caught up (not in bulk sync mode)
+                    if current >= target_height - 1000 {
+                        sleep(delay).await;
+                    }
                     continue;
                 }
                 Err(e) => {
@@ -158,7 +184,7 @@ impl ChainSync {
             }
             
             // Process chunk concurrently
-            futures::future::join_all(futures).await;
+            futures_util::future::join_all(futures).await;
             
             // Small delay between chunks
             sleep(Duration::from_millis(50)).await;
@@ -222,12 +248,14 @@ impl ChainSync {
     }
 
     async fn sync_blocks(&self) -> Result<()> {
+        let start_time = std::time::Instant::now();
         let current = self.current_height.load(Ordering::Relaxed);
         let target_height = self.processor.arch_client.get_block_count().await?;
         
         if current >= target_height {
-            // Wait for new blocks
-            sleep(Duration::from_secs(1)).await;
+            // Wait for new blocks, but only briefly during bulk sync
+            let wait_time = if target_height - current < 1000 { Duration::from_secs(1) } else { Duration::from_millis(100) };
+            sleep(wait_time).await;
             return Ok(());
         }
 
@@ -236,13 +264,20 @@ impl ChainSync {
         
         info!("Syncing blocks {} to {} ({} blocks)", current, end_height, heights.len());
 
-        // Process blocks in concurrent batches
-        let chunks: Vec<Vec<i64>> = heights.chunks(self.concurrent_batches).map(|c| c.to_vec()).collect();
+        // Determine if we're in bulk sync mode (far behind or configured)
+        let is_bulk_sync = target_height - current > 10000;
+        let chunk_size = if is_bulk_sync { self.concurrent_batches * 2 } else { self.concurrent_batches };
         
-        for chunk in chunks {
+        // Process blocks in concurrent batches
+        let chunks: Vec<Vec<i64>> = heights.chunks(chunk_size).map(|c| c.to_vec()).collect();
+        
+        // In bulk sync mode, process chunks more aggressively
+        let chunk_delay = if is_bulk_sync { Duration::from_millis(10) } else { Duration::from_millis(50) };
+        
+        for (chunk_index, chunk) in chunks.iter().enumerate() {
             let mut futures = Vec::new();
             
-            for height in chunk {
+            for &height in chunk {
                 let processor = Arc::clone(&self.processor);
                 let future = async move {
                     match processor.arch_client.get_block_hash(height).await {
@@ -271,19 +306,35 @@ impl ChainSync {
             }
             
             // Process chunk concurrently
-            let results = futures::future::join_all(futures).await;
+            let results = futures_util::future::join_all(futures).await;
             
             // Check for errors
             let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
             if !errors.is_empty() {
                 warn!("{} errors in batch, continuing with next batch", errors.len());
             }
+            
+            // Small delay between chunks to prevent overwhelming the system
+            if chunk_index < chunks.len() - 1 {
+                sleep(chunk_delay).await;
+            }
         }
 
         // Update current height
         self.current_height.store(end_height + 1, Ordering::Relaxed);
         
-        info!("Completed sync batch, current height: {}", end_height + 1);
+        // Calculate and log sync progress
+        let progress = ((end_height as f64 / target_height as f64) * 100.0).min(100.0);
+        let elapsed = start_time.elapsed();
+        let blocks_per_second = heights.len() as f64 / elapsed.as_secs_f64();
+        let remaining_blocks = target_height - end_height;
+        let estimated_time_seconds = remaining_blocks as f64 / blocks_per_second;
+        
+        info!("Completed sync batch: height {} -> {} ({} blocks, {:.2}% complete)", 
+              current, end_height, heights.len(), progress);
+        info!("Sync speed: ~{:.0} blocks/sec, ETA: {:.1} hours", 
+              blocks_per_second, estimated_time_seconds / 3600.0);
+        
         Ok(())
     }
 

@@ -4,30 +4,34 @@ version = "1.0.1"
 edition = "2021"
 
 [dependencies]
-tokio = { version = "1.28", features = ["full"] }
-axum = "0.7.9" 
-clap = {  version = "4.3.1", features = ["derive"] }
-sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "json", "chrono"] }
+axum = { version = "0.7", features = ["ws"] }
+tokio = { version = "1.0", features = ["full"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+sqlx = { version = "0.7", features = ["runtime-tokio-rustls", "postgres", "chrono", "json"] }
+chrono = { version = "0.4", features = ["serde"] }
 tracing = "0.1"
-bs58 = "0.3.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-config = { version = "0.13", default-features = false, features = ["yaml"] }
-dotenv = "0.15"
 anyhow = "1.0"
-thiserror = "1.0"
+tokio-tungstenite = "0.21"
+url = "2.4"
+futures-util = "0.3"
+uuid = { version = "1.0", features = ["v4"] }
 futures = "0.3"
 dashmap = "5.5"
-chrono = { version = "0.4", features = ["serde"] }
+hex = "0.4"
+bs58 = "0.3"
+redis = { version = "0.23", features = ["tokio-comp"] }
+reqwest = { version = "0.11", features = ["json", "rustls-tls"] }
+config = { version = "0.13", default-features = false, features = ["yaml"] }
+dotenv = "0.15"
+thiserror = "1.0"
+tower = "0.5"
+tower-http = { version = "0.5", features = ["cors"] }
 metrics = "0.21"
 metrics-exporter-prometheus = { version = "0.12", default-features = false }
-redis = { version = "0.23", features = ["tokio-comp"], default-features = false }
-reqwest = { version = "0.11", features = ["json", "rustls-tls"], default-features = false }
-http-body-util = "0.1"
-tower-http = { version = "0.5", features = ["cors"] }
 tokio-retry = "0.3"
-hex = "0.4.3"
+http-body-util = "0.1"
 
 [lib]
 name = "arch_indexer"
@@ -40,6 +44,22 @@ path = "src/main.rs"
 [[bin]]
 name = "init_db"
 path = "src/bin/init_db.rs"
+
+[[bin]]
+name = "test_websocket"
+path = "src/bin/test_websocket.rs"
+
+[[bin]]
+name = "simple_websocket_test"
+path = "src/bin/simple_websocket_test.rs"
+
+[[bin]]
+name = "test_websocket_server"
+path = "src/bin/test_websocket_server.rs"
+
+[[bin]]
+name = "test_realtime_indexing"
+path = "src/bin/test_realtime_indexing.rs"
 
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }

@@ -24,7 +24,7 @@ use tower_http::cors::CorsLayer;
 use axum::http::{header, HeaderValue, Method};
 
 use config::Settings;
-use crate::indexer::{BlockProcessor, ChainSync};
+use crate::indexer::{BlockProcessor, ChainSync, HybridSync};
 use crate::metrics::Metrics;
 use dotenv::dotenv;
 use crate::config::validation;
@@ -135,6 +135,19 @@ async fn main() -> Result<()> {
 
     info!("Successfully initialized block processor");
 
+    // Initialize real-time sync if enabled
+    let realtime_sync = if settings.websocket.enabled {
+        info!("Initializing real-time sync with WebSocket URL: {}", settings.arch_node.websocket_url);
+        Some(RealtimeSync::new(
+            Arc::clone(&processor),
+            settings.arch_node.websocket_url.clone(),
+            Arc::new(arch_client.clone()),
+        ))
+    } else {
+        info!("Real-time sync disabled");
+        None
+    };
+
     // Run sync_missing_program_data in a separate task
     let processor_clone = Arc::clone(&processor);
     tokio::spawn(async move {
@@ -188,17 +201,26 @@ async fn main() -> Result<()> {
     };
 
     // Start the chain sync process
-    let sync = ChainSync::new(
-        Arc::clone(&processor),
-        current_height,
-        settings.indexer.batch_size,
-        settings.indexer.concurrent_batches,
-    );
-
-    // Spawn the sync task
-    let sync_handle = tokio::spawn(async move {
-        sync.start().await
-    });
+    let sync_handle = if settings.websocket.enabled && settings.indexer.enable_realtime {
+        info!("Starting hybrid sync with real-time WebSocket support");
+        
+        let hybrid_sync = HybridSync::new(
+            Arc::new(settings.clone()),
+            pool.clone(),
+        );
+        
+        tokio::spawn(async move {
+            hybrid_sync.start().await
+        })
+    } else {
+        info!("Starting traditional sync without real-time support");
+        
+        let sync = ChainSync::new(pool.clone());
+        
+        tokio::spawn(async move {
+            sync.start().await
+        })
+    };
 
     // Start the HTTP server
     let addr = SocketAddr::from((

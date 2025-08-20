@@ -1,0 +1,22 @@
+[package]
+name = "websocket-test"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "websocket-test"
+path = "src/main.rs"
+
+[[bin]]
+name = "test-formats"
+path = "test_formats.rs"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+serde_json = "1.0"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "ansi"] }
+anyhow = "1.0"
+url = "2.4"

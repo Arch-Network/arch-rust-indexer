@@ -25,11 +25,11 @@ async fn create_test_app() -> Result<(Router, Arc<PgPool>), anyhow::Error> {
     let processor = BlockProcessor::new(
         pool.clone(),
         redis_client,
-        arch_rpc
+        Arc::new(arch_rpc)
     );
     
     let pool_arc = Arc::new(pool);
-    let app = create_router(pool_arc.clone(), Arc::new(processor));
+    let app = create_router(pool_arc.clone());
     Ok((app, pool_arc))
 }
 

@@ -1,5 +1,6 @@
-use serde::Deserialize;
 use config::{Config, ConfigError, Environment};
+use serde::Deserialize;
+use std::env;
 
 #[derive(Debug, Deserialize)]
 pub struct Settings {
@@ -8,6 +9,7 @@ pub struct Settings {
     pub arch_node: ArchNodeSettings,
     pub redis: RedisSettings,
     pub indexer: IndexerSettings,
+    pub websocket: WebSocketSettings,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +51,12 @@ fn default_cors_headers() -> String {
 #[derive(Debug, Deserialize)]
 pub struct ArchNodeSettings {
     pub url: String,
+    #[serde(default = "default_websocket_url")]
+    pub websocket_url: String,
+}
+
+fn default_websocket_url() -> String {
+    "ws://localhost:8081".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -60,6 +68,40 @@ pub struct RedisSettings {
 pub struct IndexerSettings {
     pub batch_size: usize,
     pub concurrent_batches: usize,
+    #[serde(default = "default_bulk_sync_mode")]
+    pub bulk_sync_mode: bool,
+    #[serde(default = "default_enable_realtime")]
+    pub enable_realtime: bool,
+}
+
+fn default_bulk_sync_mode() -> bool {
+    true
+}
+
+fn default_enable_realtime() -> bool {
+    true
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct WebSocketSettings {
+    #[serde(default = "default_websocket_enabled")]
+    pub enabled: bool,
+    #[serde(default = "default_websocket_reconnect_interval")]
+    pub reconnect_interval_seconds: u64,
+    #[serde(default = "default_websocket_max_reconnect_attempts")]
+    pub max_reconnect_attempts: usize,
+}
+
+fn default_websocket_enabled() -> bool {
+    true
+}
+
+fn default_websocket_reconnect_interval() -> u64 {
+    5
+}
+
+fn default_websocket_max_reconnect_attempts() -> usize {
+    10
 }
 
 impl Settings {

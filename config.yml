@@ -4,8 +4,8 @@ database:
   host: "localhost"
   port: 5432
   database_name: "archindexer"
-  max_connections: 50
-  min_connections: 10
+  max_connections: 200
+  min_connections: 20
   timeout_seconds: 30
 
 application:
@@ -17,15 +17,23 @@ application:
 
 arch_node:
   url: "https://rpc-beta.test.arch.network"
+  websocket_url: "ws://44.196.173.35:10081"
 
 redis:
   url: "redis://localhost:6379"
   ttl_seconds: 3600
-  max_connections: 10
+  max_connections: 20
 
 indexer:
-  batch_size: 2000
-  concurrent_batches: 40
+  batch_size: 50000
+  concurrent_batches: 100
+  bulk_sync_mode: true
+  enable_realtime: true
+
+websocket:
+  enabled: true
+  reconnect_interval_seconds: 5
+  max_reconnect_attempts: 10
 
 metrics:
   enabled: true

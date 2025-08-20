@@ -3,9 +3,31 @@ database:
   min_connections: 5
   timeout_seconds: 30
 
+application:
+  host: "0.0.0.0"
+  port: 8081
+  cors_allow_origin: "*"
+  cors_allow_methods: "GET, POST, OPTIONS"
+  cors_allow_headers: "Content-Type, Authorization"
+
+arch_node:
+  url: "https://rpc-beta.test.arch.network"
+  websocket_url: "wss://rpc-beta.test.arch.network"
+
 redis:
   ttl_seconds: 3600
   max_connections: 10
+
+indexer:
+  batch_size: 100
+  concurrent_batches: 5
+  bulk_sync_mode: true
+  enable_realtime: true
+
+websocket:
+  enabled: true
+  reconnect_interval_seconds: 5
+  max_reconnect_attempts: 10
 
 metrics:
   enabled: true

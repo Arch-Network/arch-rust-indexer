@@ -5,7 +5,6 @@ use chrono::Utc;
 use dashmap::DashMap;
 use futures::stream;
 use futures::StreamExt;
-use std::fmt::Write;
 use std::sync::Arc;
 use tracing::error;
 use crate::arch_rpc::ArchRpcClient;
