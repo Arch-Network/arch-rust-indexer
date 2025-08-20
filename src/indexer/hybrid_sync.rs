@@ -11,6 +11,7 @@ use crate::arch_rpc::ArchRpcClient;
 use crate::config::settings::Settings;
 use crate::indexer::realtime_processor::RealtimeProcessor;
 use crate::indexer::sync::ChainSync;
+use crate::indexer::block_processor::BlockProcessor;
 use sqlx::PgPool;
 
 #[derive(Debug, Clone)]
@@ -120,14 +121,18 @@ impl HybridSync {
     }
 
     async fn start_traditional_sync(&self) -> Result<()> {
-        let _pool = Arc::clone(&self.pool);
+        let pool = Arc::clone(&self.pool);
         let current_height = Arc::clone(&self.current_height);
         let is_realtime_active = Arc::clone(&self.is_realtime_active);
         let last_realtime_update = Arc::clone(&self.last_realtime_update);
+        let settings = Arc::clone(&self.settings);
 
         tokio::spawn(async move {
-            // For now, just log that traditional sync would run
-            // In a full implementation, you'd create a proper ChainSync instance
+            info!("🚀 Starting traditional bulk sync for historical blocks...");
+            
+            // Create RPC client for fetching blocks
+            let rpc_client = Arc::new(ArchRpcClient::new(settings.arch_node.url.clone()));
+            
             loop {
                 let realtime_active = is_realtime_active.load(Ordering::Relaxed);
                 let last_update = last_realtime_update.load(Ordering::Relaxed);
@@ -138,13 +143,15 @@ impl HybridSync {
                     info!("🔄 Real-time sync active, using short polling interval");
                     sleep(Duration::from_secs(5)).await;
                 } else {
-                    // Real-time sync inactive or stale, use normal polling
-                    info!("🔄 Traditional sync would run here (placeholder)");
+                    // Real-time sync inactive or stale, run bulk sync
+                    info!("🔄 Running bulk sync for historical blocks...");
                     
-                    // Update current height (placeholder)
-                    current_height.fetch_add(1, Ordering::Relaxed);
-                    
-                    sleep(Duration::from_secs(30)).await;
+                    if let Err(e) = run_bulk_sync(&pool, &rpc_client).await {
+                        error!("Bulk sync failed: {}", e);
+                        sleep(Duration::from_secs(60)).await; // Wait longer on error
+                    } else {
+                        sleep(Duration::from_secs(30)).await;
+                    }
                 }
             }
         });
@@ -163,6 +170,77 @@ impl HybridSync {
     pub fn get_last_realtime_update(&self) -> i64 {
         self.last_realtime_update.load(Ordering::Relaxed)
     }
+}
+
+/// Run bulk sync to fetch and process historical blocks
+async fn run_bulk_sync(pool: &PgPool, rpc_client: &Arc<ArchRpcClient>) -> Result<()> {
+    info!("🔄 Starting bulk sync for historical blocks...");
+    
+    // Get the last processed block height from database
+    let last_processed_height = sqlx::query!(
+        "SELECT COALESCE(MAX(height), -1) as height FROM blocks"
+    )
+    .fetch_one(pool)
+    .await?
+    .height
+    .unwrap_or(-1); // Handle Option<i64>
+    
+    // Get current network height from RPC
+    let network_height = rpc_client.get_block_count().await?;
+    
+    info!("📊 Bulk sync: last processed height={}, network height={}", 
+          last_processed_height, network_height);
+    
+    if last_processed_height >= network_height {
+        info!("✅ Already synced to latest height");
+        return Ok(());
+    }
+    
+    // Calculate how many blocks we need to sync
+    let blocks_to_sync = network_height - last_processed_height;
+    info!("🔄 Need to sync {} blocks", blocks_to_sync);
+    
+    // Create block processor with dummy Redis client (not actually used)
+    let dummy_redis = redis::Client::open("redis://127.0.0.1:6379")
+        .unwrap_or_else(|_| redis::Client::open("redis://127.0.0.1:6379").unwrap());
+    
+    let processor = BlockProcessor::new(
+        pool.clone(),
+        dummy_redis,
+        rpc_client.clone(),
+    );
+    
+    // Sync in batches to avoid overwhelming the system
+    let batch_size = 10; // Process 10 blocks at a time
+    let mut current_height = last_processed_height + 1;
+    
+    while current_height <= network_height {
+        let end_height = std::cmp::min(current_height + batch_size - 1, network_height);
+        let batch_heights: Vec<i64> = (current_height..=end_height).collect();
+        
+        info!("🔄 Processing batch: heights {} to {}", current_height, end_height);
+        
+        // Process this batch of blocks
+        match processor.process_blocks_batch(batch_heights).await {
+            Ok(blocks) => {
+                info!("✅ Successfully processed {} blocks in batch", blocks.len());
+                current_height = end_height + 1;
+            }
+            Err(e) => {
+                error!("❌ Failed to process batch starting at height {}: {}", current_height, e);
+                // Try to continue with next batch, but log the error
+                current_height = end_height + 1;
+            }
+        }
+        
+        // Small delay between batches to be nice to the RPC
+        sleep(Duration::from_millis(100)).await;
+    }
+    
+    info!("🎉 Bulk sync completed! Synced from height {} to {}", 
+          last_processed_height + 1, network_height);
+    
+    Ok(())
 }
 
 #[derive(Debug, Clone)]

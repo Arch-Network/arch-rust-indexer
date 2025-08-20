@@ -233,6 +233,159 @@
         .blocks-table th:nth-child(3), .blocks-table td:nth-child(3) { width: 20%; } /* Status */
         .blocks-table th:nth-child(4), .blocks-table td:nth-child(4) { width: 25%; } /* Created At */
 
+        /* Responsive table adjustments */
+        @media (max-width: 768px) {
+            .blocks-table {
+                font-size: 14px;
+            }
+            
+            .blocks-table th,
+            .blocks-table td {
+                padding: 10px 8px;
+            }
+            
+            /* Stack columns on very small screens */
+            .blocks-table th:nth-child(1), .blocks-table td:nth-child(1) { width: 30%; }
+            .blocks-table th:nth-child(2), .blocks-table td:nth-child(2) { width: 20%; }
+            .blocks-table th:nth-child(3), .blocks-table td:nth-child(3) { width: 25%; }
+            .blocks-table th:nth-child(4), .blocks-table td:nth-child(4) { width: 25%; }
+        }
+
+        /* Transaction status styling */
+        .status-failed {
+            background: #fee;
+            color: #c33;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+            display: inline-block;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 200px;
+        }
+
+        .status-success, .status-processed {
+            background: #efe;
+            color: #363;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+            display: inline-block;
+        }
+
+        .status-pending {
+            background: #fef;
+            color: #636;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+            display: inline-block;
+        }
+
+        .status-other {
+            background: #f8f9fa;
+            color: #666;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+            display: inline-block;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            max-width: 200px;
+        }
+
+        .status-unknown {
+            background: #f0f0f0;
+            color: #999;
+            padding: 4px 8px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 500;
+            display: inline-block;
+        }
+
+        /* Sync Progress Section */
+        .sync-progress-section {
+            background: white;
+            border-radius: 15px;
+            padding: 25px;
+            margin: 25px 0;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+            border: 1px solid #e1e5e9;
+        }
+
+        .sync-progress-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 20px;
+        }
+
+        .sync-progress-header h3 {
+            margin: 0;
+            color: #333;
+            font-size: 18px;
+        }
+
+        .sync-info {
+            display: flex;
+            flex-direction: column;
+            align-items: flex-end;
+            gap: 5px;
+        }
+
+        .sync-percentage {
+            font-size: 24px;
+            font-weight: bold;
+            color: #667eea;
+        }
+
+        .sync-details {
+            font-size: 14px;
+            color: #666;
+        }
+
+        .progress-bar-container {
+            margin-top: 15px;
+        }
+
+        .progress-bar {
+            width: 100%;
+            height: 20px;
+            background: #f0f0f0;
+            border-radius: 10px;
+            overflow: hidden;
+            margin-bottom: 15px;
+            border: 1px solid #e1e5e9;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: linear-gradient(90deg, #667eea, #764ba2);
+            border-radius: 10px;
+            transition: width 0.5s ease;
+            width: 0%;
+        }
+
+        .progress-stats {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 14px;
+            color: #666;
+        }
+
+        .sync-speed {
+            color: #667eea;
+            font-weight: 500;
+        }
+
         .blocks-table th {
             background: #f8f9fa;
             font-weight: 600;
@@ -480,6 +633,26 @@
                 <div class="label">Real-time</div>
             </div>
         </div>
+        
+        <!-- Sync Progress Section -->
+        <div class="sync-progress-section">
+            <div class="sync-progress-header">
+                <h3>🔄 Blockchain Sync Progress</h3>
+                <div class="sync-info">
+                    <span class="sync-percentage" id="sync-percentage">0%</span>
+                    <span class="sync-details" id="sync-details">Syncing...</span>
+                </div>
+            </div>
+            <div class="progress-bar-container">
+                <div class="progress-bar">
+                    <div class="progress-fill" id="progress-fill"></div>
+                </div>
+                <div class="progress-stats">
+                    <span id="synced-blocks">0</span> / <span id="total-sync-blocks">0</span> blocks
+                    <span class="sync-speed" id="sync-speed">-</span>
+                </div>
+            </div>
+        </div>
 
         <div class="search-section">
             <h2>🔍 Search Blockchain</h2>
@@ -522,6 +695,9 @@
             loadBlocks();
             loadTransactions();
             connectWebSocket();
+            
+            // Refresh sync progress every 10 seconds
+            setInterval(loadSyncProgress, 10000);
         });
 
         // Load network statistics
@@ -536,8 +712,64 @@
                 document.getElementById('total-transactions').textContent = stats.total_transactions?.toLocaleString() || '-';
                 document.getElementById('latest-block').textContent = stats.latest_block_height || '-';
                 document.getElementById('sync-status').textContent = '🟢 Synced';
+                
+                // Also load sync progress
+                loadSyncProgress();
             } catch (error) {
                 console.error('Failed to load network stats:', error);
+            }
+        }
+
+        // Load sync progress
+        async function loadSyncProgress() {
+            try {
+                const response = await fetch('/api/network/stats');
+                const stats = await response.json();
+                
+                if (stats.total_blocks && stats.latest_block_height) {
+                    const syncedBlocks = stats.total_blocks;
+                    const totalBlocks = stats.latest_block_height + 1; // +1 because height 0 exists
+                    const percentage = Math.round((syncedBlocks / totalBlocks) * 100);
+                    
+                    // Update progress bar
+                    document.getElementById('progress-fill').style.width = `${percentage}%`;
+                    document.getElementById('sync-percentage').textContent = `${percentage}%`;
+                    document.getElementById('synced-blocks').textContent = syncedBlocks.toLocaleString();
+                    document.getElementById('total-sync-blocks').textContent = totalBlocks.toLocaleString();
+                    
+                    // Update sync details
+                    if (percentage >= 100) {
+                        document.getElementById('sync-details').textContent = 'Fully Synced';
+                        document.getElementById('sync-percentage').style.color = '#28a745';
+                    } else if (percentage >= 90) {
+                        document.getElementById('sync-details').textContent = 'Nearly Complete';
+                        document.getElementById('sync-percentage').style.color = '#ffc107';
+                    } else if (percentage >= 50) {
+                        document.getElementById('sync-details').textContent = 'Halfway There';
+                        document.getElementById('sync-percentage').style.color = '#fd7e14';
+                    } else {
+                        document.getElementById('sync-details').textContent = 'Syncing...';
+                        document.getElementById('sync-percentage').style.color = '#667eea';
+                    }
+                    
+                    // Calculate and show sync speed (if we have historical data)
+                    if (window.lastSyncUpdate) {
+                        const now = Date.now();
+                        const timeDiff = (now - window.lastSyncUpdate) / 1000; // seconds
+                        const blocksDiff = syncedBlocks - (window.lastSyncedBlocks || syncedBlocks);
+                        const blocksPerSecond = blocksDiff / timeDiff;
+                        
+                        if (blocksPerSecond > 0) {
+                            document.getElementById('sync-speed').textContent = `~${Math.round(blocksPerSecond)} blocks/sec`;
+                        }
+                    }
+                    
+                    // Store current values for next calculation
+                    window.lastSyncUpdate = Date.now();
+                    window.lastSyncedBlocks = syncedBlocks;
+                }
+            } catch (error) {
+                console.error('Failed to load sync progress:', error);
             }
         }
 
@@ -675,6 +907,69 @@
             content.innerHTML = html;
         }
         
+        // Format transaction status helper
+        function formatTransactionStatus(status) {
+            if (!status) return 'Unknown';
+            
+            try {
+                if (typeof status === 'string') {
+                    return status;
+                } else if (typeof status === 'object') {
+                    // Handle complex status objects
+                    if (status.Failed) {
+                        // Extract the error message and clean it up
+                        let errorMsg = status.Failed;
+                        
+                        // Handle the specific case with pubkey array
+                        if (errorMsg.includes('pubkey:') && errorMsg.includes('[')) {
+                            // Extract the meaningful part before the pubkey array
+                            const pubkeyIndex = errorMsg.indexOf('pubkey:');
+                            if (pubkeyIndex > 0) {
+                                errorMsg = errorMsg.substring(0, pubkeyIndex).trim();
+                            }
+                        }
+                        
+                        // Truncate long error messages
+                        if (errorMsg.length > 60) {
+                            errorMsg = errorMsg.substring(0, 60) + '...';
+                        }
+                        
+                        return `<span class="status-failed" title="${status.Failed}">❌ ${errorMsg}</span>`;
+                    } else if (status.Success) {
+                        return `<span class="status-success">✅ ${status.Success}</span>`;
+                    } else if (status.Pending) {
+                        return `<span class="status-pending">⏳ ${status.Pending}</span>`;
+                    } else if (status.Processed) {
+                        return `<span class="status-processed">✅ Processed</span>`;
+                    } else {
+                        // For other object types, show a clean summary
+                        const keys = Object.keys(status);
+                        if (keys.length === 1) {
+                            const key = keys[0];
+                            const value = status[key];
+                            if (typeof value === 'string' && value.length < 50) {
+                                return `<span class="status-other" title="${JSON.stringify(status)}">${key}: ${value}</span>`;
+                            }
+                        }
+                        return `<span class="status-other" title="${JSON.stringify(status)}">${keys.join(', ')}</span>`;
+                    }
+                } else if (typeof status === 'number') {
+                    // Handle numeric status codes
+                    switch (status) {
+                        case 0: return '<span class="status-processed">✅ Processed</span>';
+                        case 1: return '<span class="status-pending">⏳ Pending</span>';
+                        case 2: return '<span class="status-failed">❌ Failed</span>';
+                        default: return `<span class="status-unknown">${status}</span>`;
+                    }
+                } else {
+                    return String(status);
+                }
+            } catch (error) {
+                console.error('Error formatting transaction status:', error, status);
+                return 'Format Error';
+            }
+        }
+
         // Display transactions in table
         function displayTransactions(transactions) {
             const content = document.getElementById('transactions-content');
@@ -699,7 +994,7 @@
 
             transactions.forEach(tx => {
                 const timestamp = formatTimestamp(tx.created_at);
-                const status = tx.status ? (typeof tx.status === 'object' ? JSON.stringify(tx.status) : tx.status) : 'Unknown';
+                const status = formatTransactionStatus(tx.status);
                 html += `
                     <tr>
                         <td class="block-hash" onclick="viewTransaction('${tx.txid}')">${tx.txid.substring(0, 16)}...</td>
@@ -762,7 +1057,7 @@
                                     title: `Transaction`,
                                     hash: tx.txid,
                                     blockHeight: tx.block_height,
-                                    status: tx.status,
+                                    status: formatTransactionStatus(tx.status),
                                     timestamp: formatTimestamp(tx.created_at)
                                 });
                             } else {
@@ -869,7 +1164,15 @@
                     console.error('formatTimestamp: Invalid date created from timestamp:', timestamp);
                     return 'Invalid Date';
                 } else {
-                    const formatted = date.toLocaleString();
+                    // Use a more compact date format to prevent wrapping
+                    const formatted = date.toLocaleDateString('en-US', {
+                        month: 'short',
+                        day: 'numeric',
+                        year: 'numeric',
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        hour12: true
+                    });
                     console.log('formatTimestamp: Successfully formatted:', formatted);
                     return formatted;
                 }
