@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    INSERT INTO programs (program_id)\n                    VALUES ($1)\n                    ON CONFLICT (program_id) DO UPDATE SET \n                        last_seen_at = CURRENT_TIMESTAMP,\n                        transaction_count = programs.transaction_count + 1\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "110273a3bb064f6f908e8dcf4d740363d37f06aeaf8c35aa8ce8bb52f87e562a"
+}

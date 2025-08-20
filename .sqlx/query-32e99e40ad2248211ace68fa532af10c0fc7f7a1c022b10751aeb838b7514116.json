@@ -1,0 +1,54 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT DISTINCT \n            t.txid,\n            t.block_height,\n            t.data,\n            t.status,\n            t.bitcoin_txids,\n            t.created_at as \"created_at!: NaiveDateTime\"\n        FROM transactions t\n        JOIN transaction_programs tp ON t.txid = tp.txid\n        WHERE tp.program_id = $1\n        ORDER BY t.block_height DESC\n        LIMIT $2 OFFSET $3\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "txid",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 1,
+        "name": "block_height",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "data",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 3,
+        "name": "status",
+        "type_info": "Jsonb"
+      },
+      {
+        "ordinal": 4,
+        "name": "bitcoin_txids",
+        "type_info": "TextArray"
+      },
+      {
+        "ordinal": 5,
+        "name": "created_at!: NaiveDateTime",
+        "type_info": "Timestamptz"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Int8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "32e99e40ad2248211ace68fa532af10c0fc7f7a1c022b10751aeb838b7514116"
+}

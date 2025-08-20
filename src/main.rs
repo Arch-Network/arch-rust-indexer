@@ -2,6 +2,7 @@ mod api;
 mod arch_rpc;
 mod config;
 mod db;
+mod frontend;
 mod indexer;
 mod metrics;
 
@@ -19,6 +20,7 @@ use tracing::{error, info, warn};
 use std::sync::Arc;
 use std::net::SocketAddr;
 use tokio::signal;
+use tokio::sync::broadcast;
 use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 use tower_http::cors::CorsLayer;
 use axum::http::{header, HeaderValue, Method};
@@ -29,12 +31,17 @@ use crate::metrics::Metrics;
 use dotenv::dotenv;
 use crate::config::validation;
 use clap::Parser;
+use std::time::Duration;
 
 #[derive(Parser)]
 struct Args {
     /// Reset the database before starting the sync
     #[arg(long)]
     reset: bool,
+    
+    /// Clean up existing database connections before starting
+    #[arg(long)]
+    cleanup_connections: bool,
 }
 
 
@@ -88,14 +95,37 @@ async fn main() -> Result<()> {
 
     info!("Connection string (sanitized): {}", connection_string.replace(&settings.database.password, "REDACTED"));
 
+    // Clean up any existing database connections first
+    if args.cleanup_connections {
+        let temp_pool = PgPoolOptions::new()
+            .max_connections(1)
+            .connect(&connection_string)
+            .await?;
+        
+        cleanup_database_connections(&temp_pool).await?;
+        temp_pool.close().await;
+    }
+
     // Initialize database connection pool
     let pool = PgPoolOptions::new()
         .max_connections(settings.database.max_connections)
         .min_connections(settings.database.min_connections)
+        .acquire_timeout(Duration::from_secs(30))
+        .idle_timeout(Duration::from_secs(300))
+        .max_lifetime(Duration::from_secs(1800))
         .connect(&connection_string)
         .await?;
 
     info!("Successfully connected to database");
+    
+    // Test database connection health
+    match sqlx::query("SELECT 1").execute(&pool).await {
+        Ok(_) => info!("Database connection pool is healthy"),
+        Err(e) => {
+            error!("Database connection pool health check failed: {:?}", e);
+            return Err(anyhow::anyhow!("Database connection pool is not healthy"));
+        }
+    }
 
     // Reset the database if the --reset flag is provided
     if args.reset {
@@ -135,18 +165,8 @@ async fn main() -> Result<()> {
 
     info!("Successfully initialized block processor");
 
-    // Initialize real-time sync if enabled
-    let realtime_sync = if settings.websocket.enabled {
-        info!("Initializing real-time sync with WebSocket URL: {}", settings.arch_node.websocket_url);
-        Some(RealtimeSync::new(
-            Arc::clone(&processor),
-            settings.arch_node.websocket_url.clone(),
-            Arc::new(arch_client.clone()),
-        ))
-    } else {
-        info!("Real-time sync disabled");
-        None
-    };
+    // Real-time sync is now handled by HybridSync
+    info!("Real-time sync will be managed by HybridSync if enabled");
 
     // Run sync_missing_program_data in a separate task
     let processor_clone = Arc::clone(&processor);
@@ -177,9 +197,26 @@ async fn main() -> Result<()> {
                 .collect::<Vec<_>>()
         );
 
+    // Create WebSocket server
+    let (event_tx, _event_rx) = broadcast::channel::<crate::arch_rpc::websocket::WebSocketEvent>(1000);
+    let websocket_server = Arc::new(api::websocket_server::WebSocketServer::new(event_tx));
+    
     // Create API router
+    let api_router = api::create_router(Arc::new(pool.clone()));
+    
+    // Create frontend router
+    let frontend_router = frontend::create_frontend_router();
+    
+    // Create WebSocket route with state
+    let websocket_route = Router::new()
+        .route("/ws", get(api::websocket_server::WebSocketServer::handle_websocket))
+        .with_state(websocket_server);
+    
+    // Create main app router
     let app = Router::new()
-        .merge(api::create_router(Arc::new(pool), Arc::clone(&processor)))
+        .merge(api_router)
+        .merge(frontend_router)
+        .merge(websocket_route)
         .route("/metrics", axum::routing::get(move || async move {
             let metrics = metrics.prometheus_handle.render();
             (
@@ -206,7 +243,7 @@ async fn main() -> Result<()> {
         
         let hybrid_sync = HybridSync::new(
             Arc::new(settings.clone()),
-            pool.clone(),
+            Arc::new(pool.clone()),
         );
         
         tokio::spawn(async move {
@@ -215,7 +252,14 @@ async fn main() -> Result<()> {
     } else {
         info!("Starting traditional sync without real-time support");
         
-        let sync = ChainSync::new(pool.clone());
+        let sync = ChainSync::new(
+            Arc::clone(&processor),
+            current_height,
+            settings.indexer.batch_size,
+            settings.indexer.concurrent_batches,
+            None, // No real-time sync
+            false, // Not hybrid mode
+        );
         
         tokio::spawn(async move {
             sync.start().await
@@ -231,15 +275,30 @@ async fn main() -> Result<()> {
 
     let listener = TcpListener::bind(addr).await?;
     info!("Successfully bound to address: {}", addr);
-    axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await?;
-
-    // Wait for sync to complete
-    sync_handle.await??;
-
+    
+    // Run both the HTTP server and sync concurrently
+    let server_handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .with_graceful_shutdown(shutdown_signal())
+            .await
+    });
+    
     info!("Starting Arch Indexer service...");
     info!("API server listening on {}", addr);
+    
+    // Wait for either the server or sync to complete
+    tokio::select! {
+        server_result = server_handle => {
+            if let Err(e) = server_result {
+                error!("HTTP server failed: {:?}", e);
+            }
+        }
+        sync_result = sync_handle => {
+            if let Err(e) = sync_result {
+                error!("Sync process failed: {:?}", e);
+            }
+        }
+    }
 
     Ok(())
 }
@@ -248,6 +307,27 @@ async fn reset_database(pool: &sqlx::PgPool) -> Result<()> {
     sqlx::query("TRUNCATE TABLE blocks, transactions RESTART IDENTITY CASCADE")
         .execute(pool)
         .await?;
+    Ok(())
+}
+
+async fn cleanup_database_connections(pool: &sqlx::PgPool) -> Result<()> {
+    info!("Cleaning up existing database connections...");
+    
+    // Terminate all active connections except our own
+    let result = sqlx::query(
+        "SELECT pg_terminate_backend(pid) FROM pg_stat_activity 
+         WHERE datname = current_database() 
+         AND pid <> pg_backend_pid() 
+         AND state = 'active'"
+    )
+    .execute(pool)
+    .await;
+    
+    match result {
+        Ok(_) => info!("Database connections cleaned up successfully"),
+        Err(e) => warn!("Failed to clean up database connections: {:?}", e),
+    }
+    
     Ok(())
 }
 

@@ -13,6 +13,7 @@ use tracing::{info, debug, error};
 
 use super::types::{ApiError, NetworkStats, SyncStatus, ProgramStats};
 use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::BlockProcessor};
+use axum::http::StatusCode;
 
 pub async fn get_blocks(
     State(pool): State<Arc<PgPool>>,
@@ -42,6 +43,8 @@ pub async fn get_blocks(
             COUNT(t.txid) as "transaction_count!: i64"
         FROM blocks b 
         LEFT JOIN transactions t ON b.height = t.block_height
+        WHERE b.timestamp > '1900-01-01'::timestamptz 
+          AND b.timestamp < '2100-01-01'::timestamptz
         GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height
         HAVING COUNT(t.txid) > 0 OR NOT $3
         ORDER BY b.height DESC 
@@ -337,6 +340,7 @@ pub async fn get_network_stats(
                 (SELECT COUNT(*) FROM transactions 
                  WHERE created_at >= NOW() - INTERVAL '1 minute') as minute_tx,
                 (SELECT MAX(height) FROM blocks) as max_height,
+                (SELECT COUNT(*) FROM blocks) as total_blocks,
                 (SELECT COUNT(*) / 60 as peak_tps FROM transactions 
                  WHERE created_at >= NOW() - INTERVAL '24 hours'
                  GROUP BY DATE_TRUNC('minute', created_at)
@@ -350,6 +354,7 @@ pub async fn get_network_stats(
             hourly_tx,
             minute_tx,
             max_height,
+            total_blocks,
             COALESCE(peak_tps, 0) as peak_tps
         FROM time_windows
         "#
@@ -379,6 +384,8 @@ pub async fn get_network_stats(
 
     let response = NetworkStats {
         total_transactions: stats.total_tx.unwrap_or(0),
+        total_blocks: stats.total_blocks.unwrap_or(0),
+        latest_block_height: stats.max_height.unwrap_or(0),
         block_height: stats.max_height.unwrap_or(0),
         slot_height: stats.max_height.unwrap_or(0),
         current_tps,

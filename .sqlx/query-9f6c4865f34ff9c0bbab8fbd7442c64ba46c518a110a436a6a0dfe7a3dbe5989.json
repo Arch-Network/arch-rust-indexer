@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n            INSERT INTO blocks (height, hash, timestamp, bitcoin_block_height, merkle_root, previous_block_hash)\n            VALUES ($1, $2, $3, $4, $5, $6)\n            ON CONFLICT (height) DO UPDATE \n            SET hash = $2, timestamp = $3, bitcoin_block_height = $4, merkle_root = $5, previous_block_hash = $6\n            ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Timestamptz",
+        "Int8",
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "9f6c4865f34ff9c0bbab8fbd7442c64ba46c518a110a436a6a0dfe7a3dbe5989"
+}

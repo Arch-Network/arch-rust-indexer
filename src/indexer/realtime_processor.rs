@@ -3,7 +3,9 @@ use chrono::{DateTime, Utc};
 use serde_json::Value;
 use sqlx::PgPool;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU64};
 use tokio::sync::mpsc;
+use tokio::time::{sleep, Duration, Instant};
 use tracing::{error, info, warn};
 
 use crate::arch_rpc::websocket::WebSocketEvent;
@@ -23,18 +25,27 @@ impl RealtimeProcessor {
     pub async fn start(&self, mut event_rx: mpsc::Receiver<WebSocketEvent>) -> Result<()> {
         info!("🚀 Starting real-time event processor...");
 
-        while let Some(event) = event_rx.recv().await {
+        let mut event_count = 0;
+        let mut last_event_time = tokio::time::Instant::now();
+        
+        while let Some(event) = tokio::time::timeout(
+            tokio::time::Duration::from_secs(60), // 1 minute timeout
+            event_rx.recv()
+        ).await.map_err(|_| anyhow::anyhow!("No events received for 60 seconds"))? {
+            event_count += 1;
+            last_event_time = tokio::time::Instant::now();
+            
             match self.process_event(event).await {
                 Ok(_) => {
-                    // Event processed successfully
+                    info!("✅ Event #{} processed successfully", event_count);
                 }
                 Err(e) => {
-                    error!("Failed to process event: {}", e);
+                    error!("❌ Failed to process event #{}: {}", event_count, e);
                 }
             }
         }
 
-        info!("Real-time event processor stopped");
+        info!("Real-time event processor stopped after processing {} events", event_count);
         Ok(())
     }
 
@@ -71,13 +82,21 @@ impl RealtimeProcessor {
 
         info!("📦 Processing block event: hash={}, timestamp={}", hash, timestamp);
 
-        // Check if block already exists
-        let existing_block = sqlx::query!(
-            "SELECT height FROM blocks WHERE hash = $1",
-            hash
-        )
-        .fetch_optional(&*self.pool)
-        .await?;
+        // Check if block already exists with connection timeout
+        let existing_block = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            sqlx::query!(
+                "SELECT height FROM blocks WHERE hash = $1",
+                hash
+            )
+            .fetch_optional(&*self.pool)
+        ).await {
+            Ok(result) => result?,
+            Err(_) => {
+                warn!("Database query timeout for block {}, skipping", hash);
+                return Ok(());
+            }
+        };
 
         if existing_block.is_some() {
             info!("Block {} already exists, skipping", hash);
@@ -263,12 +282,20 @@ impl RealtimeProcessor {
 
     /// Estimate block height based on timestamp
     async fn estimate_block_height(&self, timestamp: DateTime<Utc>) -> Result<i64> {
-        // Get the latest block height from database
-        let latest_height = sqlx::query!(
-            "SELECT height FROM blocks ORDER BY height DESC LIMIT 1"
-        )
-        .fetch_optional(&*self.pool)
-        .await?
+        // Get the latest block height from database with timeout
+        let latest_height = match tokio::time::timeout(
+            tokio::time::Duration::from_secs(10),
+            sqlx::query!(
+                "SELECT height FROM blocks ORDER BY height DESC LIMIT 1"
+            )
+            .fetch_optional(&*self.pool)
+        ).await {
+            Ok(result) => result?,
+            Err(_) => {
+                warn!("Database query timeout for latest height, using fallback");
+                return Ok(0);
+            }
+        }
         .map(|row| row.height)
         .unwrap_or(0);
 

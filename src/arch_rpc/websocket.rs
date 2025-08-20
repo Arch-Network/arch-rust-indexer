@@ -31,24 +31,36 @@ impl WebSocketClient {
         
         info!("Starting WebSocket client for: {}", self.url);
         
+        let mut attempt_count = 0;
         loop {
+            attempt_count += 1;
+            info!("WebSocket connection attempt #{}", attempt_count);
+            
             match self.connect_and_subscribe(&url, &event_tx).await {
                 Ok(_) => {
                     info!("WebSocket connection closed, attempting to reconnect...");
                 }
                 Err(e) => {
-                    error!("WebSocket connection error: {}", e);
+                    error!("WebSocket connection error (attempt #{}): {}", attempt_count, e);
+                    
+                    // Check if we've exceeded max reconnection attempts
+                    if attempt_count >= self.settings.max_reconnect_attempts {
+                        error!("Exceeded maximum reconnection attempts ({}), stopping WebSocket client", self.settings.max_reconnect_attempts);
+                        break;
+                    }
                 }
             }
 
             if !self.settings.enabled {
+                info!("WebSocket client disabled, stopping");
                 break;
             }
 
-            info!("Waiting {} seconds before reconnection attempt...", self.settings.reconnect_interval_seconds);
+            info!("Waiting {} seconds before reconnection attempt {}...", self.settings.reconnect_interval_seconds, attempt_count + 1);
             tokio::time::sleep(tokio::time::Duration::from_secs(self.settings.reconnect_interval_seconds)).await;
         }
 
+        info!("WebSocket client stopped");
         Ok(())
     }
 
@@ -59,7 +71,13 @@ impl WebSocketClient {
     ) -> Result<()> {
         info!("Connecting to WebSocket: {}", url);
         
-        let (ws_stream, _) = connect_async(url).await?;
+        // Add timeout to prevent hanging
+        let connect_future = connect_async(url);
+        let timeout_duration = tokio::time::Duration::from_secs(30); // 30 second timeout
+        
+        let (ws_stream, _) = tokio::time::timeout(timeout_duration, connect_future).await
+            .map_err(|_| anyhow::anyhow!("WebSocket connection timeout after {} seconds", timeout_duration.as_secs()))??;
+            
         info!("✅ WebSocket connection established successfully!");
 
         let (mut write, mut read) = ws_stream.split();
@@ -132,6 +150,9 @@ impl WebSocketClient {
                     break;
                 }
             }
+            
+            // Add a small delay to prevent tight loops
+            tokio::time::sleep(tokio::time::Duration::from_millis(10)).await;
         }
 
         Ok(())

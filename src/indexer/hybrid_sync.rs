@@ -3,6 +3,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration};
+use tokio::task::spawn;
 use tracing::{error, info, warn};
 
 use crate::arch_rpc::websocket::{WebSocketClient, WebSocketEvent};
@@ -62,7 +63,7 @@ impl HybridSync {
 
         // Start WebSocket client
         let websocket_client = WebSocketClient::new(websocket_settings, websocket_url);
-        let client_handle = tokio::spawn(async move {
+        let client_handle = spawn(async move {
             if let Err(e) = websocket_client.start(event_tx).await {
                 error!("WebSocket client failed: {}", e);
             }
@@ -108,6 +109,10 @@ impl HybridSync {
             }
             _ = status_monitor_handle => {
                 error!("Status monitor task ended unexpectedly");
+            }
+            // Add timeout to prevent indefinite hanging
+            _ = tokio::time::sleep(Duration::from_secs(300)) => { // 5 minute timeout
+                warn!("HybridSync real-time sync timeout reached, continuing with traditional sync");
             }
         }
 

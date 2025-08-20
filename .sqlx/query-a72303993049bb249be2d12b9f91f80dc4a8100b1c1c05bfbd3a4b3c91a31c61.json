@@ -1,0 +1,48 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        SELECT \n            b.height,\n            b.hash,\n            b.timestamp as \"timestamp!: DateTime<Utc>\",\n            b.bitcoin_block_height,\n            COUNT(t.txid) as \"transaction_count!: i64\"\n        FROM blocks b \n        LEFT JOIN transactions t ON b.height = t.block_height\n        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height\n        HAVING COUNT(t.txid) > 0 OR NOT $3\n        ORDER BY b.height DESC \n        LIMIT $1 OFFSET $2\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "height",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "hash",
+        "type_info": "Text"
+      },
+      {
+        "ordinal": 2,
+        "name": "timestamp!: DateTime<Utc>",
+        "type_info": "Timestamptz"
+      },
+      {
+        "ordinal": 3,
+        "name": "bitcoin_block_height",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "transaction_count!: i64",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Int8",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      true,
+      null
+    ]
+  },
+  "hash": "a72303993049bb249be2d12b9f91f80dc4a8100b1c1c05bfbd3a4b3c91a31c61"
+}

@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE transactions SET status = jsonb_set(status, '{reapplied}', 'true') WHERE txid = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "5f5b192893b1da3326b094351a3fee46bf950d8ec34339cd3b2ac1264f6b86d5"
+}

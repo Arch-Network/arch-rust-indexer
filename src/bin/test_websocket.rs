@@ -2,9 +2,10 @@ use anyhow::Result;
 use clap::Parser;
 use tokio::sync::mpsc;
 use tracing::{info, error};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 use arch_indexer::arch_rpc::websocket::{WebSocketClient, WebSocketEvent};
+use arch_indexer::config::settings::WebSocketSettings;
 
 #[derive(Parser)]
 struct Args {
@@ -32,15 +33,15 @@ async fn main() -> Result<()> {
     info!("Testing WebSocket connection to: {}", args.url);
     info!("Will listen for {} seconds", args.duration);
     
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<WebSocketEvent>();
+    let (event_tx, mut event_rx) = mpsc::channel::<WebSocketEvent>(100);
     
-    // Create WebSocket client
-    let client = WebSocketClient::new(args.url.clone());
+    // Create WebSocket client with default settings
+    let settings = WebSocketSettings::default();
+    let client = WebSocketClient::new(settings, args.url.clone());
     
     // Start connection in background
-    let client_clone = client.clone();
     let connection_handle = tokio::spawn(async move {
-        if let Err(e) = client_clone.connect_and_listen(event_tx).await {
+        if let Err(e) = client.start(event_tx).await {
             error!("WebSocket connection failed: {}", e);
         }
     });
@@ -77,6 +78,4 @@ async fn main() -> Result<()> {
     
     info!("WebSocket test completed");
     Ok(())
-}
-
-
+} 

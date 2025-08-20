@@ -2,6 +2,7 @@
 name = "arch-indexer"
 version = "1.0.1"
 edition = "2021"
+default-run = "arch-indexer"
 
 [dependencies]
 axum = { version = "0.7", features = ["ws"] }
@@ -32,6 +33,7 @@ metrics = "0.21"
 metrics-exporter-prometheus = { version = "0.12", default-features = false }
 tokio-retry = "0.3"
 http-body-util = "0.1"
+clap = { version = "4.5.45", features = ["derive"] }
 
 [lib]
 name = "arch_indexer"

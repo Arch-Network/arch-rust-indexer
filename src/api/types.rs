@@ -46,6 +46,8 @@ struct ErrorResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct NetworkStats {
     pub total_transactions: i64,
+    pub total_blocks: i64,
+    pub latest_block_height: i64,
     pub block_height: i64,
     pub slot_height: i64,
     pub current_tps: f64,

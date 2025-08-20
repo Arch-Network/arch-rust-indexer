@@ -1,11 +1,11 @@
 database:
   username: "postgres"
-  password: "your_password_here"
+  password: "postgres"
   host: "localhost"
   port: 5432
   database_name: "archindexer"
-  max_connections: 200
-  min_connections: 20
+  max_connections: 20
+  min_connections: 5
   timeout_seconds: 30
 
 application:
@@ -16,7 +16,7 @@ application:
   cors_allow_headers: "Content-Type, Authorization"
 
 arch_node:
-  url: "https://rpc-beta.test.arch.network"
+  url: "http://44.196.173.35"
   websocket_url: "ws://44.196.173.35:10081"
 
 redis:

@@ -2,7 +2,7 @@ use config::{Config, ConfigError, Environment};
 use serde::Deserialize;
 use std::env;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct Settings {
     pub database: DatabaseSettings,
     pub application: ApplicationSettings,
@@ -12,7 +12,7 @@ pub struct Settings {
     pub websocket: WebSocketSettings,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct DatabaseSettings {
     pub username: String,
     pub password: String,
@@ -23,7 +23,7 @@ pub struct DatabaseSettings {
     pub min_connections: u32,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ApplicationSettings {
     pub port: u16,
     pub host: String,
@@ -48,7 +48,7 @@ fn default_cors_headers() -> String {
     "Content-Type, Authorization".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct ArchNodeSettings {
     pub url: String,
     #[serde(default = "default_websocket_url")]
@@ -59,12 +59,12 @@ fn default_websocket_url() -> String {
     "ws://localhost:8081".to_string()
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct RedisSettings {
     pub url: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Clone)]
 pub struct IndexerSettings {
     pub batch_size: usize,
     pub concurrent_batches: usize,

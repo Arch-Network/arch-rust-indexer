@@ -55,7 +55,7 @@ impl ArchRpcClient {
             .unwrap_or_else(|_| Client::new());
         
         // Temporarily hardcode the beta network URL for testing
-        let _url = "https://rpc-beta.test.arch.network".to_string();
+        let _url = "http://44.196.173.35".to_string();
         info!("Initialized Arch RPC client for: {}", _url);
         Self { client, url: _url }
     }
