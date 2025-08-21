@@ -4,7 +4,7 @@ use axum::{
 };
 use serde_json::json;
 use std::{collections::HashMap, sync::Arc};
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 use axum::response::IntoResponse;
 use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, NaiveDateTime, Utc};
@@ -608,4 +608,149 @@ pub async fn get_websocket_stats() -> Json<serde_json::Value> {
         "last_heartbeat": chrono::Utc::now().to_rfc3339(),
         "subscription_topics": ["block", "transaction", "account_update", "rolledback_transactions", "reapplied_transactions", "dkg"]
     }))
+}
+
+#[derive(serde::Serialize)]
+pub struct MempoolStatsResponse {
+    pub total_transactions: i64,
+    pub pending_count: i64,
+    pub confirmed_count: i64,
+    pub avg_fee_priority: Option<f64>,
+    pub avg_size_bytes: Option<f64>,
+    pub total_size_bytes: Option<i64>,
+    pub oldest_transaction: Option<DateTime<Utc>>,
+    pub newest_transaction: Option<DateTime<Utc>>,
+}
+
+pub async fn get_mempool_stats(
+    State(pool): State<Arc<PgPool>>,
+) -> Result<Json<MempoolStatsResponse>, ApiError> {
+    let row = sqlx::query(
+        r#"
+        SELECT 
+            total_transactions,
+            pending_count,
+            confirmed_count,
+            avg_fee_priority,
+            avg_size_bytes,
+            total_size_bytes,
+            oldest_transaction,
+            newest_transaction
+        FROM mempool_stats
+        "#
+    )
+    .fetch_one(&*pool)
+    .await?;
+
+    let total_transactions: i64 = row.try_get::<i64, _>("total_transactions").unwrap_or(0);
+    let pending_count: i64 = row.try_get::<i64, _>("pending_count").unwrap_or(0);
+    let confirmed_count: i64 = row.try_get::<i64, _>("confirmed_count").unwrap_or(0);
+    let avg_fee_priority: Option<f64> = row.try_get::<Option<f64>, _>("avg_fee_priority").unwrap_or(None);
+    let avg_size_bytes: Option<f64> = row.try_get::<Option<f64>, _>("avg_size_bytes").unwrap_or(None);
+    let total_size_bytes: Option<i64> = row.try_get::<Option<i64>, _>("total_size_bytes").unwrap_or(None);
+    let oldest_transaction: Option<DateTime<Utc>> = row.try_get::<Option<DateTime<Utc>>, _>("oldest_transaction").unwrap_or(None);
+    let newest_transaction: Option<DateTime<Utc>> = row.try_get::<Option<DateTime<Utc>>, _>("newest_transaction").unwrap_or(None);
+
+    Ok(Json(MempoolStatsResponse {
+        total_transactions,
+        pending_count,
+        confirmed_count,
+        avg_fee_priority,
+        avg_size_bytes,
+        total_size_bytes,
+        oldest_transaction,
+        newest_transaction,
+    }))
+}
+
+#[derive(serde::Serialize)]
+pub struct MempoolTxBrief {
+    pub txid: String,
+    pub fee_priority: Option<i32>,
+    pub size_bytes: Option<i32>,
+    pub added_at: DateTime<Utc>,
+}
+
+pub async fn get_recent_mempool_transactions(
+    State(pool): State<Arc<PgPool>>,
+) -> Result<Json<Vec<MempoolTxBrief>>, ApiError> {
+    let records = sqlx::query(
+        r#"
+        SELECT txid,
+               fee_priority,
+               size_bytes,
+               added_at
+        FROM mempool_transactions
+        ORDER BY added_at DESC
+        LIMIT 50
+        "#
+    )
+    .fetch_all(&*pool)
+    .await?;
+
+    let items = records
+        .into_iter()
+        .map(|r| MempoolTxBrief {
+            txid: r.get::<String, _>("txid"),
+            fee_priority: r.try_get::<Option<i32>, _>("fee_priority").unwrap_or(None),
+            size_bytes: r.try_get::<Option<i32>, _>("size_bytes").unwrap_or(None),
+            added_at: r.get::<DateTime<Utc>, _>("added_at"),
+        })
+        .collect();
+
+    Ok(Json(items))
+}
+
+#[derive(serde::Serialize)]
+pub struct TransactionMetricsResponse {
+    pub txid: String,
+    pub compute_units_consumed: Option<i32>,
+    pub fee_priority: Option<i32>,
+    pub size_bytes: Option<i32>,
+    pub in_mempool: bool,
+    pub created_at: Option<NaiveDateTime>,
+}
+
+pub async fn get_transaction_metrics(
+    State(pool): State<Arc<PgPool>>,
+    Path(txid): Path<String>,
+) -> Result<Json<TransactionMetricsResponse>, ApiError> {
+    // Fetch compute units and created_at from confirmed transactions table (if present)
+    let base = sqlx::query(
+        r#"
+        SELECT 
+            compute_units_consumed,
+            created_at
+        FROM transactions
+        WHERE txid = $1
+        "#
+    )
+    .bind(&txid)
+    .fetch_optional(&*pool)
+    .await?;
+
+    // Fetch fee priority and size from mempool (if present)
+    let mem = sqlx::query(
+        r#"
+        SELECT 
+            fee_priority,
+            size_bytes
+        FROM mempool_transactions
+        WHERE txid = $1
+        "#
+    )
+    .bind(&txid)
+    .fetch_optional(&*pool)
+    .await?;
+
+    let response = TransactionMetricsResponse {
+        txid: txid.clone(),
+        compute_units_consumed: base.as_ref().and_then(|r| r.try_get::<Option<i32>, _>("compute_units_consumed").ok()).flatten(),
+        fee_priority: mem.as_ref().and_then(|m| m.try_get::<Option<i32>, _>("fee_priority").ok()).flatten(),
+        size_bytes: mem.as_ref().and_then(|m| m.try_get::<Option<i32>, _>("size_bytes").ok()).flatten(),
+        in_mempool: mem.is_some(),
+        created_at: base.and_then(|r| r.try_get::<Option<NaiveDateTime>, _>("created_at").ok()).flatten(),
+    };
+
+    Ok(Json(response))
 }

@@ -6,6 +6,13 @@ interface NetworkStats {
   total_blocks: number;
   total_transactions: number;
   latest_block_height: number;
+  // Extended fields from API
+  block_height?: number;
+  slot_height?: number;
+  current_tps?: number;
+  average_tps?: number;
+  peak_tps?: number;
+  daily_transactions?: number;
 }
 
 interface Block {
@@ -32,6 +39,11 @@ export default function Home() {
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [memeMode, setMemeMode] = useState(false);
+  const [mempoolStats, setMempoolStats] = useState<any | null>(null);
+  const [recentMempool, setRecentMempool] = useState<any[]>([]);
+  const [isTxDrawerOpen, setIsTxDrawerOpen] = useState(false);
+  const [drawerTx, setDrawerTx] = useState<Transaction | null>(null);
+  const [showRawJson, setShowRawJson] = useState(false);
 
   // Get API URL from environment or fallback to localhost
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
@@ -54,6 +66,51 @@ export default function Home() {
       html.classList.remove('meme-mode');
     }
   }, [memeMode]);
+
+  useEffect(() => {
+    const interval = setInterval(() => {
+      loadMempool();
+    }, 5000);
+    loadMempool();
+    return () => clearInterval(interval);
+  }, []);
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key.toLowerCase() === 'd') {
+        if (selectedTransaction) {
+          setDrawerTx(selectedTransaction);
+          setIsTxDrawerOpen(true);
+        }
+      }
+      if (e.key === 'Escape') {
+        setIsTxDrawerOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [selectedTransaction]);
+
+  const openTxDrawer = (tx: Transaction) => {
+    setDrawerTx(tx);
+    setIsTxDrawerOpen(true);
+  };
+
+  const decodeProgramSteps = (tx: any) => {
+    try {
+      const instructions = tx?.data?.message?.instructions;
+      if (!Array.isArray(instructions)) return [];
+      return instructions.map((ins: any, idx: number) => ({
+        index: idx,
+        programId: ins.program_id || ins.programId || 'unknown',
+        opcode: ins.opcode || ins.name || 'instruction',
+        meta: ins.accounts ? `${ins.accounts.length} accounts` : '',
+        raw: ins,
+      }));
+    } catch {
+      return [];
+    }
+  };
 
   const createMatrixRain = () => {
     const matrixBg = document.createElement('div');
@@ -101,6 +158,21 @@ export default function Home() {
       setTransactions(Array.isArray(data) ? data : (data.transactions || []));
     } catch (error) {
       console.error('Failed to load transactions:', error);
+    }
+  };
+
+  const loadMempool = async () => {
+    try {
+      const [statsRes, recentRes] = await Promise.all([
+        fetch(`${apiUrl}/api/mempool/stats`),
+        fetch(`${apiUrl}/api/mempool/recent`)
+      ]);
+      const stats = await statsRes.json();
+      const recent = await recentRes.json();
+      setMempoolStats(stats);
+      setRecentMempool(Array.isArray(recent) ? recent : []);
+    } catch (e) {
+      // ignore ticker errors
     }
   };
 
@@ -333,6 +405,40 @@ export default function Home() {
           </div>
         </div>
 
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: 12, marginBottom: 18 }}>
+          <div className={styles.statCard}>
+            <h3>Current TPS</h3>
+            <div className={styles.value}>{(stats?.current_tps ?? 0).toFixed(2)}</div>
+            <div className={styles.label}>Avg: {(stats?.average_tps ?? 0).toFixed(2)} | Peak: {(stats?.peak_tps ?? 0).toFixed(2)}</div>
+          </div>
+          <div className={styles.statCard}>
+            <h3>Mempool Size</h3>
+            <div className={styles.value}>{mempoolStats?.total_transactions ?? 0}</div>
+            <div className={styles.label}>Pending: {mempoolStats?.pending_count ?? 0}</div>
+          </div>
+          <div className={styles.statCard}>
+            <h3>Avg Fee Priority</h3>
+            <div className={styles.value}>{mempoolStats?.avg_fee_priority?.toFixed?.(0) ?? '—'}</div>
+            <div className={styles.label}>Total Bytes: {mempoolStats?.total_size_bytes ?? 0}</div>
+          </div>
+          <div className={styles.statCard}>
+            <h3>Newest Pending</h3>
+            <div className={styles.value}>{mempoolStats?.newest_transaction ? formatTimestamp(mempoolStats.newest_transaction) : '—'}</div>
+            <div className={styles.label}>Oldest: {mempoolStats?.oldest_transaction ? formatTimestamp(mempoolStats.oldest_transaction) : '—'}</div>
+          </div>
+        </div>
+
+        {/* Live mempool ticker */}
+        <div style={{ overflow: 'hidden', border: '1px solid rgba(255,255,255,0.06)', background: '#0a0c10', marginBottom: 20 }}>
+          <div style={{ display: 'flex', gap: 24, padding: '8px 12px', animation: 'ticker 40s linear infinite', whiteSpace: 'nowrap' }}>
+            {recentMempool.slice(0, 30).map((m) => (
+              <span key={m.txid} style={{ color: 'var(--accent-2)', marginRight: 24 }}>
+                TX {m.txid.substring(0,12)}·· fee {m.fee_priority ?? '—'} · {m.size_bytes ?? '—'} bytes
+              </span>
+            ))}
+          </div>
+        </div>
+
         <div className={styles.statsGrid}>
           <div className={styles.statCard}>
             <h3>Blocks Indexed</h3>
@@ -465,7 +571,7 @@ export default function Home() {
                     <td>
                       <button 
                         className={styles.hashButton}
-                        onClick={() => setSelectedTransaction(tx)}
+                        onClick={() => { setSelectedTransaction(tx); openTxDrawer(tx); }}
                       >
                         {tx.txid.substring(0, 16)}...
                       </button>
@@ -480,6 +586,60 @@ export default function Home() {
           </div>
         </div>
       </main>
+
+      {isTxDrawerOpen && (
+        <>
+          <div className={styles.drawerOverlay} onClick={() => setIsTxDrawerOpen(false)} />
+          <aside className={`${styles.drawer} ${styles.drawerOpen}`} role="dialog" aria-modal="true">
+            <div className={styles.drawerHeader}>
+              <h3 className={styles.drawerTitle}>Transaction Detail</h3>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <button className={styles.refreshButton} onClick={() => setShowRawJson(v => !v)}>
+                  {showRawJson ? 'Hide JSON' : 'Show JSON'}
+                </button>
+                <button className={styles.refreshButton} onClick={() => setIsTxDrawerOpen(false)}>Close</button>
+              </div>
+            </div>
+            <div className={styles.drawerBody}>
+              {drawerTx && (
+                <>
+                  <div className={styles.blockDetails}>
+                    <div className={styles.detailRow}><strong>TXID</strong> <span className={styles.hashValue}>{drawerTx.txid}</span></div>
+                    <div className={styles.detailRow}><strong>Block</strong> {drawerTx.block_height}</div>
+                    <div className={styles.detailRow}><strong>Status</strong> {formatTransactionStatus(drawerTx.status)}</div>
+                    <div className={styles.detailRow}><strong>Created</strong> {formatTimestamp(drawerTx.created_at)}</div>
+                  </div>
+
+                  {!showRawJson && (
+                    <div>
+                      <h4 className={styles.stepHeader} style={{ marginTop: 12 }}>Program Steps</h4>
+                      {decodeProgramSteps(drawerTx).length === 0 && (
+                        <div className={styles.detailRow}>No decoded steps available.</div>
+                      )}
+                      {decodeProgramSteps(drawerTx).map((s) => (
+                        <div key={s.index} className={styles.step}>
+                          <div className={styles.stepHeader}>
+                            <span>{s.opcode}</span>
+                            <span className={styles.stepMeta}>{s.meta}</span>
+                          </div>
+                          <div className={styles.stepMeta}>Program: <span className={styles.hashValue}>{s.programId}</span></div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {showRawJson && (
+                    <pre className={styles.rawJson}>{JSON.stringify((drawerTx as any).data ?? {}, null, 2)}</pre>
+                  )}
+                </>
+              )}
+            </div>
+            <div className={styles.drawerFooter}>
+              <small className={styles.stepMeta}>Tip: Press D to open when a transaction row is selected. Esc to close.</small>
+            </div>
+          </aside>
+        </>
+      )}
 
       {/* Block Modal */}
       {selectedBlock && (

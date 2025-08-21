@@ -22,5 +22,8 @@ pub fn create_router(pool: Arc<PgPool>) -> Router {
         .route("/api/realtime/status", get(handlers::get_realtime_status))
         .route("/api/realtime/events", get(handlers::get_recent_events))
         .route("/api/websocket/stats", get(handlers::get_websocket_stats))
+        .route("/api/mempool/stats", get(handlers::get_mempool_stats))
+        .route("/api/mempool/recent", get(handlers::get_recent_mempool_transactions))
+        .route("/api/transactions/:txid/metrics", get(handlers::get_transaction_metrics))
         .with_state(pool)
 }
