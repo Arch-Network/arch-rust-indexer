@@ -1,0 +1,271 @@
+/* 90s Internet Aesthetic - Global Styles */
+@import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=VT323&display=swap');
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  padding: 0;
+  margin: 0;
+  font-family: 'JetBrains Mono', monospace;
+  background: #000;
+  color: #00ff00;
+  overflow-x: hidden;
+}
+
+/* Terminal-style scrollbar */
+::-webkit-scrollbar {
+  width: 16px;
+}
+
+::-webkit-scrollbar-track {
+  background: #000;
+  border: 1px solid #00ff00;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #00ff00;
+  border: 1px solid #000;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #ffff00;
+}
+
+/* Selection styling */
+::selection {
+  background: #00ff00;
+  color: #000;
+}
+
+::-moz-selection {
+  background: #00ff00;
+  color: #000;
+}
+
+/* Focus outline for accessibility */
+*:focus {
+  outline: 2px solid #ffff00;
+  outline-offset: 2px;
+}
+
+/* Terminal blink effect for loading states */
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+.blink {
+  animation: blink 1s infinite;
+}
+
+/* CRT scanline effect */
+@keyframes scanline {
+  0% {
+    transform: translateY(-100%);
+  }
+  100% {
+    transform: translateY(100vh);
+  }
+}
+
+.scanline {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 2px;
+  background: linear-gradient(to right, transparent, #00ff00, transparent);
+  animation: scanline 8s linear infinite;
+  pointer-events: none;
+  z-index: 9999;
+  opacity: 0.3;
+}
+
+/* Matrix rain effect background */
+@keyframes matrix-rain {
+  0% {
+    transform: translateY(-100vh);
+  }
+  100% {
+    transform: translateY(100vh);
+  }
+}
+
+.matrix-bg {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+  z-index: -1;
+  opacity: 0.05;
+}
+
+.matrix-char {
+  position: absolute;
+  color: #00ff00;
+  font-family: 'VT323', monospace;
+  font-size: 14px;
+  animation: matrix-rain linear infinite;
+}
+
+/* Glitch effect for headers */
+@keyframes glitch {
+  0% {
+    transform: translate(0);
+  }
+  20% {
+    transform: translate(-2px, 2px);
+  }
+  40% {
+    transform: translate(-2px, -2px);
+  }
+  60% {
+    transform: translate(2px, 2px);
+  }
+  80% {
+    transform: translate(2px, -2px);
+  }
+  100% {
+    transform: translate(0);
+  }
+}
+
+.glitch {
+  animation: glitch 0.3s infinite;
+}
+
+/* Terminal typing effect */
+@keyframes typing {
+  from { width: 0; }
+  to { width: 100%; }
+}
+
+.typing {
+  overflow: hidden;
+  white-space: nowrap;
+  animation: typing 2s steps(40, end);
+}
+
+/* Retro button press effect */
+.retro-button:active {
+  transform: translate(1px, 1px);
+  box-shadow: 1px 1px 0px #00ff00;
+}
+
+/* Data terminal look */
+.terminal-look {
+  background: #000;
+  border: 2px solid #00ff00;
+  color: #00ff00;
+  font-family: 'VT323', monospace;
+  padding: 10px;
+  margin: 5px 0;
+}
+
+/* Status indicators */
+.status-online {
+  color: #00ff00;
+  text-shadow: 0 0 5px #00ff00;
+}
+
+.status-offline {
+  color: #ff0000;
+  text-shadow: 0 0 5px #ff0000;
+}
+
+.status-warning {
+  color: #ffff00;
+  text-shadow: 0 0 5px #ffff00;
+}
+
+/* Data table styling */
+.data-table {
+  border-collapse: collapse;
+  width: 100%;
+  border: 2px solid #00ff00;
+}
+
+.data-table th,
+.data-table td {
+  border: 1px solid #00ff00;
+  padding: 8px;
+  text-align: left;
+  font-family: 'VT323', monospace;
+}
+
+.data-table th {
+  background: #000;
+  color: #00ff00;
+  font-weight: bold;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+}
+
+.data-table td {
+  color: #00aa00;
+}
+
+/* Progress bar styling */
+.progress-container {
+  width: 100%;
+  background: #000;
+  border: 2px solid #00ff00;
+  margin: 10px 0;
+}
+
+.progress-bar {
+  height: 20px;
+  background: linear-gradient(90deg, #00ff00, #ffff00);
+  transition: width 0.5s ease;
+}
+
+/* Input field styling */
+.retro-input {
+  background: #000;
+  border: 2px solid #00ff00;
+  color: #00ff00;
+  padding: 10px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+}
+
+.retro-input:focus {
+  border-color: #ffff00;
+  box-shadow: 0 0 10px #ffff00;
+}
+
+.retro-input::placeholder {
+  color: #00aa00;
+}
+
+/* Button styling */
+.retro-button {
+  background: #000;
+  color: #00ff00;
+  border: 2px solid #00ff00;
+  padding: 10px 20px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 14px;
+  cursor: pointer;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  box-shadow: 3px 3px 0px #00ff00;
+  transition: all 0.1s ease;
+}
+
+.retro-button:hover {
+  background: #00ff00;
+  color: #000;
+  transform: translate(-2px, -2px);
+  box-shadow: 5px 5px 0px #00ff00;
+}
+
+.retro-button:active {
+  transform: translate(0px, 0px);
+  box-shadow: 2px 2px 0px #00ff00;
+}

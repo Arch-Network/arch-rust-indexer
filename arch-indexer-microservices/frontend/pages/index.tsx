@@ -40,7 +40,25 @@ export default function Home() {
     loadBlocks();
     loadTransactions();
     connectWebSocket();
+    createMatrixRain();
   }, []);
+
+  const createMatrixRain = () => {
+    const matrixBg = document.createElement('div');
+    matrixBg.className = 'matrix-bg';
+    
+    for (let i = 0; i < 50; i++) {
+      const char = document.createElement('div');
+      char.className = 'matrix-char';
+      char.textContent = String.fromCharCode(0x30A0 + Math.random() * 96);
+      char.style.left = Math.random() * 100 + '%';
+      char.style.animationDuration = (Math.random() * 10 + 5) + 's';
+      char.style.animationDelay = Math.random() * 5 + 's';
+      matrixBg.appendChild(char);
+    }
+    
+    document.body.appendChild(matrixBg);
+  };
 
   const loadNetworkStats = async () => {
     try {
@@ -91,7 +109,7 @@ export default function Home() {
   };
 
   const formatTimestamp = (timestamp: string) => {
-    if (!timestamp) return 'Unknown';
+    if (!timestamp) return 'UNKNOWN';
     try {
       let date;
       if (typeof timestamp === 'string') {
@@ -101,7 +119,7 @@ export default function Home() {
           if (match) {
             const [, year] = match;
             if (parseInt(year) > 9999) {
-              return 'Invalid Date (Overflow)';
+              return 'INVALID DATE (OVERFLOW)';
             }
           }
         }
@@ -109,7 +127,7 @@ export default function Home() {
       }
       
       if (isNaN(date.getTime())) {
-        return 'Invalid Date';
+        return 'INVALID DATE';
       }
       
       return date.toLocaleDateString('en-US', {
@@ -119,17 +137,17 @@ export default function Home() {
         hour: '2-digit',
         minute: '2-digit',
         hour12: true
-      });
+      }).toUpperCase();
     } catch (error) {
-      return 'Format Error';
+      return 'FORMAT ERROR';
     }
   };
 
   const formatTransactionStatus = (status: any) => {
-    if (!status) return 'Unknown';
+    if (!status) return 'UNKNOWN';
     try {
       if (typeof status === 'string') {
-        return status;
+        return status.toUpperCase();
       } else if (typeof status === 'object') {
         if (status.Failed) {
           let errorMsg = status.Failed;
@@ -144,33 +162,33 @@ export default function Home() {
           }
           return (
             <span className={styles.statusFailed} title={status.Failed}>
-              ❌ {errorMsg}
+              [FAILED] {errorMsg}
             </span>
           );
         }
         if (status.Success) {
           return (
             <span className={styles.statusSuccess}>
-              ✅ Success
+              [SUCCESS] EXECUTED
             </span>
           );
         }
         if (status.Pending) {
           return (
             <span className={styles.statusPending}>
-              ⏳ Pending
+              [PENDING] QUEUED
             </span>
           );
         }
         return (
           <span className={styles.statusOther}>
-            ℹ️ {JSON.stringify(status)}
+            [INFO] {JSON.stringify(status)}
           </span>
         );
       }
-      return 'Unknown';
+      return 'UNKNOWN';
     } catch (error) {
-      return 'Format Error';
+      return 'FORMAT ERROR';
     }
   };
 
@@ -186,53 +204,56 @@ export default function Home() {
 
   return (
     <div className={styles.container}>
+      {/* CRT Scanline Effect */}
+      <div className="scanline"></div>
+      
       <Head>
-        <title>Arch Indexer Dashboard</title>
-        <meta name="description" content="Blockchain indexer dashboard" />
+        <title>ARCH INDEXER - BLOCKCHAIN DATA PROCESSOR</title>
+        <meta name="description" content="High-performance blockchain indexer and data processor" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
 
       <main className={styles.main}>
         <div className={styles.header}>
-          <h1>🚀 Arch Indexer Dashboard</h1>
+          <h1 className="glitch">🚀 ARCH INDEXER - BLOCKCHAIN DATA PROCESSOR</h1>
           <button className={styles.refreshButton} onClick={() => { loadNetworkStats(); loadBlocks(); loadTransactions(); }}>
-            🔄 Refresh
+            [REFRESH DATA]
           </button>
         </div>
 
         <div className={styles.statsGrid}>
           <div className={styles.statCard}>
-            <h3>Total Blocks</h3>
-            <div className={styles.value}>{stats?.total_blocks?.toLocaleString() || '-'}</div>
-            <div className={styles.label}>Processed</div>
+            <h3>BLOCKS PROCESSED</h3>
+            <div className={styles.value}>{stats?.total_blocks?.toLocaleString() || '0'}</div>
+            <div className={styles.label}>TOTAL BLOCKS INDEXED</div>
           </div>
           <div className={styles.statCard}>
-            <h3>Total Transactions</h3>
-            <div className={styles.value}>{stats?.total_transactions?.toLocaleString() || '-'}</div>
-            <div className={styles.label}>Indexed</div>
+            <h3>TRANSACTIONS INDEXED</h3>
+            <div className={styles.value}>{stats?.total_transactions?.toLocaleString() || '0'}</div>
+            <div className={styles.label}>TOTAL TX PROCESSED</div>
           </div>
           <div className={styles.statCard}>
-            <h3>Latest Block</h3>
-            <div className={styles.value}>{stats?.latest_block_height || '-'}</div>
-            <div className={styles.label}>Height</div>
+            <h3>LATEST BLOCK HEIGHT</h3>
+            <div className={styles.value}>{stats?.latest_block_height || '0'}</div>
+            <div className={styles.label}>CURRENT CHAIN HEAD</div>
           </div>
           <div className={styles.statCard}>
-            <h3>Sync Status</h3>
-            <div className={styles.value}>🟢 Synced</div>
-            <div className={styles.label}>Real-time</div>
+            <h3>SYNC STATUS</h3>
+            <div className={styles.value}>🟢 [SYNCED]</div>
+            <div className={styles.label}>REAL-TIME INDEXING</div>
           </div>
         </div>
 
         {/* Sync Progress Section */}
         <div className={styles.syncProgressSection}>
           <div className={styles.syncProgressHeader}>
-            <h3>🔄 Blockchain Sync Progress</h3>
+            <h3>🔄 BLOCKCHAIN SYNCHRONIZATION PROGRESS</h3>
             <div className={styles.syncInfo}>
               <span className={styles.syncPercentage}>{syncProgress.percentage}%</span>
               <span className={styles.syncDetails}>
-                {syncProgress.percentage >= 100 ? 'Fully Synced' : 
-                 syncProgress.percentage >= 90 ? 'Nearly Complete' :
-                 syncProgress.percentage >= 50 ? 'Halfway There' : 'Syncing...'}
+                {syncProgress.percentage >= 100 ? 'FULLY SYNCHRONIZED' : 
+                 syncProgress.percentage >= 90 ? 'NEARLY COMPLETE' :
+                 syncProgress.percentage >= 50 ? 'HALFWAY COMPLETE' : 'SYNCING...'}
               </span>
             </div>
           </div>
@@ -244,38 +265,38 @@ export default function Home() {
               />
             </div>
             <div className={styles.progressStats}>
-              <span>{syncProgress.synced.toLocaleString()}</span> / <span>{syncProgress.total.toLocaleString()}</span> blocks
+              <span>{syncProgress.synced.toLocaleString()}</span> / <span>{syncProgress.total.toLocaleString()}</span> BLOCKS
             </div>
           </div>
         </div>
 
         <div className={styles.searchSection}>
-          <h2>🔍 Search Blockchain</h2>
+          <h2>🔍 BLOCKCHAIN DATA QUERY INTERFACE</h2>
           <div className={styles.searchContainer}>
             <input
               type="text"
               className={styles.searchInput}
-              placeholder="Search by block height, block hash, or transaction ID..."
+              placeholder="ENTER BLOCK HEIGHT, HASH, OR TRANSACTION ID..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               onKeyPress={(e) => e.key === 'Enter' && performSearch()}
             />
             <button className={styles.searchButton} onClick={performSearch}>
-              Search
+              [EXECUTE QUERY]
             </button>
           </div>
           <div className={styles.searchTips}>
-            <small>💡 Tips: Enter a block height (e.g., 52100), block hash, or transaction ID</small>
+            <small>💡 QUERY FORMAT: BLOCK HEIGHT (e.g., 52100), BLOCK HASH, OR TRANSACTION ID</small>
           </div>
           {searchResults.length > 0 && (
             <div className={styles.searchResults}>
-              <h3>Search Results:</h3>
+              <h3>QUERY RESULTS:</h3>
               {searchResults.map((result, index) => (
                 <div key={index} className={styles.searchResult}>
                   {result.type === 'block' ? (
-                    <div>Block {result.height}: {result.hash}</div>
+                    <div>BLOCK {result.height}: {result.hash}</div>
                   ) : (
-                    <div>Transaction: {result.txid}</div>
+                    <div>TRANSACTION: {result.txid}</div>
                   )}
                 </div>
               ))}
@@ -284,18 +305,18 @@ export default function Home() {
         </div>
 
         <div className={styles.blocksSection}>
-          <h2>📦 Recent Blocks</h2>
+          <h2>📦 RECENT BLOCK DATA</h2>
           {isLoading ? (
-            <div className={styles.loading}>Loading blocks...</div>
+            <div className={styles.loading}>[LOADING BLOCK DATA...]</div>
           ) : (
             <div className={styles.blocksContent}>
               <table className={styles.blocksTable}>
                 <thead>
                   <tr>
-                    <th>Height</th>
-                    <th>Hash</th>
-                    <th>Timestamp</th>
-                    <th>Transactions</th>
+                    <th>BLOCK HEIGHT</th>
+                    <th>BLOCK HASH</th>
+                    <th>TIMESTAMP</th>
+                    <th>TX COUNT</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -321,15 +342,15 @@ export default function Home() {
         </div>
 
         <div className={styles.transactionsSection}>
-          <h2>💸 Recent Transactions</h2>
+          <h2>💸 RECENT TRANSACTION DATA</h2>
           <div className={styles.transactionsContent}>
             <table className={styles.transactionsTable}>
               <thead>
                 <tr>
-                  <th>Transaction ID</th>
-                  <th>Block Height</th>
-                  <th>Status</th>
-                  <th>Created At</th>
+                  <th>TRANSACTION ID</th>
+                  <th>BLOCK HEIGHT</th>
+                  <th>EXECUTION STATUS</th>
+                  <th>CREATION TIMESTAMP</th>
                 </tr>
               </thead>
               <tbody>
@@ -337,7 +358,7 @@ export default function Home() {
                   <tr key={tx.txid}>
                     <td>
                       <button 
-                        className={styles.txidButton}
+                        className={styles.hashButton}
                         onClick={() => setSelectedTransaction(tx)}
                       >
                         {tx.txid.substring(0, 16)}...
@@ -358,12 +379,12 @@ export default function Home() {
       {selectedBlock && (
         <div className={styles.modal} onClick={() => setSelectedBlock(null)}>
           <div className={styles.modalContent} onClick={(e) => e.stopPropagation()}>
-            <h2>Block Details</h2>
-            <p><strong>Height:</strong> {selectedBlock.height}</p>
-            <p><strong>Hash:</strong> {selectedBlock.hash}</p>
-            <p><strong>Timestamp:</strong> {formatTimestamp(selectedBlock.timestamp)}</p>
-            <p><strong>Transactions:</strong> {selectedBlock.transaction_count}</p>
-            <button onClick={() => setSelectedBlock(null)}>Close</button>
+            <h2>BLOCK DATA DETAILS</h2>
+            <p><strong>HEIGHT:</strong> {selectedBlock.height}</p>
+            <p><strong>HASH:</strong> {selectedBlock.hash}</p>
+            <p><strong>TIMESTAMP:</strong> {formatTimestamp(selectedBlock.timestamp)}</p>
+            <p><strong>TRANSACTIONS:</strong> {selectedBlock.transaction_count}</p>
+            <button onClick={() => setSelectedBlock(null)}>[CLOSE]</button>
           </div>
         </div>
       )}
@@ -372,12 +393,12 @@ export default function Home() {
       {selectedTransaction && (
         <div className={styles.modal} onClick={() => setSelectedTransaction(null)}>
           <div className={styles.modalContent} onClick={(e) => e.stopPropagation()}>
-            <h2>Transaction Details</h2>
+            <h2>TRANSACTION DATA DETAILS</h2>
             <p><strong>ID:</strong> {selectedTransaction.txid}</p>
-            <p><strong>Block Height:</strong> {selectedTransaction.block_height}</p>
-            <p><strong>Status:</strong> {formatTransactionStatus(selectedTransaction.status)}</p>
-            <p><strong>Created:</strong> {formatTimestamp(selectedTransaction.created_at)}</p>
-            <button onClick={() => setSelectedTransaction(null)}>Close</button>
+            <p><strong>BLOCK HEIGHT:</strong> {selectedTransaction.block_height}</p>
+            <p><strong>STATUS:</strong> {formatTransactionStatus(selectedTransaction.status)}</p>
+            <p><strong>CREATED:</strong> {formatTimestamp(selectedTransaction.created_at)}</p>
+            <button onClick={() => setSelectedTransaction(null)}>[CLOSE]</button>
           </div>
         </div>
       )}
