@@ -1,0 +1,20 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT MAX(height) as last_height FROM blocks",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "last_height",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null
+    ]
+  },
+  "hash": "e809048e39ed95e695cbc107983ed7312f9d704326e40eb9ab5003f69d27d63a"
+}

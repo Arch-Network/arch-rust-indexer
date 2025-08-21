@@ -8,7 +8,7 @@ echo "========================================"
 echo ""
 
 # Common WebSocket ports to try
-ports=(8081 9001 10081 8082 9002 10082 8080 9000 10080)
+ports=(8081 9001 10081 8082 9002 10081 8080 9000 10080)
 
 # Function to test a port
 test_port() {

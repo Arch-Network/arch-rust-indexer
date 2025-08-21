@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "INSERT INTO blocks (height, hash, timestamp, bitcoin_block_height) \n             VALUES ($1, $2, $3, $4) \n             ON CONFLICT (height) DO NOTHING",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Int8",
+        "Text",
+        "Timestamptz",
+        "Int8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "bbadcb1e744f5c18d171d50c3c9534065e0bdae47eda4d8b350c7d0da3da0654"
+}

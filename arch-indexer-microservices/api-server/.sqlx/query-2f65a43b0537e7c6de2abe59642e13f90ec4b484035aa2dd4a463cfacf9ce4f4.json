@@ -1,0 +1,15 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                    INSERT INTO transaction_programs (txid, program_id)\n                    VALUES ($1, $2)\n                    ON CONFLICT (txid, program_id) DO NOTHING\n                    ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "2f65a43b0537e7c6de2abe59642e13f90ec4b484035aa2dd4a463cfacf9ce4f4"
+}

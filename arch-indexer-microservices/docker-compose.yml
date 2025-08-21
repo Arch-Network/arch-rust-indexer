@@ -1,0 +1,73 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_DB: archindexer
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+    ports:
+      - "5432:5432"
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+
+  indexer:
+    build:
+      context: ./indexer
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/archindexer
+      REDIS_URL: redis://redis:6379
+      ARCH_NODE_URL: http://44.196.173.35:8081
+      ARCH_NODE_WEBSOCKET_URL: ws://44.196.173.35:10081
+      ENABLE_REALTIME: true
+      WEBSOCKET_ENABLED: true
+    depends_on:
+      - postgres
+      - redis
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+    restart: unless-stopped
+
+  api-server:
+    build:
+      context: ./api-server
+      dockerfile: Dockerfile
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres@postgres:5432/archindexer
+      HOST: 0.0.0.0
+      PORT: 3001
+      ARCH_NODE_URL: http://44.196.173.35:8081
+      ARCH_NODE_WEBSOCKET_URL: ws://44.196.173.35:10081
+    ports:
+      - "3001:3001"
+    depends_on:
+      - postgres
+    volumes:
+      - ./config.yml:/app/config.yml:ro
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      NEXT_PUBLIC_WS_URL: ws://localhost:3001
+      NEXT_PUBLIC_ARCH_NODE_URL: http://44.196.173.35:8081
+      NEXT_PUBLIC_ARCH_NODE_WS_URL: ws://44.196.173.35:10081
+    depends_on:
+      - api-server
+    restart: unless-stopped
+
+volumes:
+  postgres_data:

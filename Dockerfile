@@ -34,6 +34,7 @@ RUN apt-get update && apt-get install -y \
 # Copy the binary and migrations from the correct target directory
 COPY --from=builder /usr/src/app/target/x86_64-unknown-linux-gnu/release/arch-indexer .
 COPY --from=builder /usr/src/app/migrations ./migrations
+COPY config.yml ./config.yml
 
 ENV RUST_LOG=info
 

@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n                        INSERT INTO mempool_transactions (txid, data, fee_priority, size_bytes)\n                        VALUES ($1, $2, $3, $4)\n                        ON CONFLICT (txid) DO UPDATE \n                        SET data = $2, fee_priority = $3, size_bytes = $4, added_at = CURRENT_TIMESTAMP\n                        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text",
+        "Jsonb",
+        "Int4",
+        "Int4"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "8046c60119183f5ab90effb3dd8899ce2759de67aadd54e3398484ca82b4a3b5"
+}

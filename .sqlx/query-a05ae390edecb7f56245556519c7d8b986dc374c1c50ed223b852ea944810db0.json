@@ -1,0 +1,56 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "\n        WITH time_windows AS (\n            SELECT \n                COUNT(*) as total_tx,\n                (SELECT COUNT(*) FROM transactions \n                 WHERE created_at >= NOW() - INTERVAL '24 hours') as daily_tx,\n                (SELECT COUNT(*) FROM transactions \n                 WHERE created_at >= NOW() - INTERVAL '1 hour') as hourly_tx,\n                (SELECT COUNT(*) FROM transactions \n                 WHERE created_at >= NOW() - INTERVAL '1 minute') as minute_tx,\n                (SELECT MAX(height) FROM blocks) as max_height,\n                (SELECT COUNT(*) FROM blocks) as total_blocks,\n                (SELECT COUNT(*) / 60 as peak_tps FROM transactions \n                 WHERE created_at >= NOW() - INTERVAL '24 hours'\n                 GROUP BY DATE_TRUNC('minute', created_at)\n                 ORDER BY peak_tps DESC\n                 LIMIT 1) as peak_tps\n            FROM transactions\n        )\n        SELECT \n            total_tx,\n            daily_tx,\n            hourly_tx,\n            minute_tx,\n            max_height,\n            total_blocks,\n            COALESCE(peak_tps, 0) as peak_tps\n        FROM time_windows\n        ",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "total_tx",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 1,
+        "name": "daily_tx",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 2,
+        "name": "hourly_tx",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 3,
+        "name": "minute_tx",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 4,
+        "name": "max_height",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 5,
+        "name": "total_blocks",
+        "type_info": "Int8"
+      },
+      {
+        "ordinal": 6,
+        "name": "peak_tps",
+        "type_info": "Int8"
+      }
+    ],
+    "parameters": {
+      "Left": []
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "a05ae390edecb7f56245556519c7d8b986dc374c1c50ed223b852ea944810db0"
+}

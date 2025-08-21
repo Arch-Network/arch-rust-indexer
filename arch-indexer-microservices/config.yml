@@ -1,7 +1,7 @@
 database:
   username: "postgres"
   password: "postgres"
-  host: "localhost"
+  host: "postgres"
   port: 5432
   database_name: "archindexer"
   max_connections: 20
@@ -10,7 +10,7 @@ database:
 
 application:
   host: "0.0.0.0"
-  port: 8081
+  port: 3001
   cors_allow_origin: "*"
   cors_allow_methods: "GET, POST, OPTIONS"
   cors_allow_headers: "Content-Type, Authorization"
@@ -20,7 +20,7 @@ arch_node:
   websocket_url: "ws://44.196.173.35:10081"
 
 redis:
-  url: "redis://localhost:6379"
+  url: "redis://redis:6379"
   ttl_seconds: 3600
   max_connections: 20
 

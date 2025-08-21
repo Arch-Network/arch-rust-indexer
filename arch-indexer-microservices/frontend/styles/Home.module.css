@@ -1,0 +1,415 @@
+.container {
+  min-height: 100vh;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  padding: 20px;
+}
+
+.main {
+  max-width: 1200px;
+  margin: 0 auto;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 30px;
+}
+
+.header h1 {
+  color: white;
+  margin: 0;
+  font-size: 2.5rem;
+  text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+}
+
+.refreshButton {
+  background: rgba(255,255,255,0.2);
+  border: 2px solid rgba(255,255,255,0.3);
+  color: white;
+  padding: 12px 24px;
+  border-radius: 25px;
+  cursor: pointer;
+  font-size: 16px;
+  font-weight: 600;
+  transition: all 0.3s ease;
+  backdrop-filter: blur(10px);
+}
+
+.refreshButton:hover {
+  background: rgba(255,255,255,0.3);
+  border-color: rgba(255,255,255,0.5);
+  transform: translateY(-2px);
+}
+
+.statsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 20px;
+  margin-bottom: 30px;
+}
+
+.statCard {
+  background: white;
+  border-radius: 15px;
+  padding: 25px;
+  text-align: center;
+  box-shadow: 0 8px 25px rgba(0,0,0,0.15);
+  transition: transform 0.3s ease, box-shadow 0.3s ease;
+  border: 1px solid rgba(255,255,255,0.2);
+}
+
+.statCard:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 15px 35px rgba(0,0,0,0.2);
+}
+
+.statCard h3 {
+  margin: 0 0 15px 0;
+  color: #333;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.statCard .value {
+  font-size: 2.5rem;
+  font-weight: bold;
+  color: #667eea;
+  margin-bottom: 10px;
+}
+
+.statCard .label {
+  color: #666;
+  font-size: 14px;
+  font-weight: 500;
+}
+
+/* Sync Progress Section */
+.syncProgressSection {
+  background: white;
+  border-radius: 15px;
+  padding: 25px;
+  margin: 25px 0;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+  border: 1px solid #e1e5e9;
+}
+
+.syncProgressHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 20px;
+}
+
+.syncProgressHeader h3 {
+  margin: 0;
+  color: #333;
+  font-size: 18px;
+}
+
+.syncInfo {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 5px;
+}
+
+.syncPercentage {
+  font-size: 24px;
+  font-weight: bold;
+  color: #667eea;
+}
+
+.syncDetails {
+  font-size: 14px;
+  color: #666;
+}
+
+.progressBarContainer {
+  margin-top: 15px;
+}
+
+.progressBar {
+  width: 100%;
+  height: 20px;
+  background: #f0f0f0;
+  border-radius: 10px;
+  overflow: hidden;
+  margin-bottom: 15px;
+  border: 1px solid #e1e5e9;
+}
+
+.progressFill {
+  height: 100%;
+  background: linear-gradient(90deg, #667eea, #764ba2);
+  border-radius: 10px;
+  transition: width 0.5s ease;
+}
+
+.progressStats {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  font-size: 14px;
+  color: #666;
+}
+
+.searchSection {
+  background: white;
+  border-radius: 15px;
+  padding: 25px;
+  margin: 25px 0;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+}
+
+.searchSection h2 {
+  margin: 0 0 20px 0;
+  color: #333;
+}
+
+.searchContainer {
+  display: flex;
+  gap: 15px;
+  margin-bottom: 15px;
+}
+
+.searchInput {
+  flex: 1;
+  padding: 15px;
+  border: 2px solid #e1e5e9;
+  border-radius: 10px;
+  font-size: 16px;
+  transition: border-color 0.3s ease;
+}
+
+.searchInput:focus {
+  outline: none;
+  border-color: #667eea;
+}
+
+.searchButton {
+  background: #667eea;
+  color: white;
+  border: none;
+  padding: 15px 30px;
+  border-radius: 10px;
+  font-size: 16px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.3s ease;
+}
+
+.searchButton:hover {
+  background: #5a6fd8;
+}
+
+.searchTips {
+  color: #666;
+  font-size: 14px;
+}
+
+.searchResults {
+  margin-top: 20px;
+  padding: 20px;
+  background: #f8f9fa;
+  border-radius: 10px;
+}
+
+.searchResult {
+  padding: 10px;
+  border-bottom: 1px solid #e1e5e9;
+}
+
+.blocksSection,
+.transactionsSection {
+  background: white;
+  border-radius: 15px;
+  padding: 25px;
+  margin: 25px 0;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+}
+
+.blocksSection h2,
+.transactionsSection h2 {
+  margin: 0 0 20px 0;
+  color: #333;
+}
+
+.loading {
+  text-align: center;
+  padding: 40px;
+  color: #666;
+  font-size: 18px;
+}
+
+.blocksTable,
+.transactionsTable {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 20px;
+  table-layout: fixed;
+}
+
+.blocksTable th,
+.blocksTable td,
+.transactionsTable th,
+.transactionsTable td {
+  padding: 15px;
+  text-align: left;
+  border-bottom: 1px solid #e1e5e9;
+  word-wrap: break-word;
+  overflow-wrap: break-word;
+}
+
+.blocksTable th,
+.transactionsTable th {
+  background: #f8f9fa;
+  font-weight: 600;
+  color: #333;
+}
+
+.hashButton,
+.txidButton {
+  background: none;
+  border: none;
+  color: #667eea;
+  cursor: pointer;
+  font-family: monospace;
+  font-size: 14px;
+  text-decoration: underline;
+  padding: 0;
+}
+
+.hashButton:hover,
+.txidButton:hover {
+  color: #5a6fd8;
+}
+
+/* Status badges */
+.statusFailed {
+  background: #fee;
+  color: #c53030;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  display: inline-block;
+}
+
+.statusSuccess {
+  background: #f0fff4;
+  color: #38a169;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  display: inline-block;
+}
+
+.statusPending {
+  background: #fffbeb;
+  color: #d69e2e;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  display: inline-block;
+}
+
+.statusOther {
+  background: #f0f0f0;
+  color: #666;
+  padding: 4px 8px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 500;
+  display: inline-block;
+}
+
+/* Modal styles */
+.modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0,0,0,0.5);
+  display: flex;
+  justify-content: center;
+  align-items: center;
+  z-index: 1000;
+}
+
+.modalContent {
+  background: white;
+  padding: 30px;
+  border-radius: 15px;
+  max-width: 500px;
+  width: 90%;
+  max-height: 80vh;
+  overflow-y: auto;
+}
+
+.modalContent h2 {
+  margin: 0 0 20px 0;
+  color: #333;
+}
+
+.modalContent p {
+  margin: 10px 0;
+  color: #666;
+}
+
+.modalContent button {
+  background: #667eea;
+  color: white;
+  border: none;
+  padding: 12px 24px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 16px;
+  margin-top: 20px;
+}
+
+.modalContent button:hover {
+  background: #5a6fd8;
+}
+
+/* Responsive design */
+@media (max-width: 768px) {
+  .header {
+    flex-direction: column;
+    gap: 20px;
+    text-align: center;
+  }
+  
+  .header h1 {
+    font-size: 2rem;
+  }
+  
+  .statsGrid {
+    grid-template-columns: 1fr;
+  }
+  
+  .searchContainer {
+    flex-direction: column;
+  }
+  
+  .syncProgressHeader {
+    flex-direction: column;
+    gap: 15px;
+    text-align: center;
+  }
+  
+  .blocksTable,
+  .transactionsTable {
+    font-size: 14px;
+  }
+  
+  .blocksTable th,
+  .blocksTable td,
+  .transactionsTable th,
+  .transactionsTable td {
+    padding: 10px;
+  }
+}

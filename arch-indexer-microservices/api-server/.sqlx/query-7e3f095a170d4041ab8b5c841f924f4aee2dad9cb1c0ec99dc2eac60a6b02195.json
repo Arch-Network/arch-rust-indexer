@@ -1,0 +1,14 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE transactions SET status = jsonb_set(status, '{rolled_back}', 'true') WHERE txid = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Text"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "7e3f095a170d4041ab8b5c841f924f4aee2dad9cb1c0ec99dc2eac60a6b02195"
+}
