@@ -39,6 +39,7 @@ pub struct ProcessedTransaction {
     pub runtime_transaction: serde_json::Value,
     pub status: serde_json::Value,
     pub bitcoin_txids: Option<Vec<String>>,
+    #[serde(default)]
     pub accounts_tags: Vec<serde_json::Value>,
 }
 

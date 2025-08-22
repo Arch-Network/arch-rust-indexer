@@ -10,6 +10,7 @@ use sqlx::PgPool;
 use crate::arch_rpc::ArchRpcClient;
 use crate::arch_rpc::websocket::WebSocketClient;
 use crate::utils::convert_arch_timestamp;
+use serde_json::Value as JsonValue;
 
 #[derive(Debug, Clone)]
 pub struct HybridSync {
@@ -130,12 +131,41 @@ impl HybridSync {
                                         "#,
                                     )
                                     .bind(hash)
-                                    .bind(data)
+                                    .bind(&data)
                                     .bind(status)
                                     .bind(bitcoin_txids)
                                     .execute(&*pool)
                                     .await {
                                         error!("Realtime tx upsert failed: {}", e);
+                                    }
+
+                                    // Extract and upsert program IDs
+                                    let pids = extract_program_ids(&data, Some(&processed.accounts_tags));
+                                    for pid in pids {
+                                        if let Err(e) = sqlx::query(
+                                            r#"
+                                            INSERT INTO programs (program_id, first_seen_at, last_seen_at, transaction_count)
+                                            VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+                                            ON CONFLICT (program_id) DO UPDATE
+                                            SET last_seen_at = CURRENT_TIMESTAMP,
+                                                transaction_count = programs.transaction_count + 1
+                                            "#
+                                        )
+                                        .bind(&pid)
+                                        .execute(&*pool)
+                                        .await { error!("programs upsert failed: {}", e); }
+
+                                        if let Err(e) = sqlx::query(
+                                            r#"
+                                            INSERT INTO transaction_programs (txid, program_id, created_at)
+                                            VALUES ($1, $2, CURRENT_TIMESTAMP)
+                                            ON CONFLICT DO NOTHING
+                                            "#
+                                        )
+                                        .bind(hash)
+                                        .bind(&pid)
+                                        .execute(&*pool)
+                                        .await { error!("transaction_programs insert failed: {}", e); }
                                     }
                                 }
                                 Err(e) => error!("Realtime failed to fetch transaction {}: {}", hash, e),
@@ -180,6 +210,8 @@ impl HybridSync {
                 start_height = 0;
             }
 
+            // Full reindex from the beginning; do not fast-forward
+
             info!("📈 Bulk sync starting at {} up to {}", start_height, tip);
 
             loop {
@@ -220,6 +252,29 @@ impl HybridSync {
     pub fn get_last_realtime_update(&self) -> i64 {
         self.last_realtime_update.load(Ordering::Relaxed)
     }
+}
+
+fn extract_program_ids(data: &JsonValue, accounts_tags: Option<&[JsonValue]>) -> Vec<String> {
+    let mut ids: Vec<String> = Vec::new();
+    if let Some(msg) = data.get("message") {
+        if let Some(instructions) = msg.get("instructions").and_then(|v| v.as_array()) {
+            for ins in instructions {
+                if let Some(pid) = ins.get("program_id").and_then(|v| v.as_str()) {
+                    ids.push(pid.to_string());
+                }
+            }
+        }
+    }
+    if let Some(tags) = accounts_tags {
+        for tag in tags {
+            if let Some(pid) = tag.get("program_id").and_then(|v| v.as_str()) {
+                ids.push(pid.to_string());
+            }
+        }
+    }
+    ids.sort();
+    ids.dedup();
+    ids
 }
 
 async fn process_block_via_rpc(pool: &PgPool, rpc: &Arc<ArchRpcClient>, height: i64) -> Result<()> {
@@ -269,6 +324,35 @@ async fn process_block_via_rpc(pool: &PgPool, rpc: &Arc<ArchRpcClient>, height: 
             .bind(bitcoin_txids)
             .execute(&mut *tx)
             .await?;
+
+            // Extract and upsert program IDs
+            let pids = extract_program_ids(&data, Some(&processed.accounts_tags));
+            for pid in pids {
+                sqlx::query(
+                    r#"
+                    INSERT INTO programs (program_id, first_seen_at, last_seen_at, transaction_count)
+                    VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 1)
+                    ON CONFLICT (program_id) DO UPDATE
+                    SET last_seen_at = CURRENT_TIMESTAMP,
+                        transaction_count = programs.transaction_count + 1
+                    "#
+                )
+                .bind(&pid)
+                .execute(&mut *tx)
+                .await?;
+
+                sqlx::query(
+                    r#"
+                    INSERT INTO transaction_programs (txid, program_id, created_at)
+                    VALUES ($1, $2, CURRENT_TIMESTAMP)
+                    ON CONFLICT DO NOTHING
+                    "#
+                )
+                .bind(&txid)
+                .bind(&pid)
+                .execute(&mut *tx)
+                .await?;
+            }
         }
         tx.commit().await?;
     }

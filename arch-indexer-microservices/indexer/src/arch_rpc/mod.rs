@@ -39,6 +39,7 @@ pub struct ProcessedTransaction {
 	pub runtime_transaction: serde_json::Value,
 	pub status: serde_json::Value,
 	pub bitcoin_txids: Option<Vec<String>>,
+	#[serde(default)]
 	pub accounts_tags: Vec<serde_json::Value>,
 }
 
@@ -135,7 +136,7 @@ impl ArchRpcClient {
 				.json(&json!({
 					"jsonrpc": "2.0",
 					"method": "get_block",
-					"params": [hash],
+					"params": [hash, "signatures"],
 					"id": 1
 				}))
 				.send()
@@ -153,7 +154,24 @@ impl ArchRpcClient {
 					}
 					match serde_json::from_value::<BlockResponse>(json_response["result"].clone()) {
 						Ok(block_response) => {
-							let transaction_strings: Vec<String> = block_response.transactions.iter().map(|tx| tx.to_string()).collect();
+							// Convert transactions to hex strings when provided as byte arrays
+							let transaction_strings: Vec<String> = block_response
+								.transactions
+								.iter()
+								.map(|tx| {
+									if let Some(s) = tx.as_str() {
+										s.to_string()
+									} else if let Some(arr) = tx.as_array() {
+										let bytes: Vec<u8> = arr
+											.iter()
+											.filter_map(|v| v.as_i64().map(|n| if n < 0 { (n + 256) as u8 } else { n as u8 }))
+											.collect();
+										hex::encode(bytes)
+									} else {
+										tx.to_string()
+									}
+								})
+								.collect();
 							return Ok(Block {
 								height: block_response.block_height,
 								hash: hash.to_string(),

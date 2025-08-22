@@ -18,6 +18,7 @@ pub fn create_router(pool: Arc<PgPool>) -> Router {
         .route("/api/search", get(handlers::search_handler))
         .route("/api/network/stats", get(handlers::get_network_stats))
         .route("/api/programs/leaderboard", get(handlers::get_program_leaderboard))
+        .route("/api/programs/:program_id", get(handlers::get_program_details))
         .route("/api/programs/:program_id/transactions", get(handlers::get_transactions_by_program))
         .route("/api/realtime/status", get(handlers::get_realtime_status))
         .route("/api/realtime/events", get(handlers::get_recent_events))

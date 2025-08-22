@@ -13,6 +13,7 @@ use tracing::{info, debug, error};
 
 use super::types::{ApiError, NetworkStats, SyncStatus, ProgramStats};
 use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::BlockProcessor};
+use crate::arch_rpc::ArchRpcClient;
 use axum::http::StatusCode;
 
 pub async fn get_blocks(
@@ -370,6 +371,17 @@ pub async fn get_network_stats(
         }
     };
 
+    // Fetch chain head from RPC to report accurate network tip
+    let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+    let arch_client = ArchRpcClient::new(rpc_url);
+    let node_tip = match arch_client.get_block_count().await {
+        Ok(h) => h,
+        Err(e) => {
+            error!("Failed to fetch block count from RPC: {:?}", e);
+            stats.max_height.unwrap_or(0)
+        }
+    };
+
     // Calculate different TPS metrics with logging
     let current_tps = stats.minute_tx.unwrap_or(0) as f64 / 60.0;
     let average_tps = stats.hourly_tx.unwrap_or(0) as f64 / 3600.0;
@@ -383,9 +395,9 @@ pub async fn get_network_stats(
     let response = NetworkStats {
         total_transactions: stats.total_tx.unwrap_or(0),
         total_blocks: stats.total_blocks.unwrap_or(0),
-        latest_block_height: stats.max_height.unwrap_or(0),
-        block_height: stats.max_height.unwrap_or(0),
-        slot_height: stats.max_height.unwrap_or(0),
+        latest_block_height: node_tip,
+        block_height: node_tip,
+        slot_height: node_tip,
         current_tps,
         average_tps,
         peak_tps,
@@ -753,4 +765,72 @@ pub async fn get_transaction_metrics(
     };
 
     Ok(Json(response))
+}
+
+pub async fn get_program_details(
+    State(pool): State<Arc<PgPool>>,
+    Path(program_id): Path<String>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Basic program stats (runtime query to avoid sqlx prepare at build time)
+    let program = sqlx::query(
+        r#"
+        SELECT 
+            program_id,
+            transaction_count,
+            first_seen_at,
+            last_seen_at
+        FROM programs
+        WHERE program_id = $1
+        "#
+    )
+    .bind(&program_id)
+    .fetch_optional(&*pool)
+    .await?;
+
+    if let Some(p) = program {
+        let pid: String = p.get::<String, _>("program_id");
+        let tx_count: i64 = p.get::<i64, _>("transaction_count");
+        let first_seen: DateTime<Utc> = p.get::<DateTime<Utc>, _>("first_seen_at");
+        let last_seen: DateTime<Utc> = p.get::<DateTime<Utc>, _>("last_seen_at");
+
+        // Recent transactions for this program
+        let recent_rows = sqlx::query(
+            r#"
+            SELECT DISTINCT t.txid, t.block_height, t.created_at
+            FROM transactions t
+            JOIN transaction_programs tp ON t.txid = tp.txid
+            WHERE tp.program_id = $1
+            ORDER BY t.block_height DESC
+            LIMIT 25
+            "#
+        )
+        .bind(&pid)
+        .fetch_all(&*pool)
+        .await?;
+
+        let recent: Vec<serde_json::Value> = recent_rows
+            .into_iter()
+            .map(|r| {
+                json!({
+                    "txid": r.get::<String, _>("txid"),
+                    "block_height": r.get::<i64, _>("block_height"),
+                    "created_at": r.get::<chrono::NaiveDateTime, _>("created_at"),
+                })
+            })
+            .collect();
+
+        let payload = json!({
+            "program": {
+                "program_id": pid,
+                "transaction_count": tx_count,
+                "first_seen_at": first_seen,
+                "last_seen_at": last_seen
+            },
+            "recent_transactions": recent
+        });
+
+        Ok(Json(payload))
+    } else {
+        Err(ApiError::NotFound)
+    }
 }

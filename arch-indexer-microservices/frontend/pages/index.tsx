@@ -44,6 +44,10 @@ export default function Home() {
   const [isTxDrawerOpen, setIsTxDrawerOpen] = useState(false);
   const [drawerTx, setDrawerTx] = useState<Transaction | null>(null);
   const [showRawJson, setShowRawJson] = useState(false);
+  const [programQuery, setProgramQuery] = useState('');
+  const [programResult, setProgramResult] = useState<any | null>(null);
+  const [programLoading, setProgramLoading] = useState(false);
+  const [programError, setProgramError] = useState<string | null>(null);
 
   // Get API URL from environment or fallback to localhost
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
@@ -202,6 +206,24 @@ export default function Home() {
     } catch (error) {
       console.error('Search failed:', error);
       setSearchResults([]);
+    }
+  };
+
+  const fetchProgram = async () => {
+    const pid = programQuery.trim();
+    if (!pid) return;
+    setProgramLoading(true);
+    setProgramError(null);
+    try {
+      const res = await fetch(`${apiUrl}/api/programs/${encodeURIComponent(pid)}`);
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+      setProgramResult(data);
+    } catch (e: any) {
+      setProgramError('Program not found or server error');
+      setProgramResult(null);
+    } finally {
+      setProgramLoading(false);
     }
   };
 
@@ -512,6 +534,76 @@ export default function Home() {
               {searchResults.map((result, index) => (
                 <div key={index}>{renderSearchResult(result)}</div>
               ))}
+            </div>
+          )}
+        </div>
+
+        <div className={styles.searchSection}>
+          <h2>Program Explorer</h2>
+          <div className={styles.searchContainer}>
+            <input
+              type="text"
+              className={styles.searchInput}
+              placeholder="Enter Program ID (pubkey)…"
+              value={programQuery}
+              onChange={(e) => setProgramQuery(e.target.value)}
+              onKeyPress={(e) => e.key === 'Enter' && fetchProgram()}
+            />
+            <button className={styles.searchButton} onClick={fetchProgram}>
+              Lookup
+            </button>
+          </div>
+          {programLoading && <div className={styles.loading}>Loading program…</div>}
+          {programError && <div className={styles.statusOther} style={{ display: 'inline-block' }}>{programError}</div>}
+          {programResult && (
+            <div className={styles.searchResults}>
+              <h3>Program Overview</h3>
+              <div className={styles.statsGrid}>
+                <div className={styles.statCard}>
+                  <h3>Program ID</h3>
+                  <div className={styles.value} style={{ fontSize: '1rem', wordBreak: 'break-all' }}>{programResult.program.program_id}</div>
+                  <div className={styles.label}>Identifier</div>
+                </div>
+                <div className={styles.statCard}>
+                  <h3>Transactions</h3>
+                  <div className={styles.value}>{programResult.program.transaction_count}</div>
+                  <div className={styles.label}>Total</div>
+                </div>
+                <div className={styles.statCard}>
+                  <h3>First Seen</h3>
+                  <div className={styles.value} style={{ fontSize: '1.2rem' }}>{formatTimestamp(programResult.program.first_seen_at)}</div>
+                  <div className={styles.label}>Timestamp</div>
+                </div>
+                <div className={styles.statCard}>
+                  <h3>Last Seen</h3>
+                  <div className={styles.value} style={{ fontSize: '1.2rem' }}>{formatTimestamp(programResult.program.last_seen_at)}</div>
+                  <div className={styles.label}>Timestamp</div>
+                </div>
+              </div>
+
+              <h3 style={{ marginTop: 16 }}>Recent Transactions</h3>
+              <table className={styles.transactionsTable}>
+                <thead>
+                  <tr>
+                    <th>Transaction ID</th>
+                    <th>Block</th>
+                    <th>Created</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {programResult.recent_transactions.map((rt: any) => (
+                    <tr key={rt.txid}>
+                      <td>
+                        <button className={styles.hashButton} onClick={() => { const tx = { txid: rt.txid, block_height: rt.block_height, status: null as any, created_at: rt.created_at } as any; setSelectedTransaction(tx); openTxDrawer(tx as any); }}>
+                          {rt.txid.substring(0, 16)}...
+                        </button>
+                      </td>
+                      <td>{rt.block_height}</td>
+                      <td>{formatTimestamp(rt.created_at)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
