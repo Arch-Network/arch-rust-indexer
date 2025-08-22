@@ -366,51 +366,22 @@ export default function Home() {
   };
 
   const formatTransactionStatus = (status: any) => {
-    if (!status) return 'UNKNOWN';
     try {
-      if (typeof status === 'string') {
-        return status.toUpperCase();
-      } else if (typeof status === 'object') {
-        if (status.Failed) {
-          let errorMsg = status.Failed;
-          if (errorMsg.includes('pubkey:') && errorMsg.includes('[')) {
-            const pubkeyIndex = errorMsg.indexOf('pubkey:');
-            if (pubkeyIndex > 0) {
-              errorMsg = errorMsg.substring(0, pubkeyIndex).trim();
-            }
-          }
-          if (errorMsg.length > 60) {
-            errorMsg = errorMsg.substring(0, 60) + '...';
-          }
-          return (
-            <span className={styles.statusFailed} title={status.Failed}>
-              [FAILED] {errorMsg}
-            </span>
-          );
-        }
-        if (status.Success) {
-          return (
-            <span className={styles.statusSuccess}>
-              [SUCCESS] EXECUTED
-            </span>
-          );
-        }
-        if (status.Pending) {
-          return (
-            <span className={styles.statusPending}>
-              [PENDING] QUEUED
-            </span>
-          );
-        }
-        return (
-          <span className={styles.statusOther}>
-            [INFO] {JSON.stringify(status)}
-          </span>
-        );
+      if (!status) return <span className={styles.statusPending}>PENDING</span>;
+      // Normalize to uppercase string for robust matching across shapes
+      const up = (typeof status === 'string' ? status : JSON.stringify(status)).toUpperCase();
+      if (up.includes('PROCESSED') || up.includes('SUCCESS')) {
+        return <span className={styles.statusSuccess}>[SUCCESS] EXECUTED</span>;
       }
-      return 'UNKNOWN';
-    } catch (error) {
-      return 'FORMAT ERROR';
+      if (up.includes('FAIL')) {
+        return <span className={styles.statusFailed}>[FAILED]</span>;
+      }
+      if (up.includes('PEND')) {
+        return <span className={styles.statusPending}>[PENDING] QUEUED</span>;
+      }
+      return <span className={styles.statusOther}>[INFO]</span>;
+    } catch {
+      return <span className={styles.statusOther}>[INFO]</span>;
     }
   };
 

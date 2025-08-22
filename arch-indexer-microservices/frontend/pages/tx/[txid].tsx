@@ -33,7 +33,21 @@ export default function TxDetailPage() {
     })();
   }, [txid, apiUrl]);
 
-  const formatStatus = (s: any) => typeof s === 'string' ? s : s?.Success ? 'SUCCESS' : s?.Failed ? 'FAILED' : 'UNKNOWN';
+  const formatStatus = (s: any) => {
+    if (!s) return 'PENDING';
+    if (typeof s === 'string') {
+      const up = s.toUpperCase();
+      if (up.includes('PROCESSED') || up.includes('SUCCESS')) return 'SUCCESS';
+      if (up.includes('FAIL')) return 'FAILED';
+      if (up.includes('PEND')) return 'PENDING';
+      return 'INFO';
+    }
+    const up = JSON.stringify(s).toUpperCase();
+    if (up.includes('PROCESSED') || up.includes('SUCCESS')) return 'SUCCESS';
+    if (up.includes('FAILED') || up.includes('ERROR')) return 'FAILED';
+    if (up.includes('PENDING')) return 'PENDING';
+    return 'INFO';
+  };
 
   return (
     <Layout rightActions={<button className={styles.refreshButton} onClick={() => router.reload()}>Refresh</button>}>

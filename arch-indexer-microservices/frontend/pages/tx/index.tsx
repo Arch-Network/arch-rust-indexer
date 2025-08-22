@@ -19,7 +19,25 @@ export default function TransactionsPage() {
     })();
   }, [apiUrl]);
 
-  const formatStatus = (s: any) => typeof s === 'string' ? s : s?.Success ? 'SUCCESS' : s?.Failed ? 'FAILED' : 'UNKNOWN';
+  const formatStatus = (s: any) => {
+    if (!s) return 'PENDING';
+    if (typeof s === 'string') {
+      const up = s.toUpperCase();
+      if (up.includes('SUCCESS') || up.includes('PROCESSED')) return 'SUCCESS';
+      if (up.includes('FAIL')) return 'FAILED';
+      if (up.includes('PEND')) return 'PENDING';
+      return 'INFO';
+    }
+    if (typeof s === 'object') {
+      // Case-insensitive scan of the object for known status tokens
+      const up = JSON.stringify(s).toUpperCase();
+      if (up.includes('PROCESSED') || up.includes('SUCCESS')) return 'SUCCESS';
+      if (up.includes('FAILED') || up.includes('ERROR')) return 'FAILED';
+      if (up.includes('PENDING')) return 'PENDING';
+      return 'INFO';
+    }
+    return 'INFO';
+  };
 
   return (
     <Layout>
