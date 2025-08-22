@@ -80,9 +80,8 @@ pub async fn get_blocks(
         .and_then(|o| o.parse::<i64>().ok())
         .unwrap_or(0); // Default offset
 
-    let filter_no_transactions = params.get("filter_no_transactions")
-        .map(|v| v == "true")
-        .unwrap_or(false);
+    // Deprecated: previously used to exclude empty blocks. We now always include all blocks.
+    let _deprecated_filter_no_transactions = params.get("filter_no_transactions").is_some();
 
     // Query to get the paginated blocks
     let rows = sqlx::query(
@@ -92,20 +91,17 @@ pub async fn get_blocks(
             b.hash,
             b.timestamp,
             b.bitcoin_block_height,
-            COUNT(t.txid) as transaction_count,
-            b.previous_block_hash
-            , NULL::bigint as block_size_bytes
+            COALESCE(COUNT(t.txid), 0) as transaction_count,
+            NULL::bigint as block_size_bytes
         FROM blocks b 
         LEFT JOIN transactions t ON b.height = t.block_height
-        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height, b.previous_block_hash
-        HAVING COUNT(t.txid) > 0 OR NOT $3
+        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height
         ORDER BY b.height DESC 
         LIMIT $1 OFFSET $2
         "#
     )
     .bind(limit)
     .bind(offset)
-    .bind(filter_no_transactions)
     .fetch_all(&*pool)
     .await?;
 
@@ -127,27 +123,10 @@ pub async fn get_blocks(
         .collect();
 
     // Query to get the total count of blocks
-    let total_count = if filter_no_transactions {
-        sqlx::query_scalar!(
-            r#"
-            SELECT COUNT(DISTINCT b.height) 
-            FROM blocks b
-            LEFT JOIN transactions t ON b.height = t.block_height
-            GROUP BY b.height
-            HAVING COUNT(t.txid) > 0
-            "#
-        )
+    // Use dynamic query (not macros) to avoid sqlx offline cache issues in Docker build
+    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blocks")
         .fetch_one(&*pool)
-        .await?
-    } else {
-        sqlx::query_scalar!(
-            r#"
-            SELECT COUNT(*) FROM blocks
-            "#
-        )
-        .fetch_one(&*pool)
-        .await?
-    };
+        .await?;
 
     // Prepare the response
     let mut response = HashMap::new();
@@ -238,12 +217,11 @@ pub async fn get_block_by_hash(
             b.timestamp,
             b.bitcoin_block_height,
             COUNT(t.txid) as transaction_count,
-            b.previous_block_hash
-            , NULL::bigint as block_size_bytes
+            NULL::bigint as block_size_bytes
         FROM blocks b
         LEFT JOIN transactions t ON b.height = t.block_height
         WHERE b.hash = $1
-        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height, b.previous_block_hash
+        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height
         "#
     )
     .bind(&blockhash)
@@ -260,7 +238,7 @@ pub async fn get_block_by_hash(
         bitcoin_block_height: row.try_get::<Option<i64>, _>("bitcoin_block_height").ok().flatten(),
         transaction_count: row.get::<i64, _>("transaction_count"),
         block_size_bytes: row.try_get::<Option<i64>, _>("block_size_bytes").ok().flatten(),
-        previous_block_hash: row.try_get::<Option<String>, _>("previous_block_hash").ok().flatten(),
+        previous_block_hash: None,
     };
 
     // Then get the transactions for this block
@@ -313,7 +291,7 @@ pub async fn get_block_by_hash(
         height: block.height,
         hash: block.hash,
         timestamp: block.timestamp,
-        bitcoin_block_height: block.bitcoin_block_height.unwrap(),
+        bitcoin_block_height: block.bitcoin_block_height.unwrap_or(0),
         transaction_count: block.transaction_count,
         previous_block_hash: block.previous_block_hash,
         block_size_bytes: block.block_size_bytes,
@@ -334,12 +312,11 @@ pub async fn get_block_by_height(
             b.timestamp,
             b.bitcoin_block_height,
             COUNT(t.txid) as transaction_count,
-            b.previous_block_hash
-            , NULL::bigint as block_size_bytes
+            NULL::bigint as block_size_bytes
         FROM blocks b
         LEFT JOIN transactions t ON b.height = t.block_height
         WHERE b.height = $1
-        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height, b.previous_block_hash
+        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height
         "#
     )
     .bind(height as i64)
@@ -356,7 +333,7 @@ pub async fn get_block_by_height(
         bitcoin_block_height: row.try_get::<Option<i64>, _>("bitcoin_block_height").ok().flatten(),
         transaction_count: row.get::<i64, _>("transaction_count"),
         block_size_bytes: row.try_get::<Option<i64>, _>("block_size_bytes").ok().flatten(),
-        previous_block_hash: row.try_get::<Option<String>, _>("previous_block_hash").ok().flatten(),
+        previous_block_hash: None,
     };
 
     // Compute approximate size by summing tx sizes for this block
@@ -1161,5 +1138,83 @@ pub async fn get_program_details(
         Ok(Json(payload))
     } else {
         Err(ApiError::NotFound)
+    }
+}
+
+pub async fn backfill_programs(State(pool): State<Arc<PgPool>>) -> impl IntoResponse {
+    // Idempotent SQL-only backfill: scan transactions for program_ids and populate tables
+    // 1) From message.instructions.program_id
+    let res1 = sqlx::query(
+        r#"
+        WITH ins AS (
+            SELECT t.txid, inst
+            FROM transactions t,
+                 LATERAL jsonb_array_elements(t.data->'message'->'instructions') AS inst
+        )
+        INSERT INTO programs (program_id)
+        SELECT normalize_program_id(inst->>'program_id')
+        FROM ins
+        WHERE normalize_program_id(inst->>'program_id') IS NOT NULL
+        ON CONFLICT (program_id) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP, transaction_count = programs.transaction_count
+        "#
+    ).execute(&*pool).await;
+
+    // 2) Link transaction_programs for those instructions
+    let res2 = sqlx::query(
+        r#"
+        WITH ins AS (
+            SELECT t.txid, normalize_program_id(inst->>'program_id') AS pid
+            FROM transactions t,
+                 LATERAL jsonb_array_elements(t.data->'message'->'instructions') AS inst
+        )
+        INSERT INTO transaction_programs (txid, program_id)
+        SELECT txid, pid FROM ins WHERE pid IS NOT NULL
+        ON CONFLICT (txid, program_id) DO NOTHING
+        "#
+    ).execute(&*pool).await;
+
+    // 3) From accounts_tags[].program_id
+    let res3 = sqlx::query(
+        r#"
+        WITH tags AS (
+            SELECT t.txid, (tag->>'program_id') AS pid
+            FROM transactions t,
+                 LATERAL jsonb_array_elements(t.accounts_tags) AS tag
+        )
+        INSERT INTO programs (program_id)
+        SELECT pid FROM tags WHERE pid IS NOT NULL
+        ON CONFLICT (program_id) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP, transaction_count = programs.transaction_count
+        "#
+    ).execute(&*pool).await;
+
+    // 4) Link transaction_programs for accounts_tags
+    let res4 = sqlx::query(
+        r#"
+        WITH tags AS (
+            SELECT t.txid, (tag->>'program_id') AS pid
+            FROM transactions t,
+                 LATERAL jsonb_array_elements(t.accounts_tags) AS tag
+        )
+        INSERT INTO transaction_programs (txid, program_id)
+        SELECT txid, pid FROM tags WHERE pid IS NOT NULL
+        ON CONFLICT (txid, program_id) DO NOTHING
+        "#
+    ).execute(&*pool).await;
+
+    match (res1, res2, res3, res4) {
+        (Ok(a), Ok(b), Ok(c), Ok(d)) => {
+            let body = json!({
+                "status": "ok",
+                "programs_upserted_from_instructions": a.rows_affected(),
+                "links_from_instructions": b.rows_affected(),
+                "programs_upserted_from_tags": c.rows_affected(),
+                "links_from_tags": d.rows_affected()
+            });
+            (StatusCode::OK, Json(body))
+        }
+        _ => {
+            let body = json!({ "status": "error" });
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(body))
+        }
     }
 }

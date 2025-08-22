@@ -73,20 +73,8 @@ impl BlockProcessor {
     }
 
     pub async fn process_transaction(&self, transaction: &Transaction, tx: &mut sqlx::Transaction<'_, sqlx::Postgres>) -> Result<(), anyhow::Error> {
-        // First check if transaction already exists
-        let exists = sqlx::query!(
-            "SELECT EXISTS(SELECT 1 FROM transactions WHERE txid = $1)",
-            transaction.txid
-        )
-        .fetch_one(&mut **tx)
-        .await?
-        .exists
-        .unwrap_or(false);
-
-        if exists {
-            tracing::debug!("Transaction {} already processed, skipping", transaction.txid);
-            return Ok(());
-        }
+        // Upsert transaction even if it already exists so that
+        // downstream program extraction logic always runs.
 
         tracing::debug!("Processing transaction: {}", transaction.txid);
         
