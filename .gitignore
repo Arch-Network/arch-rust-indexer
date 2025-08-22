@@ -31,3 +31,28 @@ Thumbs.db
 
 # Keep example tfvars
 !example.tfvars
+
+# -----------------------------
+# Rust / Cargo
+# -----------------------------
+**/target/
+*.rs.bk
+
+# -----------------------------
+# Node / Next.js monorepo
+# -----------------------------
+**/node_modules/
+**/.next/
+**/out/
+**/.vercel/
+**/.turbo/
+**/coverage/
+*.tsbuildinfo
+.eslintcache
+
+# Package manager logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+.pnpm-debug.log*
