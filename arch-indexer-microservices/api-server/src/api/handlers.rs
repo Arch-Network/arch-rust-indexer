@@ -16,6 +16,58 @@ use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::Bl
 use crate::arch_rpc::ArchRpcClient;
 use axum::http::StatusCode;
 
+fn shortvec_len(len: usize) -> usize {
+    // Solana short_vec length prefix (LEB128-like, 7 bits per byte)
+    let mut n = 0usize;
+    let mut v = len;
+    loop {
+        n += 1;
+        if v < 0x80 { break; }
+        v >>= 7;
+    }
+    n
+}
+
+fn estimate_tx_size(tx: &serde_json::Value) -> i64 {
+    // signatures
+    let sigs_len = tx.get("signatures")
+        .and_then(|a| a.as_array())
+        .map(|a| a.len()).unwrap_or(0);
+    let sigs_size = shortvec_len(sigs_len) + sigs_len * 64;
+
+    // message
+    let message = tx.get("message").unwrap_or(&serde_json::Value::Null);
+
+    // header is 3 bytes
+    let header_size = 3usize;
+
+    // account keys
+    let keys_len = message.get("account_keys").and_then(|a| a.as_array()).map(|a| a.len()).unwrap_or(0);
+    let keys_size = shortvec_len(keys_len) + keys_len * 32;
+
+    // recent_blockhash (32 bytes)
+    let rb_size = 32usize;
+
+    // instructions
+    let mut instr_size = 0usize;
+    if let Some(instrs) = message.get("instructions").and_then(|a| a.as_array()) {
+        instr_size += shortvec_len(instrs.len());
+        for ins in instrs {
+            let accounts_len = ins.get("accounts").and_then(|a| a.as_array()).map(|a| a.len()).unwrap_or(0);
+            let data_len = ins.get("data").and_then(|a| a.as_array()).map(|a| a.len()).unwrap_or(0);
+            instr_size += 1; // program_id_index
+            instr_size += shortvec_len(accounts_len) + accounts_len; // account indices (u8 each)
+            instr_size += shortvec_len(data_len) + data_len; // instruction data bytes
+        }
+    } else {
+        instr_size += shortvec_len(0);
+    }
+
+    // approximate message size
+    let message_size = header_size + keys_size + rb_size + instr_size;
+    (sigs_size + message_size) as i64
+}
+
 pub async fn get_blocks(
     State(pool): State<Arc<PgPool>>,
     Query(params): Query<HashMap<String, String>>,
@@ -33,28 +85,46 @@ pub async fn get_blocks(
         .unwrap_or(false);
 
     // Query to get the paginated blocks
-    let blocks = sqlx::query_as!(
-        Block,
+    let rows = sqlx::query(
         r#"
         SELECT 
             b.height,
             b.hash,
-            b.timestamp as "timestamp!: DateTime<Utc>",
+            b.timestamp,
             b.bitcoin_block_height,
-            COUNT(t.txid) as "transaction_count!: i64"
+            COUNT(t.txid) as transaction_count,
+            b.previous_block_hash
+            , NULL::bigint as block_size_bytes
         FROM blocks b 
         LEFT JOIN transactions t ON b.height = t.block_height
-        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height
+        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height, b.previous_block_hash
         HAVING COUNT(t.txid) > 0 OR NOT $3
         ORDER BY b.height DESC 
         LIMIT $1 OFFSET $2
-        "#,
-        limit,
-        offset,
-        filter_no_transactions
+        "#
     )
+    .bind(limit)
+    .bind(offset)
+    .bind(filter_no_transactions)
     .fetch_all(&*pool)
     .await?;
+
+    let blocks: Vec<Block> = rows
+        .into_iter()
+        .map(|r| {
+            let ts_naive = r.get::<chrono::NaiveDateTime, _>("timestamp");
+            let ts_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(ts_naive, Utc);
+            Block {
+                height: r.get::<i64, _>("height"),
+                hash: r.get::<String, _>("hash"),
+                timestamp: ts_utc,
+                bitcoin_block_height: r.try_get::<Option<i64>, _>("bitcoin_block_height").ok().flatten(),
+                transaction_count: r.get::<i64, _>("transaction_count"),
+                block_size_bytes: r.try_get::<Option<i64>, _>("block_size_bytes").ok().flatten(),
+                previous_block_hash: r.try_get::<Option<String>, _>("previous_block_hash").ok().flatten(),
+            }
+        })
+        .collect();
 
     // Query to get the total count of blocks
     let total_count = if filter_no_transactions {
@@ -160,24 +230,38 @@ pub async fn get_block_by_hash(
     Path(blockhash): Path<String>,
 ) -> Result<Json<BlockWithTransactions>, ApiError> {
     // First get the block information
-    let block = sqlx::query!(
+    let row = sqlx::query(
         r#"
         SELECT 
             b.height,
             b.hash,
-            b.timestamp as "timestamp!: DateTime<Utc>",
+            b.timestamp,
             b.bitcoin_block_height,
-            COUNT(t.txid) as "transaction_count!: i64"
+            COUNT(t.txid) as transaction_count,
+            b.previous_block_hash
+            , NULL::bigint as block_size_bytes
         FROM blocks b
         LEFT JOIN transactions t ON b.height = t.block_height
         WHERE b.hash = $1
-        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height
-        "#,
-        blockhash
+        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height, b.previous_block_hash
+        "#
     )
+    .bind(&blockhash)
     .fetch_optional(&*pool)
     .await?
     .ok_or(ApiError::NotFound)?;
+
+    let ts_naive = row.get::<chrono::NaiveDateTime, _>("timestamp");
+    let ts_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(ts_naive, Utc);
+    let mut block = Block {
+        height: row.get::<i64, _>("height"),
+        hash: row.get::<String, _>("hash"),
+        timestamp: ts_utc,
+        bitcoin_block_height: row.try_get::<Option<i64>, _>("bitcoin_block_height").ok().flatten(),
+        transaction_count: row.get::<i64, _>("transaction_count"),
+        block_size_bytes: row.try_get::<Option<i64>, _>("block_size_bytes").ok().flatten(),
+        previous_block_hash: row.try_get::<Option<String>, _>("previous_block_hash").ok().flatten(),
+    };
 
     // Then get the transactions for this block
     let transactions = sqlx::query_as!(
@@ -199,12 +283,40 @@ pub async fn get_block_by_hash(
     .fetch_all(&*pool)
     .await?;
 
+    // Compute approximate block size from transactions
+    let approx_bytes: i64 = transactions.iter().map(|t| estimate_tx_size(&t.data)).sum();
+    if block.block_size_bytes.is_none() { block.block_size_bytes = Some(approx_bytes); }
+
+    // Ensure previous_block_hash is set: DB fallback then RPC
+    if block.previous_block_hash.is_none() && block.height > 0 {
+        if let Ok(prev_row) = sqlx::query(
+            r#"SELECT hash FROM blocks WHERE height = $1"#
+        )
+        .bind(block.height - 1)
+        .fetch_optional(&*pool)
+        .await {
+            if let Some(r) = prev_row {
+                let prev_hash: String = r.get::<String, _>("hash");
+                block.previous_block_hash = Some(prev_hash);
+            }
+        }
+        if block.previous_block_hash.is_none() {
+            let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+            let arch_client = ArchRpcClient::new(rpc_url);
+            if let Ok(rb) = arch_client.get_block(&block.hash, block.height).await {
+                if rb.previous_block_hash.is_some() { block.previous_block_hash = rb.previous_block_hash; }
+            }
+        }
+    }
+
     Ok(Json(BlockWithTransactions {
         height: block.height,
         hash: block.hash,
         timestamp: block.timestamp,
         bitcoin_block_height: block.bitcoin_block_height.unwrap(),
         transaction_count: block.transaction_count,
+        previous_block_hash: block.previous_block_hash,
+        block_size_bytes: block.block_size_bytes,
         transactions: Some(transactions),
     }))
 }
@@ -214,25 +326,84 @@ pub async fn get_block_by_height(
     State(pool): State<Arc<PgPool>>,
     Path(height): Path<i32>,
 ) -> Result<Json<Block>, ApiError> {
-    let block = sqlx::query_as!(
-        Block,
+    let row = sqlx::query(
         r#"
         SELECT 
             b.height,
             b.hash,
-            b.timestamp as "timestamp!: DateTime<Utc>",
+            b.timestamp,
             b.bitcoin_block_height,
-            COUNT(t.txid) as "transaction_count!: i64"
+            COUNT(t.txid) as transaction_count,
+            b.previous_block_hash
+            , NULL::bigint as block_size_bytes
         FROM blocks b
         LEFT JOIN transactions t ON b.height = t.block_height
         WHERE b.height = $1
-        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height
-        "#,
-        height as i64
+        GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height, b.previous_block_hash
+        "#
     )
+    .bind(height as i64)
     .fetch_optional(&*pool)
     .await?
     .ok_or(ApiError::NotFound)?;
+
+    let ts_naive = row.get::<chrono::NaiveDateTime, _>("timestamp");
+    let ts_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(ts_naive, Utc);
+    let mut block = Block {
+        height: row.get::<i64, _>("height"),
+        hash: row.get::<String, _>("hash"),
+        timestamp: ts_utc,
+        bitcoin_block_height: row.try_get::<Option<i64>, _>("bitcoin_block_height").ok().flatten(),
+        transaction_count: row.get::<i64, _>("transaction_count"),
+        block_size_bytes: row.try_get::<Option<i64>, _>("block_size_bytes").ok().flatten(),
+        previous_block_hash: row.try_get::<Option<String>, _>("previous_block_hash").ok().flatten(),
+    };
+
+    // Compute approximate size by summing tx sizes for this block
+    if block.block_size_bytes.is_none() {
+        if let Ok(tx_rows) = sqlx::query(
+            r#"
+            SELECT data FROM transactions WHERE block_height = $1
+            "#
+        )
+        .bind(block.height)
+        .fetch_all(&*pool)
+        .await
+        {
+            let approx: i64 = tx_rows
+                .into_iter()
+                .map(|r| estimate_tx_size(&r.get::<sqlx::types::JsonValue, _>("data")))
+                .sum();
+            if approx > 0 {
+                block.block_size_bytes = Some(approx);
+            }
+        }
+    }
+
+    // Ensure previous_block_hash is set: DB fallback then RPC
+    if block.previous_block_hash.is_none() && block.height > 0 {
+        if let Ok(prev_row) = sqlx::query(
+            r#"SELECT hash FROM blocks WHERE height = $1"#
+        )
+        .bind(block.height - 1)
+        .fetch_optional(&*pool)
+        .await
+        {
+            if let Some(r) = prev_row {
+                let prev_hash: String = r.get::<String, _>("hash");
+                block.previous_block_hash = Some(prev_hash);
+            }
+        }
+        if block.previous_block_hash.is_none() {
+            let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+            let arch_client = ArchRpcClient::new(rpc_url);
+            if let Ok(rb) = arch_client.get_block(&block.hash, block.height).await {
+                if rb.previous_block_hash.is_some() {
+                    block.previous_block_hash = rb.previous_block_hash;
+                }
+            }
+        }
+    }
 
     Ok(Json(block))
 }
@@ -440,50 +611,208 @@ pub async fn search_handler(
         }
 
         // Check if the term is a block hash
-        if let Ok(Some(block)) = sqlx::query_as!(
-            Block,
+        if let Ok(Some(r)) = sqlx::query(
             r#"
             SELECT 
                 b.height,
                 b.hash,
-                b.timestamp as "timestamp!: DateTime<Utc>",
+                b.timestamp,
                 b.bitcoin_block_height,
-                COUNT(t.txid) as "transaction_count!: i64"
+                COUNT(t.txid) as transaction_count,
+                b.previous_block_hash
+                , NULL::bigint as block_size_bytes
             FROM blocks b
             LEFT JOIN transactions t ON b.height = t.block_height
             WHERE b.hash = $1
-            GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height
-            "#,
-            term
+            GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height, b.previous_block_hash
+            "#
         )
+        .bind(term)
         .fetch_optional(&*pool)
         .await
         {
-            return Json(json!({ "type": "block", "data": block }));
+            let ts_naive = r.get::<chrono::NaiveDateTime, _>("timestamp");
+            let ts_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(ts_naive, Utc);
+            let mut block = Block {
+                    height: r.get::<i64, _>("height"),
+                    hash: r.get::<String, _>("hash"),
+                    timestamp: ts_utc,
+                    bitcoin_block_height: r.try_get::<Option<i64>, _>("bitcoin_block_height").ok().flatten(),
+                    transaction_count: r.get::<i64, _>("transaction_count"),
+                    block_size_bytes: r.try_get::<Option<i64>, _>("block_size_bytes").ok().flatten(),
+                    previous_block_hash: r.try_get::<Option<String>, _>("previous_block_hash").ok().flatten(),
+            };
+
+            // Fallback: if previous_block_hash is missing, fetch from RPC
+            if block.previous_block_hash.is_none() {
+                let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+                let arch_client = crate::arch_rpc::ArchRpcClient::new(rpc_url);
+                if let Ok(rb) = arch_client.get_block(&block.hash, block.height).await {
+                    block.previous_block_hash = rb.previous_block_hash;
+                }
+            }
+
+            // Attach transactions list and compute approximate block size
+            let tx_rows = sqlx::query(
+                r#"
+                SELECT 
+                    txid,
+                    block_height,
+                    data,
+                    status,
+                    bitcoin_txids,
+                    created_at
+                FROM transactions
+                WHERE block_height = $1
+                ORDER BY txid
+                LIMIT 500
+                "#
+            )
+            .bind(block.height)
+            .fetch_all(&*pool)
+            .await
+            .unwrap_or_default();
+
+            let txs: Vec<Transaction> = tx_rows
+                .into_iter()
+                .map(|row| Transaction {
+                    txid: row.get::<String, _>("txid"),
+                    block_height: row.get::<i64, _>("block_height"),
+                    data: row.get::<sqlx::types::JsonValue, _>("data"),
+                    status: row.get::<serde_json::Value, _>("status"),
+                    bitcoin_txids: row.try_get::<Option<Vec<String>>, _>("bitcoin_txids").unwrap_or(None),
+                    created_at: row.get::<chrono::NaiveDateTime, _>("created_at"),
+                })
+                .collect();
+
+            // Compute approximate bytes from serialized tx structure
+            let approx_bytes: i64 = txs.iter()
+                .map(|t| estimate_tx_size(&t.data))
+                .sum();
+            if block.block_size_bytes.is_none() {
+                block.block_size_bytes = Some(approx_bytes);
+            }
+
+            return Json(json!({ "type": "block", "data": {
+                "height": block.height,
+                "hash": block.hash,
+                "timestamp": block.timestamp,
+                "bitcoin_block_height": block.bitcoin_block_height,
+                "transaction_count": block.transaction_count,
+                "block_size_bytes": block.block_size_bytes,
+                "previous_block_hash": block.previous_block_hash,
+                "transactions": txs,
+            }}));
         }
 
         // Check if the term is a block height
         if let Ok(height) = term.parse::<i64>() {
-            if let Ok(Some(block)) = sqlx::query_as!(
-                Block,
+            if let Ok(Some(row)) = sqlx::query(
                 r#"
                 SELECT 
                     b.height,
                     b.hash,
-                    b.timestamp as "timestamp!: DateTime<Utc>",
+                    b.timestamp,
                     b.bitcoin_block_height,
-                    COUNT(t.txid) as "transaction_count!: i64"
+                    COUNT(t.txid) as transaction_count,
+                    b.previous_block_hash,
+                    NULL::bigint as block_size_bytes
                 FROM blocks b
                 LEFT JOIN transactions t ON b.height = t.block_height
                 WHERE b.height = $1
-                GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height
-                "#,
-                height
+                GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height, b.previous_block_hash
+                "#
             )
+            .bind(height)
             .fetch_optional(&*pool)
             .await
             {
-                return Json(json!({ "type": "block", "data": block }));
+                let r = row;
+                let ts_naive = r.get::<chrono::NaiveDateTime, _>("timestamp");
+                let ts_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(ts_naive, Utc);
+                let mut block = Block {
+                    height: r.get::<i64, _>("height"),
+                    hash: r.get::<String, _>("hash"),
+                    timestamp: ts_utc,
+                    bitcoin_block_height: r.try_get::<Option<i64>, _>("bitcoin_block_height").ok().flatten(),
+                    transaction_count: r.get::<i64, _>("transaction_count"),
+                    block_size_bytes: r.try_get::<Option<i64>, _>("block_size_bytes").ok().flatten(),
+                    previous_block_hash: r.try_get::<Option<String>, _>("previous_block_hash").ok().flatten(),
+                };
+
+                // Attach transactions for richer search result UX (no sqlx macros)
+                let tx_rows = sqlx::query(
+                    r#"
+                    SELECT 
+                        txid,
+                        block_height,
+                        data,
+                        status,
+                        bitcoin_txids,
+                        created_at
+                    FROM transactions
+                    WHERE block_height = $1
+                    ORDER BY txid
+                    LIMIT 500
+                    "#
+                )
+                .bind(block.height)
+                .fetch_all(&*pool)
+                .await
+                .unwrap_or_default();
+
+                let txs: Vec<Transaction> = tx_rows
+                    .into_iter()
+                    .map(|row| Transaction {
+                        txid: row.get::<String, _>("txid"),
+                        block_height: row.get::<i64, _>("block_height"),
+                        data: row.get::<sqlx::types::JsonValue, _>("data"),
+                        status: row.get::<serde_json::Value, _>("status"),
+                        bitcoin_txids: row.try_get::<Option<Vec<String>>, _>("bitcoin_txids").unwrap_or(None),
+                        created_at: row.get::<chrono::NaiveDateTime, _>("created_at"),
+                    })
+                    .collect();
+
+                // Compute approximate bytes from serialized tx structure
+                if block.block_size_bytes.is_none() {
+                    let approx_bytes: i64 = txs.iter()
+                        .map(|t| estimate_tx_size(&t.data))
+                        .sum();
+                    block.block_size_bytes = Some(approx_bytes);
+                }
+
+                // Fallback: if previous_block_hash is missing, fetch from DB then RPC
+                if block.previous_block_hash.is_none() && block.height > 0 {
+                    if let Ok(prev_row) = sqlx::query(
+                        r#"SELECT hash FROM blocks WHERE height = $1"#
+                    )
+                    .bind(block.height - 1)
+                    .fetch_optional(&*pool)
+                    .await {
+                        if let Some(r) = prev_row {
+                            let prev_hash: String = r.get::<String, _>("hash");
+                            block.previous_block_hash = Some(prev_hash);
+                        }
+                    }
+                    if block.previous_block_hash.is_none() {
+                        let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+                        let arch_client = crate::arch_rpc::ArchRpcClient::new(rpc_url);
+                        if let Ok(rb) = arch_client.get_block(&block.hash, block.height).await {
+                            if rb.previous_block_hash.is_some() { block.previous_block_hash = rb.previous_block_hash; }
+                        }
+                    }
+                }
+
+                return Json(json!({ "type": "block", "data": {
+                    "height": block.height,
+                    "hash": block.hash,
+                    "timestamp": block.timestamp,
+                    "bitcoin_block_height": block.bitcoin_block_height,
+                    "transaction_count": block.transaction_count,
+                    "block_size_bytes": block.block_size_bytes,
+                    "previous_block_hash": block.previous_block_hash,
+                    "transactions": txs,
+                }}));
             }
         }
 

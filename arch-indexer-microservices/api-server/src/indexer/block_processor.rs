@@ -493,18 +493,19 @@ impl BlockProcessor {
         let timestamp = convert_arch_timestamp(block.timestamp);
 
         // Insert block with detailed error handling
-        match sqlx::query!(
+        match sqlx::query(
             r#"
-            INSERT INTO blocks (height, hash, timestamp, bitcoin_block_height)
-            VALUES ($1, $2, $3, $4)
+            INSERT INTO blocks (height, hash, timestamp, bitcoin_block_height, previous_block_hash)
+            VALUES ($1, $2, $3, $4, $5)
             ON CONFLICT (height) DO UPDATE 
-            SET hash = $2, timestamp = $3, bitcoin_block_height = $4
-            "#,
-            height,
-            block_hash,
-            timestamp,
-            block.bitcoin_block_height.unwrap_or(0)
+            SET hash = $2, timestamp = $3, bitcoin_block_height = $4, previous_block_hash = $5
+            "#
         )
+        .bind(height)
+        .bind(&block_hash)
+        .bind(timestamp)
+        .bind(block.bitcoin_block_height.unwrap_or(0))
+        .bind(block.previous_block_hash.clone().unwrap_or_default())
         .execute(&mut *tx)
         .await {
             Ok(_) => tracing::debug!("Inserted/updated block {}", height),

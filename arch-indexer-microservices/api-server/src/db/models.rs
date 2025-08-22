@@ -11,6 +11,8 @@ pub struct Block {
     pub timestamp: DateTime<Utc>,
     pub bitcoin_block_height: Option<i64>,
     pub transaction_count: i64,
+    pub previous_block_hash: Option<String>,
+    pub block_size_bytes: Option<i64>,
 }
 
 fn serialize_timestamp_safe<S>(timestamp: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
@@ -44,5 +46,7 @@ pub struct BlockWithTransactions {
     pub timestamp: DateTime<Utc>,
     pub bitcoin_block_height: i64,
     pub transaction_count: i64,
+    pub previous_block_hash: Option<String>,
+    pub block_size_bytes: Option<i64>,
     pub transactions: Option<Vec<Transaction>>,
 }

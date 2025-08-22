@@ -49,6 +49,7 @@ Thumbs.db
 **/coverage/
 *.tsbuildinfo
 .eslintcache
+**/next-env.d.ts
 
 # Package manager logs
 npm-debug.log*

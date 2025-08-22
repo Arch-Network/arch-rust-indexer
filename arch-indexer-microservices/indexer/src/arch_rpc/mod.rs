@@ -23,6 +23,7 @@ pub struct Block {
 	pub bitcoin_block_height: Option<i64>,
 	pub transactions: Vec<String>,
 	pub transaction_count: i64,
+	pub previous_block_hash: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -179,6 +180,7 @@ impl ArchRpcClient {
 								bitcoin_block_height: block_response.bitcoin_block_height,
 								transactions: transaction_strings,
 								transaction_count: block_response.transactions.len() as i64,
+								previous_block_hash: Some(hex::encode(&block_response.previous_block_hash)),
 							});
 						},
 						Err(e) => {

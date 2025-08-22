@@ -244,10 +244,22 @@ export default function Home() {
               <strong>TIMESTAMP:</strong> {formatTimestamp(result.data.timestamp)}
             </div>
             <div className={styles.detailRow}>
-              <strong>TRANSACTION COUNT:</strong> {result.data.transaction_count || '0'}
+              <strong>TRANSACTIONS:</strong> {result.data.transaction_count || '0'}
             </div>
+            {Array.isArray(result.data.transactions) && result.data.transactions.length > 0 && (
+              <div className={styles.detailRow}>
+                <strong>TX LIST:</strong>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+                  {result.data.transactions.map((tx: any) => (
+                    <button key={tx.txid} className={styles.hashButton} onClick={() => { setSelectedTransaction(tx); openTxDrawer(tx); }}>
+                      {tx.txid.substring(0,16)}...
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
             <div className={styles.detailRow}>
-              <strong>BLOCK SIZE:</strong> {result.data.size ? `${result.data.size} bytes` : 'UNKNOWN'}
+              <strong>BLOCK SIZE:</strong> {result.data.block_size_bytes != null ? `${result.data.block_size_bytes} bytes` : 'UNKNOWN'}
             </div>
             <div className={styles.detailRow}>
               <strong>PREVIOUS BLOCK:</strong> 
@@ -255,12 +267,7 @@ export default function Home() {
                 <span className={styles.hashValue}>{result.data.previous_block_hash.substring(0, 16)}...</span>
               ) : 'GENESIS BLOCK'}
             </div>
-            <div className={styles.detailRow}>
-              <strong>MERKLE ROOT:</strong> 
-              {result.data.merkle_root ? (
-                <span className={styles.hashValue}>{result.data.merkle_root}</span>
-              ) : 'UNKNOWN'}
-            </div>
+            {/* Merkle root removed from API; intentionally not shown */}
           </div>
           <div className={styles.queryMeta}>
             <small>QUERY EXECUTED: {result.query} | RETRIEVED: {formatTimestamp(result.timestamp)}</small>
@@ -747,19 +754,7 @@ export default function Home() {
         </div>
       )}
 
-      {/* Transaction Modal */}
-      {selectedTransaction && (
-        <div className={styles.modal} onClick={() => setSelectedTransaction(null)}>
-          <div className={styles.modalContent} onClick={(e) => e.stopPropagation()}>
-            <h2>Transaction Details</h2>
-            <p><strong>ID:</strong> {selectedTransaction.txid}</p>
-            <p><strong>Block Height:</strong> {selectedTransaction.block_height}</p>
-            <p><strong>Status:</strong> {formatTransactionStatus(selectedTransaction.status)}</p>
-            <p><strong>Created:</strong> {formatTimestamp(selectedTransaction.created_at)}</p>
-            <button onClick={() => setSelectedTransaction(null)}>Close</button>
-          </div>
-        </div>
-      )}
+      {/* Transaction Modal removed in favor of drawer-only UX */}
     </div>
   );
 }
