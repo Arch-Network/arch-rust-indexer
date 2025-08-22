@@ -85,6 +85,7 @@
 .searchButton { background: var(--panel); color: var(--text); border: 1px solid var(--accent); padding: 14px 24px; font-size: 13px; font-weight: 600; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; box-shadow: 0 4px 16px rgba(0,0,0,0.35); transition: transform .08s ease, background .2s ease, color .2s ease; }
 .searchButton:hover { background: linear-gradient(90deg, var(--accent), var(--accent-2)); color: #000; }
 .searchButton:active { transform: translateY(1px); }
+.searchButtonSm { padding: 8px 14px; font-size: 12px; }
 .searchTips { color: var(--muted); font-size: 12px; }
 
 .searchResults { margin-top: 20px; padding: 20px; background: var(--panel); border: 1px solid rgba(255,255,255,0.06); }

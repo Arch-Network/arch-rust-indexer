@@ -1,6 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import Head from 'next/head';
 import styles from '../styles/Home.module.css';
+import Layout from '../components/Layout';
+import BlockScroller from '../components/BlockScroller';
+import DonutProgress from '../components/DonutProgress';
+import Sparkline from '../components/Sparkline';
 
 interface NetworkStats {
   total_blocks: number;
@@ -58,6 +62,16 @@ export default function Home() {
     loadTransactions();
     connectWebSocket();
     createMatrixRain();
+  }, []);
+
+  // Auto-refresh core summaries and lists
+  useEffect(() => {
+    const id = setInterval(() => {
+      loadNetworkStats();
+      loadBlocks();
+      loadTransactions();
+    }, 10000);
+    return () => clearInterval(id);
   }, []);
 
   useEffect(() => {
@@ -411,28 +425,21 @@ export default function Home() {
   const syncProgress = calculateSyncProgress();
 
   return (
-    <div className={styles.container}>
-      {/* CRT Scanline Effect */}
-      <div className="scanline"></div>
-      
+    <Layout
+      rightActions={(
+        <button className={styles.refreshButton} onClick={() => setMemeMode(v => !v)}>
+          {memeMode ? 'Meme Mode: ON' : 'Meme Mode: OFF'}
+        </button>
+      )}
+    >
       <Head>
         <title>Arch Explorer • Cypherpunk Mode</title>
         <meta name="description" content="Fresh, usable blockchain explorer for Arch" />
         <link rel="icon" href="/favicon.ico" />
       </Head>
 
-      <main className={styles.main}>
-        <div className={styles.header}>
-          <h1>Arch Explorer</h1>
-          <div style={{ display: 'flex', gap: 12 }}>
-            <button className={styles.refreshButton} onClick={() => { loadNetworkStats(); loadBlocks(); loadTransactions(); }}>
-              Refresh
-            </button>
-            <button className={styles.refreshButton} onClick={() => setMemeMode(v => !v)}>
-              {memeMode ? 'Meme Mode: ON' : 'Meme Mode: OFF'}
-            </button>
-          </div>
-        </div>
+      {/* Animated live block scroller */}
+      <BlockScroller apiUrl={apiUrl} />
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: 12, marginBottom: 18 }}>
           <div className={styles.statCard}>
@@ -470,222 +477,95 @@ export default function Home() {
 
         <div className={styles.statsGrid}>
           <div className={styles.statCard}>
-            <h3>Blocks Indexed</h3>
-            <div className={styles.value}>{stats?.total_blocks?.toLocaleString() || '0'}</div>
-            <div className={styles.label}>Total Blocks</div>
+            <h3>TPS</h3>
+            <div className={styles.value}>{(stats?.current_tps ?? 0).toFixed(2)}</div>
+            <div className={styles.label}>Avg {stats?.average_tps?.toFixed?.(2) ?? '0.00'} | Peak {stats?.peak_tps?.toFixed?.(2) ?? '0.00'}</div>
+            <div style={{ marginTop: 8 }}>
+              <Sparkline data={[stats?.average_tps ?? 0, stats?.current_tps ?? 0, (stats?.current_tps ?? 0) * 1.1, (stats?.current_tps ?? 0) * 0.9, stats?.current_tps ?? 0]} />
+            </div>
           </div>
           <div className={styles.statCard}>
-            <h3>Transactions</h3>
-            <div className={styles.value}>{stats?.total_transactions?.toLocaleString() || '0'}</div>
-            <div className={styles.label}>Indexed</div>
+            <h3>Mempool</h3>
+            <div className={styles.value}>{mempoolStats?.total_transactions ?? 0}</div>
+            <div className={styles.label}>Pending {mempoolStats?.pending_count ?? 0}</div>
+            <div style={{ marginTop: 8 }}>
+              <Sparkline data={[mempoolStats?.pending_count ?? 0, (mempoolStats?.pending_count ?? 0) * 0.8 + 1, (mempoolStats?.pending_count ?? 0) * 1.2 + 2, mempoolStats?.pending_count ?? 0]} color="var(--accent-2)" />
+            </div>
           </div>
           <div className={styles.statCard}>
-            <h3>Chain Head</h3>
-            <div className={styles.value}>{stats?.latest_block_height || '0'}</div>
-            <div className={styles.label}>Latest Block</div>
-          </div>
-          <div className={styles.statCard}>
-            <h3>Status</h3>
-            <div className={styles.value}>[SYNCED]</div>
-            <div className={styles.label}>Realtime</div>
-          </div>
-        </div>
-
-        {/* Sync Progress Section */}
-        <div className={styles.syncProgressSection}>
-          <div className={styles.syncProgressHeader}>
-            <h3>Synchronization Progress</h3>
-            <div className={styles.syncInfo}>
-              <span className={styles.syncPercentage}>{syncProgress.percentage}%</span>
-              <span className={styles.syncDetails}>
-                {syncProgress.percentage >= 100 ? 'Fully Synchronized' : 
-                 syncProgress.percentage >= 90 ? 'Nearly Complete' :
-                 syncProgress.percentage >= 50 ? 'Halfway Complete' : 'Syncing...'}
-              </span>
-            </div>
-          </div>
-          <div className={styles.progressBarContainer}>
-            <div className={styles.progressBar}>
-              <div 
-                className={styles.progressFill} 
-                style={{ width: `${syncProgress.percentage}%` }}
-              />
-            </div>
-            <div className={styles.progressStats}>
-              <span>{syncProgress.synced.toLocaleString()}</span> / <span>{syncProgress.total.toLocaleString()}</span> blocks
-            </div>
-          </div>
-        </div>
-
-        <div className={styles.searchSection}>
-          <h2>Search Blockchain</h2>
-          <div className={styles.searchContainer}>
-            <input
-              type="text"
-              className={styles.searchInput}
-              placeholder="Enter block height, block hash, or transaction ID..."
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && performSearch()}
-            />
-            <button className={styles.searchButton} onClick={performSearch}>
-              Execute
-            </button>
-          </div>
-          <div className={styles.searchTips}>
-            <small>Tips: Height (e.g., 52100), block hash, or transaction ID</small>
-          </div>
-          {searchResults.length > 0 && (
-            <div className={styles.searchResults}>
-              <h3>Query Results</h3>
-              {searchResults.map((result, index) => (
-                <div key={index}>{renderSearchResult(result)}</div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        <div className={styles.searchSection}>
-          <h2>Program Explorer</h2>
-          <div className={styles.searchContainer}>
-            <input
-              type="text"
-              className={styles.searchInput}
-              placeholder="Enter Program ID (pubkey)…"
-              value={programQuery}
-              onChange={(e) => setProgramQuery(e.target.value)}
-              onKeyPress={(e) => e.key === 'Enter' && fetchProgram()}
-            />
-            <button className={styles.searchButton} onClick={fetchProgram}>
-              Lookup
-            </button>
-          </div>
-          {programLoading && <div className={styles.loading}>Loading program…</div>}
-          {programError && <div className={styles.statusOther} style={{ display: 'inline-block' }}>{programError}</div>}
-          {programResult && (
-            <div className={styles.searchResults}>
-              <h3>Program Overview</h3>
-              <div className={styles.statsGrid}>
-                <div className={styles.statCard}>
-                  <h3>Program ID</h3>
-                  <div className={styles.value} style={{ fontSize: '1rem', wordBreak: 'break-all' }}>{programResult.program.program_id}</div>
-                  <div className={styles.label}>Identifier</div>
-                </div>
-                <div className={styles.statCard}>
-                  <h3>Transactions</h3>
-                  <div className={styles.value}>{programResult.program.transaction_count}</div>
-                  <div className={styles.label}>Total</div>
-                </div>
-                <div className={styles.statCard}>
-                  <h3>First Seen</h3>
-                  <div className={styles.value} style={{ fontSize: '1.2rem' }}>{formatTimestamp(programResult.program.first_seen_at)}</div>
-                  <div className={styles.label}>Timestamp</div>
-                </div>
-                <div className={styles.statCard}>
-                  <h3>Last Seen</h3>
-                  <div className={styles.value} style={{ fontSize: '1.2rem' }}>{formatTimestamp(programResult.program.last_seen_at)}</div>
-                  <div className={styles.label}>Timestamp</div>
-                </div>
+            <h3>Synchronization</h3>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+              <DonutProgress percent={syncProgress.percentage} label="Synced" sublabel={syncProgress.percentage >= 100 ? 'Fully synchronized' : `${syncProgress.synced.toLocaleString()} / ${syncProgress.total.toLocaleString()} blocks`} />
+              <div className={styles.progressStats}>
+                <div>Head: {stats?.latest_block_height?.toLocaleString?.() ?? '—'}</div>
+                <div>Indexed: {stats?.total_blocks?.toLocaleString?.() ?? '—'}</div>
               </div>
+            </div>
+          </div>
+        </div>
 
-              <h3 style={{ marginTop: 16 }}>Recent Transactions</h3>
+        {/* Removed wide sync section; donut moved into top grid */}
+
+        {/* Two-column Recent Blocks / Transactions above search */}
+        <div className={styles.statsGrid}>
+          <div className={styles.blocksSection}>
+            <h2>Recent Blocks</h2>
+            {isLoading ? (
+              <div className={styles.loading}>Loading block data…</div>
+            ) : (
+              <div className={styles.blocksContent}>
+                <table className={styles.blocksTable}>
+                  <thead>
+                    <tr>
+                      <th>Height</th>
+                      <th>Hash</th>
+                      <th>Timestamp</th>
+                      <th>Tx</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {blocks.map((block) => (
+                      <tr key={block.height}>
+                        <td><a className={styles.hashButton} href={`/blocks/${block.height}`}>{block.height}</a></td>
+                        <td><a className={styles.hashButton} href={`/blocks/${block.hash}`}>{block.hash.substring(0, 16)}...</a></td>
+                        <td>{formatTimestamp(block.timestamp)}</td>
+                        <td>{block.transaction_count}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+          <div className={styles.transactionsSection}>
+            <h2>Recent Transactions</h2>
+            <div className={styles.transactionsContent}>
               <table className={styles.transactionsTable}>
                 <thead>
                   <tr>
                     <th>Transaction ID</th>
                     <th>Block</th>
+                    <th>Status</th>
                     <th>Created</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {programResult.recent_transactions.map((rt: any) => (
-                    <tr key={rt.txid}>
-                      <td>
-                        <button className={styles.hashButton} onClick={() => { const tx = { txid: rt.txid, block_height: rt.block_height, status: null as any, created_at: rt.created_at } as any; setSelectedTransaction(tx); openTxDrawer(tx as any); }}>
-                          {rt.txid.substring(0, 16)}...
-                        </button>
-                      </td>
-                      <td>{rt.block_height}</td>
-                      <td>{formatTimestamp(rt.created_at)}</td>
+                  {transactions.map((tx) => (
+                    <tr key={tx.txid}>
+                      <td><a className={styles.hashButton} href={`/tx/${tx.txid}`}>{tx.txid.substring(0, 16)}...</a></td>
+                      <td><a className={styles.hashButton} href={`/blocks/${tx.block_height}`}>{tx.block_height}</a></td>
+                      <td>{formatTransactionStatus(tx.status)}</td>
+                      <td>{formatTimestamp(tx.created_at)}</td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
-          )}
-        </div>
-
-        <div className={styles.blocksSection}>
-          <h2>Recent Blocks</h2>
-          {isLoading ? (
-            <div className={styles.loading}>Loading block data…</div>
-          ) : (
-            <div className={styles.blocksContent}>
-              <table className={styles.blocksTable}>
-                <thead>
-                  <tr>
-                    <th>Height</th>
-                    <th>Hash</th>
-                    <th>Timestamp</th>
-                    <th>Tx</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {blocks.map((block) => (
-                    <tr key={block.height}>
-                      <td>{block.height}</td>
-                      <td>
-                        <button 
-                          className={styles.hashButton}
-                          onClick={() => setSelectedBlock(block)}
-                        >
-                          {block.hash.substring(0, 16)}...
-                        </button>
-                      </td>
-                      <td>{formatTimestamp(block.timestamp)}</td>
-                      <td>{block.transaction_count}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
-
-        <div className={styles.transactionsSection}>
-          <h2>Recent Transactions</h2>
-          <div className={styles.transactionsContent}>
-            <table className={styles.transactionsTable}>
-              <thead>
-                <tr>
-                  <th>Transaction ID</th>
-                  <th>Block</th>
-                  <th>Status</th>
-                  <th>Created</th>
-                </tr>
-              </thead>
-              <tbody>
-                {transactions.map((tx) => (
-                  <tr key={tx.txid}>
-                    <td>
-                      <button 
-                        className={styles.hashButton}
-                        onClick={() => { setSelectedTransaction(tx); openTxDrawer(tx); }}
-                      >
-                        {tx.txid.substring(0, 16)}...
-                      </button>
-                    </td>
-                    <td>{tx.block_height}</td>
-                    <td>{formatTransactionStatus(tx.status)}</td>
-                    <td>{formatTimestamp(tx.created_at)}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
           </div>
         </div>
-      </main>
 
+        {/* moved search to header; results remain hidden for simplicity */}
+      
       {isTxDrawerOpen && (
         <>
           <div className={styles.drawerOverlay} onClick={() => setIsTxDrawerOpen(false)} />
@@ -755,6 +635,6 @@ export default function Home() {
       )}
 
       {/* Transaction Modal removed in favor of drawer-only UX */}
-    </div>
+    </Layout>
   );
 }

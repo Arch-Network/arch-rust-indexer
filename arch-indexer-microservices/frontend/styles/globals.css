@@ -1,3 +1,39 @@
+:root {
+  --bg: #0b0e13;
+  --panel: #0f1218;
+  --text: #e6f1ff;
+  --muted: #9aa4b2;
+  --accent: #19e3ff;
+  --accent-2: #9aff6b;
+  --danger: #ff6b6b;
+  --ok: #27e8a7;
+  --warn: #ffcf5b;
+  --shadow: 0 12px 30px rgba(0,0,0,0.35);
+}
+
+html, body, #__next {
+  height: 100%;
+}
+
+* { box-sizing: border-box; }
+
+/* Subtle CRT scanline and meme-mode toggle classes referenced in page */
+.scanline { position: fixed; top: 0; left: 0; right: 0; height: 2px; background: linear-gradient(90deg, rgba(25,227,255,0.25), rgba(154,255,107,0.25)); opacity: .25; pointer-events: none; z-index: 1; }
+
+.meme-mode body { filter: hue-rotate(25deg) saturate(1.1); }
+
+/* Simple nav */
+.siteNav { display: flex; gap: 14px; align-items: center; }
+.siteNav a { color: var(--muted); text-decoration: none; font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; padding: 6px 10px; border: 1px solid transparent; }
+.siteNav a:hover { color: var(--text); border-color: rgba(255,255,255,0.08); }
+
+/* Horizontal scroller base styles */
+.hScroller { overflow: hidden; border: 1px solid rgba(255,255,255,0.06); background: #0a0c10; }
+.hScrollerRow { display: flex; gap: 12px; padding: 10px; will-change: transform; }
+.hBlockCard { min-width: 200px; background: #0a0c10; border: 1px solid rgba(255,255,255,0.06); padding: 10px; }
+.hBlockCard h4 { margin: 0 0 8px 0; color: var(--accent); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
+.hBlockMeta { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+
 /* 90s Internet Aesthetic - Global Styles */
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=VT323&display=swap');
 

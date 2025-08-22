@@ -1,121 +1,147 @@
-# Arch Indexer
+# 🚀 Arch Indexer
 
-A high-performance indexing service built in Rust for archiving and querying data. This service utilizes PostgreSQL for storage, Redis for caching, and exposes metrics via Prometheus.
+A high-performance blockchain indexing service built in Rust for the Arch Network, featuring both monolithic and microservices architectures. This service provides real-time blockchain data processing, RESTful APIs, and a modern web dashboard.
 
-## Features
-- RESTful API powered by Axum
-- PostgreSQL database integration with SQLx
-- Redis caching layer
-- Prometheus metrics export
-- Async runtime with Tokio
-- Configuration via YAML
-- Comprehensive error handling
-- Thread-safe concurrent operations with DashMap
+## 🏗️ Architecture Options
 
-## Prerequisites
-- Rust (latest stable version)
-- PostgreSQL (13 or higher)
-- Redis server
-- Docker (optional, for containerized deployment)
+This project supports two deployment approaches:
 
-## Local Development Setup
+### 1. **Monolithic Architecture** (Root Directory)
+- **Single Rust binary** with integrated API server and indexer
+- **Simpler deployment** and configuration
+- **All-in-one solution** for smaller deployments
+- **Port**: 8081 (configurable)
 
-1. Clone the repository:
+### 2. **Microservices Architecture** (`/arch-indexer-microservices`)
+- **Separated services** for independent scaling
+- **Frontend**: React/Next.js dashboard (Port 3000)
+- **API Server**: Rust/Axum REST API (Port 3001)
+- **Indexer**: Background blockchain processor
+- **Better for production** and high-traffic scenarios
+
+## 🎯 Features
+
+- **Real-time blockchain indexing** with WebSocket support
+- **RESTful API** powered by Axum
+- **PostgreSQL database** integration with SQLx
+- **Redis caching** layer for performance
+- **Prometheus metrics** export
+- **Async runtime** with Tokio
+- **Configuration** via YAML
+- **Comprehensive error handling**
+- **Thread-safe concurrent operations** with DashMap
+- **Modern web dashboard** with real-time updates
+
+## 🚀 Quick Start
+
+### Prerequisites
+- **Rust** (latest stable version)
+- **PostgreSQL** (13 or higher)
+- **Redis** server
+- **Docker** (optional, for containerized deployment)
+
+### Option 1: Monolithic Deployment (Recommended for Development)
+
+1. **Clone the repository:**
    ```bash
    git clone https://github.com/yourusername/arch-indexer.git
    cd arch-indexer
    ```
 
-2. Create and configure your local database:
+2. **Set up environment:**
    ```bash
-   # Create the database
-   createdb archindexer
-
-   # Initialize the schema
-   cargo run --bin init_schema
+   # Copy example config
+   cp config.example.yml config.yml
+   
+   # Set environment variables
+   export DB_PASSWORD=your_secure_password
+   export ARCH_NODE_URL=http://your-arch-node:8081
+   export ARCH_NODE_WEBSOCKET_URL=ws://your-arch-node:10081
    ```
 
-3. Set up your environment variables in `.env`:
+3. **Start with Docker Compose:**
    ```bash
-   DATABASE_URL=postgresql://postgres:postgres@localhost:5432/archindexer
-   ARCH_NODE_URL=http://your-arch-node:9002
-   REDIS_URL=redis://localhost:6379
-   RUST_LOG=info
+   docker-compose up -d
    ```
 
-4. Start Redis (if not already running):
+4. **Access the service:**
+   - **API**: http://localhost:9090
+   - **Database**: localhost:5432
+   - **Redis**: localhost:6379
+
+### Option 2: Microservices Deployment (Recommended for Production)
+
+1. **Navigate to microservices directory:**
    ```bash
-   # Using Docker
-   docker run -d -p 6379:6379 redis:alpine
-   # Or use your system's Redis service
+   cd arch-indexer-microservices
    ```
 
-5. Run the indexer in development mode:
+2. **Start all services:**
    ```bash
-   cargo run
+   docker-compose up -d
    ```
 
-   Or build and run in release mode:
-   ```bash
-   cargo build --release
-   ./target/release/arch-indexer
-   ```
+3. **Access services:**
+   - **Frontend**: http://localhost:3000
+   - **API**: http://localhost:3001
+   - **Database**: localhost:5432
+   - **Redis**: localhost:6379
 
-6. Verify the service is running:
-   ```bash
-   curl http://localhost:8080/
-   # Should return: {"message": "Arch Indexer API is running"}
-   ```
+## 🔧 Local Development
 
-## Docker Development Setup
-
-If you prefer using Docker for local development:
-
-1. Build and start all services:
-   ```bash
-   docker-compose up --build
-   ```
-
-2. The services will be available at:
-   - Indexer API: http://localhost:8080
-   - PostgreSQL: localhost:5432
-   - Redis: localhost:6379
-
-## Configuration
-
-### Environment Variables
-Required environment variables:
+### Monolithic Development
 ```bash
-DATABASE_URL=postgresql://username:password@localhost:5432/archindexer
-REDIS_URL=redis://localhost:6379
-ARCH_NODE_URL=http://your-arch-node:9002
-RUST_LOG=info
+# Install dependencies
+cargo build
+
+# Run the service
+cargo run
+
+# Run tests
+cargo test
+
+# Format code
+cargo fmt
+
+# Lint code
+cargo clippy
 ```
 
-### Configuration File
-The `config.yml` file supports the following options:
-```yaml
-server:
-  host: "127.0.0.1"
-  port: 8080
+### Microservices Development
+```bash
+# Frontend
+cd arch-indexer-microservices/frontend
+npm install
+npm run dev
 
-database:
-  max_connections: 5
-  timeout_seconds: 30
+# API Server
+cd arch-indexer-microservices/api-server
+cargo run
 
-redis:
-  ttl_seconds: 3600
-  max_connections: 10
-
-metrics:
-  enabled: true
-  port: 9090
+# Indexer
+cd arch-indexer-microservices/indexer
+cargo run
 ```
 
-## Database Setup
+## 📊 API Endpoints
 
-Initialize the database schema:
+### Core Endpoints
+- `GET /` - Health check
+- `GET /api/blocks` - List blocks with pagination
+- `GET /api/blocks/{blockhash}` - Get block by hash
+- `GET /api/blocks/height/{height}` - Get block by height
+- `GET /api/transactions` - List transactions
+- `GET /api/transactions/{txid}` - Get transaction by ID
+- `GET /api/network-stats` - Network statistics
+- `GET /api/sync-status` - Sync status
+- `GET /metrics` - Prometheus metrics
 
+### WebSocket Endpoints
+- `ws://localhost:8081/ws` - Real-time blockchain updates
+
+## 🗄️ Database Setup
+
+### Initialize Schema
 ```bash
 # Option 1: Using the binary
 cargo run --bin init_schema
@@ -124,139 +150,199 @@ cargo run --bin init_schema
 sqlx migrate run
 ```
 
-Both methods will create the necessary database tables. The migrations method is preferred for production environments.
-
-## Security Setup
-
-Before running the indexer:
-
-1. Copy the example environment file:
-   ```bash
-   cp .env.example .env
-   ```
-
-2. Copy the example configuration:
-   ```bash
-   cp config/config.example.yml config/config.yml
-   ```
-
-3. Update the `.env` and `config.yml` files with your secure values
-
-⚠️ Never commit `.env` or `config.yml` files containing real credentials to the repository.
-
-## Running the Service
-
-```
-### Development
-
-cargo run --bin arch-indexer
-
-### Production
-
-cargo build --release
-./target/release/arch-indexer
+### Database Configuration
+```yaml
+database:
+  url: "postgresql://username:password@localhost:5432/archindexer"
+  max_connections: 20
+  min_connections: 5
+  timeout_seconds: 30
 ```
 
-## API Endpoints
+## 🔐 Configuration
 
+### Environment Variables
+```bash
+# Database
+DATABASE_URL=postgresql://username:password@localhost:5432/archindexer
+DB_PASSWORD=your_secure_password
+
+# Arch Network
+ARCH_NODE_URL=http://your-arch-node:8081
+ARCH_NODE_WEBSOCKET_URL=ws://your-arch-node:10081
+
+# Redis
+REDIS_URL=redis://localhost:6379
+
+# Application
+RUST_LOG=info
+APPLICATION__PORT=8081
+APPLICATION__HOST=0.0.0.0
 ```
-### Block Endpoints
 
-GET /api/blocks
-- Returns a list of the most recent blocks (limited to 200)
-- Response includes block height, hash, timestamp, and Bitcoin block height
+### Configuration File (`config.yml`)
+```yaml
+database:
+  username: "postgres"
+  password: "your_password"
+  host: "localhost"
+  port: 5432
+  database_name: "archindexer"
+  max_connections: 20
+  min_connections: 5
 
-GET /api/blocks/{blockhash}
-- Returns detailed information about a specific block by its hash
-- Includes associated transactions for that block
-- Returns 404 if block not found
+application:
+  host: "0.0.0.0"
+  port: 8081
 
-GET /api/blocks/height/{height}
-- Returns block information for a specific height
-- Returns 404 if height not found
+arch_node:
+  url: "http://your-arch-node:8081"
+  websocket_url: "ws://your-arch-node:10081"
 
-### Transaction Endpoints
+indexer:
+  batch_size: 100
+  concurrent_batches: 5
 
-GET /api/transactions
-- Returns the most recent transactions (limited to 20)
-- Ordered by block height in descending order
-- Includes transaction ID, block height, status, and Bitcoin transaction IDs
+websocket:
+  enabled: true
+  reconnect_interval_seconds: 5
+  max_reconnect_attempts: 10
+```
 
-GET /api/transactions/{txid}
-- Returns detailed information about a specific transaction
-- Includes full transaction data and status
-- Returns 404 if transaction not found
+## 🐳 Docker Deployment
 
-### Network Statistics
+### Monolithic Deployment
+```bash
+# Build and run
+docker-compose up -d
 
-GET /api/network-stats
-- Returns current network statistics including:
-  - Latest block height
-  - Total transaction count
-  - Network TPS (Transactions Per Second)
-  - Time span calculations
+# View logs
+docker-compose logs -f indexer
 
-### Sync Status
+# Scale (if needed)
+docker-compose up -d --scale indexer=2
+```
 
-GET /api/sync-status
-- Returns the current synchronization status:
-  - Current block height
-  - Target height
-  - Sync progress
-  - Whether sync is in progress
+### Microservices Deployment
+```bash
+# Start all services
+cd arch-indexer-microservices
+docker-compose up -d
 
-### Health Check
+# Scale individual services
+docker-compose up -d --scale api-server=3 --scale frontend=2
+```
 
-GET /
-- Basic API health check endpoint
-- Returns: {"message": "Arch Indexer API is running"}
+## 📈 Monitoring & Observability
+
+### Health Checks
+- **Service health**: `GET /` endpoint
+- **Database connectivity**: Built-in health checks
+- **Redis connectivity**: Health check endpoints
 
 ### Metrics
+- **Prometheus metrics**: `GET /metrics`
+- **System metrics**: CPU, memory, disk usage
+- **Application metrics**: Request latencies, sync status
+- **Database metrics**: Connection pool stats
 
-GET /metrics
-- Returns Prometheus-formatted metrics
-- Includes system metrics, sync status, and performance indicators
+### Logging
+- **Structured logging** with tracing
+- **Configurable log levels** via `RUST_LOG`
+- **Docker log aggregation** support
+
+## 🚨 Troubleshooting
+
+### Common Issues
+
+1. **Database Connection Failed**
+   ```bash
+   # Check PostgreSQL status
+   docker-compose logs postgres
+   
+   # Verify connection string
+   echo $DATABASE_URL
+   ```
+
+2. **Indexer Not Syncing**
+   ```bash
+   # Check Arch Network connectivity
+   curl $ARCH_NODE_URL/health
+   
+   # View indexer logs
+   docker-compose logs -f indexer
+   ```
+
+3. **WebSocket Connection Issues**
+   ```bash
+   # Test WebSocket endpoint
+   wscat -c ws://localhost:8081/ws
+   ```
+
+### Debug Mode
+```bash
+# Enable debug logging
+RUST_LOG=debug docker-compose up indexer
+
+# Check specific service logs
+docker-compose logs -f api-server
 ```
 
+## 🔄 Migration Between Architectures
 
-## Monitoring
+### From Monolith to Microservices
+1. **Stop monolith**: `docker-compose down`
+2. **Start microservices**: `cd arch-indexer-microservices && docker-compose up -d`
+3. **Update frontend config** to point to new API server
+4. **Verify data consistency**
 
-```
-The service exports various metrics including:
-- Request latencies
-- Cache hit/miss ratios
-- Database connection pool stats
-- Index operation counters
-```
+### From Microservices to Monolith
+1. **Stop microservices**: `docker-compose down`
+2. **Start monolith**: `cd .. && docker-compose up -d`
+3. **Update frontend config** to point to monolith API
+4. **Verify functionality**
 
-## Error Handling
+## 🎯 Use Cases
 
-```
-The service uses custom error types for better error handling and reporting. All errors are logged with appropriate context and returned as structured JSON responses.
-```
+### Choose Monolithic When:
+- **Development/testing** environments
+- **Small to medium** deployments
+- **Simple infrastructure** requirements
+- **Quick setup** needed
 
-## Development
+### Choose Microservices When:
+- **Production** deployments
+- **High traffic** scenarios
+- **Independent scaling** needed
+- **Team development** with different technologies
 
-```
-### Running Tests
+## 🤝 Contributing
 
-cargo test
+1. **Fork** the repository
+2. **Create** your feature branch (`git checkout -b feature/amazing-feature`)
+3. **Commit** your changes (`git commit -m 'Add amazing feature'`)
+4. **Push** to the branch (`git push origin feature/amazing-feature`)
+5. **Open** a Pull Request
 
-### Code Formatting
+### Development Guidelines
+- **Follow Rust conventions** and best practices
+- **Write tests** for new functionality
+- **Update documentation** for API changes
+- **Use conventional commits** for commit messages
 
-cargo fmt
+## 📚 Additional Resources
 
-### Linting
+- **[Microservices README](./arch-indexer-microservices/README.md)** - Detailed microservices documentation
+- **[Real-time Indexing Guide](./REALTIME_INDEXING.md)** - WebSocket and real-time sync details
+- **[Deployment Guide](./deploy/README.md)** - Cloud deployment instructions
+- **[API Documentation](./docs/api.md)** - Complete API reference
 
-cargo clippy
-```
+## 📄 License
 
-## Contributing
+[Your License Here]
 
-```
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/amazing-feature`)
-3. Commit your changes (`git commit -m 'Add amazing feature'`)
-4. Push to the branch (`git push origin feature/amazing-feature`)
-5. Open a Pull Request
-```
+---
+
+**Happy Indexing! 🚀**
+
+*Built with ❤️ using Rust, Axum, and modern web technologies*
