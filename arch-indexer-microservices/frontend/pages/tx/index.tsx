@@ -2,22 +2,28 @@ import React, { useEffect, useState } from 'react';
 import Link from 'next/link';
 import Layout from '../../components/Layout';
 import styles from '../../styles/Home.module.css';
+import Pagination from '../../components/Pagination';
 
 type Tx = { txid: string; block_height: number; status?: any; created_at: string };
 
 export default function TransactionsPage() {
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
   const [txs, setTxs] = useState<Tx[]>([]);
+  const [page, setPage] = useState(1);
+  const pageSize = 50;
+  const [total, setTotal] = useState(0);
 
   useEffect(() => {
     (async () => {
       try {
-        const res = await fetch(`${apiUrl}/api/transactions?limit=50&offset=0`);
+        const offset = (page - 1) * pageSize;
+        const res = await fetch(`${apiUrl}/api/transactions?limit=${pageSize}&offset=${offset}`);
         const json = await res.json();
         setTxs(Array.isArray(json) ? json : (json.transactions || []));
+        setTotal(json.total_count ?? 0);
       } catch {}
     })();
-  }, [apiUrl]);
+  }, [apiUrl, page]);
 
   const formatStatus = (s: any) => {
     if (!s) return 'PENDING';
@@ -63,6 +69,7 @@ export default function TransactionsPage() {
             ))}
           </tbody>
         </table>
+        <Pagination page={page} pageSize={pageSize} total={total} onPageChange={setPage} />
       </section>
     </Layout>
   );

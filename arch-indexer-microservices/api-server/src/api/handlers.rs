@@ -388,9 +388,20 @@ pub async fn get_block_by_height(
 
 pub async fn get_transactions(
     State(pool): State<Arc<PgPool>>,
-) -> Result<Json<Vec<Transaction>>, ApiError> {
-    let transactions = sqlx::query_as!(
-        Transaction,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<HashMap<String, serde_json::Value>>, ApiError> {
+    let limit = params
+        .get("limit")
+        .and_then(|l| l.parse::<i64>().ok())
+        .unwrap_or(100);
+
+    let offset = params
+        .get("offset")
+        .and_then(|o| o.parse::<i64>().ok())
+        .unwrap_or(0);
+
+    // Fetch paginated transactions newest-first (dynamic query to avoid sqlx offline cache issues)
+    let rows = sqlx::query(
         r#"
         SELECT 
             txid, 
@@ -398,16 +409,42 @@ pub async fn get_transactions(
             data, 
             status, 
             bitcoin_txids,
-            created_at as "created_at!: NaiveDateTime"
+            created_at
         FROM transactions 
-        ORDER BY block_height DESC
-        LIMIT 100
+        ORDER BY created_at DESC, block_height DESC
+        LIMIT $1 OFFSET $2
         "#
     )
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&*pool)
     .await?;
 
-    Ok(Json(transactions))
+    let transactions: Vec<Transaction> = rows
+        .into_iter()
+        .map(|r| Transaction {
+            txid: r.get::<String, _>("txid"),
+            block_height: r.get::<i64, _>("block_height"),
+            data: r.get("data"),
+            status: r.get("status"),
+            bitcoin_txids: r.try_get::<Option<Vec<String>>, _>("bitcoin_txids").ok().flatten(),
+            created_at: r.get::<NaiveDateTime, _>("created_at"),
+        })
+        .collect();
+
+    // Total transactions count for pagination
+    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transactions")
+        .fetch_one(&*pool)
+        .await?;
+
+    let mut response = HashMap::new();
+    response.insert("total_count".to_string(), serde_json::Value::from(total_count));
+    response.insert(
+        "transactions".to_string(),
+        serde_json::to_value(transactions)?
+    );
+
+    Ok(Json(response))
 }
 
 pub async fn get_transaction(
