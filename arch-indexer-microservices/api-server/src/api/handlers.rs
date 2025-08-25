@@ -11,11 +11,41 @@ use chrono::{DateTime, NaiveDateTime, Utc};
 use hex;
 use bs58;
 use tracing::{info, debug, error};
+use axum::http::StatusCode;
+use axum::extract::Path as AxPath;
 
 use super::types::{ApiError, NetworkStats, SyncStatus, ProgramStats};
 use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::BlockProcessor};
 use crate::arch_rpc::ArchRpcClient;
-use axum::http::StatusCode;
+
+fn key_to_bytes(v: &serde_json::Value) -> Option<Vec<u8>> {
+    if let Some(arr) = v.as_array() {
+        Some(arr.iter().filter_map(|x| x.as_i64().map(|n| n as u8)).collect())
+    } else if let Some(s) = v.as_str() {
+        // Accept base58 program names like Loader111... -> decode base58 if possible, else return None
+        bs58::decode(s).into_vec().ok()
+    } else {
+        None
+    }
+}
+
+fn key_to_base58(v: &serde_json::Value) -> String {
+    if let Some(bytes) = key_to_bytes(v) {
+        return bs58::encode(bytes).into_string();
+    }
+    v.as_str().unwrap_or("").to_string()
+}
+
+fn key_to_hex(v: &serde_json::Value) -> String {
+    if let Some(bytes) = key_to_bytes(v) {
+        return hex::encode(bytes);
+    }
+    if let Some(s) = v.as_str() {
+        if let Ok(bytes) = bs58::decode(s).into_vec() { return hex::encode(bytes); }
+    }
+    String::new()
+}
+
 #[derive(serde::Serialize)]
 pub struct ProgramRowOut {
     pub program_id_hex: String,
@@ -41,6 +71,14 @@ fn normalize_program_param(id: &str) -> Option<String> {
     }
 }
 
+fn fallback_program_name_from_b58(b58: &str) -> Option<String> {
+    match b58 {
+        "Loader1111111111111111111111111111111" => Some("Loader".to_string()),
+        "11111111111111111111111111111111" => Some("System Program".to_string()),
+        _ => None,
+    }
+}
+
 pub async fn list_programs(
     State(pool): State<Arc<PgPool>>,
     Query(params): Query<HashMap<String, String>>,
@@ -62,47 +100,104 @@ pub async fn list_programs(
 
     // total count
     let total_count: i64 = if let Some(s) = &bind_search {
-        sqlx::query_scalar("SELECT COUNT(*) FROM programs WHERE program_id LIKE $1")
+        match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM programs WHERE program_id LIKE $1")
             .bind(s)
             .fetch_one(&*pool)
-            .await?
+            .await {
+            Ok(v) => v,
+            Err(e) => { error!("/api/programs count query failed: {}", e); return Err(ApiError::Database(e)); }
+        }
     } else {
-        sqlx::query_scalar("SELECT COUNT(*) FROM programs")
+        match sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM programs")
             .fetch_one(&*pool)
-            .await?
+            .await {
+            Ok(v) => v,
+            Err(e) => { error!("/api/programs count(all) failed: {}", e); return Err(ApiError::Database(e)); }
+        }
+    };
+
+    // Check if display_name column exists; build columns accordingly
+    let has_display: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'programs' AND column_name = 'display_name'
+        )"#
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap_or(false);
+
+    let cols = if has_display {
+        "program_id, transaction_count, first_seen_at, last_seen_at, display_name"
+    } else {
+        "program_id, transaction_count, first_seen_at, last_seen_at, NULL::text as display_name"
     };
 
     // rows
     let sql = format!(
-        "SELECT program_id, transaction_count, first_seen_at, last_seen_at, display_name FROM programs {} ORDER BY last_seen_at DESC LIMIT $1 OFFSET $2",
+        "SELECT {} FROM programs {} ORDER BY last_seen_at DESC LIMIT $1 OFFSET $2",
+        cols,
         where_sql
     );
-    let rows = if let Some(s) = bind_search {
+    let rows_res = if let Some(s) = bind_search.clone() {
         sqlx::query(&sql)
             .bind(limit)
             .bind(offset)
             .bind(s)
             .fetch_all(&*pool)
-            .await?
+            .await
     } else {
         sqlx::query(&sql)
             .bind(limit)
             .bind(offset)
             .fetch_all(&*pool)
-            .await?
+            .await
+    };
+
+    let rows = match rows_res {
+        Ok(v) => v,
+        Err(e) => {
+            // Fallback: some deployments may have different timestamp types; fall back to simple ordering
+            error!("/api/programs primary rows query failed: {} | sql={}", e, sql);
+            let fallback_sql = if bind_search.is_some() {
+                "SELECT program_id, transaction_count, CURRENT_TIMESTAMP as first_seen_at, CURRENT_TIMESTAMP as last_seen_at, NULL::text as display_name FROM programs WHERE program_id LIKE $3 ORDER BY transaction_count DESC LIMIT $1 OFFSET $2".to_string()
+            } else {
+                "SELECT program_id, transaction_count, CURRENT_TIMESTAMP as first_seen_at, CURRENT_TIMESTAMP as last_seen_at, NULL::text as display_name FROM programs ORDER BY transaction_count DESC LIMIT $1 OFFSET $2".to_string()
+            };
+
+            if let Some(s) = bind_search {
+                sqlx::query(&fallback_sql)
+                    .bind(limit)
+                    .bind(offset)
+                    .bind(s)
+                    .fetch_all(&*pool)
+                    .await
+                    .map_err(|e2| { error!("/api/programs fallback rows failed: {} | sql={}", e2, fallback_sql); ApiError::Database(e2) })?
+            } else {
+                sqlx::query(&fallback_sql)
+                    .bind(limit)
+                    .bind(offset)
+                    .fetch_all(&*pool)
+                    .await
+                    .map_err(|e2| { error!("/api/programs fallback rows failed: {} | sql={}", e2, fallback_sql); ApiError::Database(e2) })?
+            }
+        }
     };
 
     let items: Vec<ProgramRowOut> = rows
         .into_iter()
         .map(|r| {
             let pid: String = r.get::<String, _>("program_id");
+            let b58 = try_hex_to_base58(&pid);
+            let dn: Option<String> = r.try_get::<Option<String>, _>("display_name").ok().flatten();
+            let display = dn.or_else(|| fallback_program_name_from_b58(&b58));
             ProgramRowOut {
                 program_id_hex: pid.clone(),
-                program_id_base58: try_hex_to_base58(&pid),
+                program_id_base58: b58,
                 transaction_count: r.get::<i64, _>("transaction_count"),
                 first_seen_at: r.get::<DateTime<Utc>, _>("first_seen_at"),
                 last_seen_at: r.get::<DateTime<Utc>, _>("last_seen_at"),
-                display_name: r.try_get::<Option<String>, _>("display_name").ok().flatten(),
+                display_name: display,
             }
         })
         .collect();
@@ -571,6 +666,174 @@ pub async fn get_transaction(
         Ok(None) => Err(ApiError::NotFound),
         Err(e) => Err(ApiError::Database(e)),
     }
+}
+
+#[derive(serde::Serialize)]
+pub struct ExecutionResponse {
+    pub status: serde_json::Value,
+    pub logs: Vec<String>,
+    pub bitcoin_txid: Option<String>,
+    pub rollback_status: Option<serde_json::Value>,
+    pub compute_units_consumed: Option<u64>,
+    pub runtime_transaction: Option<serde_json::Value>,
+}
+
+fn parse_compute_units_from_logs(logs: &[String]) -> Option<u64> {
+    // Look for lines like "Program log: compute units consumed xxx" or similar
+    // For now we scan for any number in the last few characters
+    for line in logs.iter().rev() {
+        let lower = line.to_lowercase();
+        if lower.contains("compute") && lower.contains("unit") {
+            // extract last integer
+            let mut num: Option<u64> = None;
+            let mut acc: String = String::new();
+            for ch in lower.chars() {
+                if ch.is_ascii_digit() { acc.push(ch); } else { if !acc.is_empty() { num = acc.parse::<u64>().ok(); acc.clear(); } }
+            }
+            if num.is_some() { return num; }
+        }
+    }
+    None
+}
+
+pub async fn get_transaction_execution(
+    AxPath(txid): AxPath<String>,
+) -> Result<Json<ExecutionResponse>, ApiError> {
+    let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+    let arch_client = ArchRpcClient::new(rpc_url);
+    let rpc = match arch_client.get_processed_transaction(&txid).await {
+        Ok(v) => v,
+        Err(_) => return Err(ApiError::NotFound),
+    };
+
+    let status = rpc.status.clone();
+    // logs field name depends on client; map defensively
+    let logs: Vec<String> = if let Some(arr) = rpc.runtime_transaction.get("logs").and_then(|v| v.as_array()) {
+        arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+    } else {
+        // try Deserialize from our struct in arch client shape
+        let _ = rpc.runtime_transaction.get("message");
+        let _ = rpc.status.clone();
+        // Fallback: try to use top-level logs if present via serde shape
+        rpc_runtime_logs_fallback(&rpc)
+    };
+
+    let compute_units = parse_compute_units_from_logs(&logs);
+
+    let resp = ExecutionResponse {
+        status,
+        logs,
+        bitcoin_txid: rpc.bitcoin_txids.clone().and_then(|v| v.get(0).cloned()),
+        rollback_status: Some(serde_json::json!(rpc.accounts_tags)),
+        compute_units_consumed: compute_units,
+        runtime_transaction: Some(rpc.runtime_transaction.clone()),
+    };
+
+    Ok(Json(resp))
+}
+
+fn rpc_runtime_logs_fallback(r: &crate::arch_rpc::ProcessedTransaction) -> Vec<String> {
+    // our current struct doesn't expose logs directly, but RPC returns logs at top-level in some cases
+    // We attempt to parse from status if embedded, else empty
+    Vec::new()
+}
+
+#[derive(serde::Serialize)]
+pub struct ParticipantRow {
+    pub address_hex: String,
+    pub address_base58: String,
+    pub is_signer: bool,
+    pub is_writable: bool,
+    pub is_readonly: bool,
+    pub is_fee_payer: bool,
+}
+
+pub async fn get_transaction_participants(
+    State(pool): State<Arc<PgPool>>,
+    AxPath(txid): AxPath<String>,
+) -> Result<Json<Vec<ParticipantRow>>, ApiError> {
+    // Prefer RPC so we always match latest shape
+    let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+    let arch_client = ArchRpcClient::new(rpc_url);
+    let data_opt_rpc = arch_client.get_processed_transaction(&txid).await.ok().map(|r| r.runtime_transaction);
+
+    let row_opt = sqlx::query(
+        r#"
+        SELECT data FROM transactions WHERE txid = $1
+        "#
+    )
+    .bind(&txid)
+    .fetch_optional(&*pool)
+    .await?;
+
+    let data: serde_json::Value = if let Some(v) = data_opt_rpc { v } else if let Some(row) = row_opt { row.get("data") } else { return Err(ApiError::NotFound) };
+    let header = data.get("message").and_then(|m| m.get("header")).ok_or(ApiError::NotFound)?;
+    let n_req = header.get("num_required_signatures").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+    let n_ro_signed = header.get("num_readonly_signed_accounts").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+    let n_ro_unsigned = header.get("num_readonly_unsigned_accounts").and_then(|v| v.as_i64()).unwrap_or(0) as usize;
+
+    let keys = data.get("message").and_then(|m| m.get("account_keys")).and_then(|a| a.as_array()).ok_or(ApiError::NotFound)?;
+
+    let total = keys.len();
+    let writable_signed = n_req.saturating_sub(n_ro_signed);
+    let writable_unsigned = total.saturating_sub(n_req).saturating_sub(n_ro_unsigned);
+
+    let mut out: Vec<ParticipantRow> = Vec::with_capacity(total);
+    for (i, k) in keys.iter().enumerate() {
+        let hex_id = key_to_hex(k);
+        let b58_id = key_to_base58(k);
+        let is_signer = i < n_req;
+        let is_fee_payer = i == 0 && is_signer;
+        let is_writable = if is_signer { i < writable_signed } else { i < n_req + writable_unsigned };
+        let is_readonly = !is_writable;
+        out.push(ParticipantRow { address_hex: hex_id, address_base58: b58_id, is_signer, is_writable, is_readonly, is_fee_payer });
+    }
+
+    Ok(Json(out))
+}
+
+#[derive(serde::Serialize)]
+pub struct InstructionRow {
+    pub index: usize,
+    pub program_id_hex: String,
+    pub program_id_base58: String,
+    pub accounts: Vec<String>,
+    pub data_len: usize,
+}
+
+pub async fn get_transaction_instructions(
+    State(pool): State<Arc<PgPool>>,
+    AxPath(txid): AxPath<String>,
+) -> Result<Json<Vec<InstructionRow>>, ApiError> {
+    let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+    let arch_client = ArchRpcClient::new(rpc_url);
+    let data_opt_rpc = arch_client.get_processed_transaction(&txid).await.ok().map(|r| r.runtime_transaction);
+
+    let row_opt = sqlx::query(
+        r#"
+        SELECT data FROM transactions WHERE txid = $1
+        "#
+    )
+    .bind(&txid)
+    .fetch_optional(&*pool)
+    .await?;
+
+    let data: serde_json::Value = if let Some(v) = data_opt_rpc { v } else if let Some(row) = row_opt { row.get("data") } else { return Err(ApiError::NotFound) };
+    let message = data.get("message").ok_or(ApiError::NotFound)?;
+    let keys = message.get("account_keys").and_then(|a| a.as_array()).ok_or(ApiError::NotFound)?;
+    let instructions = message.get("instructions").and_then(|a| a.as_array()).ok_or(ApiError::NotFound)?;
+
+    let mut out = Vec::with_capacity(instructions.len());
+    for (idx, ins) in instructions.iter().enumerate() {
+        let program_hex = ins.get("program_id").map(|v| key_to_hex(v)).unwrap_or_default();
+        let program_b58 = ins.get("program_id").map(|v| key_to_base58(v)).unwrap_or_default();
+        let acc_idx: Vec<usize> = ins.get("accounts").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as usize)).collect()).unwrap_or_default();
+        let accounts: Vec<String> = acc_idx.into_iter().filter_map(|i| keys.get(i).map(|k| key_to_base58(k))).collect();
+        let data_len = ins.get("data").and_then(|d| d.as_array()).map(|a| a.len()).unwrap_or(0);
+        out.push(InstructionRow { index: idx, program_id_hex: program_hex, program_id_base58: program_b58, accounts, data_len });
+    }
+
+    Ok(Json(out))
 }
 
 fn extract_program_ids(data: &serde_json::Value) -> Vec<String> {
@@ -1234,8 +1497,19 @@ pub async fn get_program_details(
         }
     };
 
-    // Basic program stats (runtime query to avoid sqlx prepare at build time)
-    let program = sqlx::query(
+    // Check if display_name column exists
+    let has_display: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'programs' AND column_name = 'display_name'
+        )"#
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap_or(false);
+
+    // Build SQL accordingly (always alias display_name for consistent row handling)
+    let sql = if has_display {
         r#"
         SELECT 
             program_id,
@@ -1246,16 +1520,32 @@ pub async fn get_program_details(
         FROM programs
         WHERE program_id = $1
         "#
-    )
-    .bind(&pid_hex)
-    .fetch_optional(&*pool)
-    .await?;
+    } else {
+        r#"
+        SELECT 
+            program_id,
+            transaction_count,
+            first_seen_at,
+            last_seen_at,
+            NULL::text as display_name
+        FROM programs
+        WHERE program_id = $1
+        "#
+    };
+
+    let program = sqlx::query(sql)
+        .bind(&pid_hex)
+        .fetch_optional(&*pool)
+        .await?;
 
     if let Some(p) = program {
         let pid: String = p.get::<String, _>("program_id");
         let tx_count: i64 = p.get::<i64, _>("transaction_count");
         let first_seen: DateTime<Utc> = p.get::<DateTime<Utc>, _>("first_seen_at");
         let last_seen: DateTime<Utc> = p.get::<DateTime<Utc>, _>("last_seen_at");
+        let dn: Option<String> = p.try_get::<Option<String>, _>("display_name").ok().flatten();
+        let b58 = bs58::encode(hex::decode(&pid).unwrap_or_default()).into_string();
+        let display_name = dn.or_else(|| fallback_program_name_from_b58(&b58));
 
         // Recent transactions for this program
         let recent_rows = sqlx::query(
@@ -1283,13 +1573,11 @@ pub async fn get_program_details(
             })
             .collect();
 
-        let display_name: Option<String> = p.try_get::<Option<String>, _>("display_name").ok().flatten();
-
         let payload = json!({
             "program": {
                 "program_id": pid,
                 "program_id_hex": pid,
-                "program_id_base58": bs58::encode(hex::decode(&pid).unwrap_or_default()).into_string(),
+                "program_id_base58": b58,
                 "display_name": display_name,
                 "transaction_count": tx_count,
                 "first_seen_at": first_seen,
@@ -1305,79 +1593,80 @@ pub async fn get_program_details(
 }
 
 pub async fn backfill_programs(State(pool): State<Arc<PgPool>>) -> impl IntoResponse {
-    // Idempotent SQL-only backfill: scan transactions for program_ids and populate tables
-    // 1) From message.instructions.program_id
-    let res1 = sqlx::query(
-        r#"
-        WITH ins AS (
-            SELECT t.txid, inst
-            FROM transactions t,
-                 LATERAL jsonb_array_elements(t.data->'message'->'instructions') AS inst
-        )
-        INSERT INTO programs (program_id)
-        SELECT normalize_program_id(inst->>'program_id')
-        FROM ins
-        WHERE normalize_program_id(inst->>'program_id') IS NOT NULL
-        ON CONFLICT (program_id) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP, transaction_count = programs.transaction_count
-        "#
-    ).execute(&*pool).await;
+    // Pure-Rust backfill that does not rely on DB functions. Idempotent.
+    let mut offset: i64 = 0;
+    let limit: i64 = 1000;
+    let mut upserted_programs: u64 = 0;
+    let mut linked: u64 = 0;
 
-    // 2) Link transaction_programs for those instructions
-    let res2 = sqlx::query(
-        r#"
-        WITH ins AS (
-            SELECT t.txid, normalize_program_id(inst->>'program_id') AS pid
-            FROM transactions t,
-                 LATERAL jsonb_array_elements(t.data->'message'->'instructions') AS inst
+    loop {
+        let rows = sqlx::query(
+            r#"
+            SELECT txid, data
+            FROM transactions
+            ORDER BY created_at ASC
+            LIMIT $1 OFFSET $2
+            "#
         )
-        INSERT INTO transaction_programs (txid, program_id)
-        SELECT txid, pid FROM ins WHERE pid IS NOT NULL
-        ON CONFLICT (txid, program_id) DO NOTHING
-        "#
-    ).execute(&*pool).await;
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&*pool)
+        .await;
 
-    // 3) From accounts_tags[].program_id
-    let res3 = sqlx::query(
-        r#"
-        WITH tags AS (
-            SELECT t.txid, (tag->>'program_id') AS pid
-            FROM transactions t,
-                 LATERAL jsonb_array_elements(t.accounts_tags) AS tag
-        )
-        INSERT INTO programs (program_id)
-        SELECT pid FROM tags WHERE pid IS NOT NULL
-        ON CONFLICT (program_id) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP, transaction_count = programs.transaction_count
-        "#
-    ).execute(&*pool).await;
+        let rows = match rows { Ok(r) => r, Err(e) => {
+            let body = json!({ "status": "error", "message": format!("db read: {}", e) });
+            return (StatusCode::INTERNAL_SERVER_ERROR, Json(body))
+        }};
 
-    // 4) Link transaction_programs for accounts_tags
-    let res4 = sqlx::query(
-        r#"
-        WITH tags AS (
-            SELECT t.txid, (tag->>'program_id') AS pid
-            FROM transactions t,
-                 LATERAL jsonb_array_elements(t.accounts_tags) AS tag
-        )
-        INSERT INTO transaction_programs (txid, program_id)
-        SELECT txid, pid FROM tags WHERE pid IS NOT NULL
-        ON CONFLICT (txid, program_id) DO NOTHING
-        "#
-    ).execute(&*pool).await;
+        if rows.is_empty() { break; }
 
-    match (res1, res2, res3, res4) {
-        (Ok(a), Ok(b), Ok(c), Ok(d)) => {
-            let body = json!({
-                "status": "ok",
-                "programs_upserted_from_instructions": a.rows_affected(),
-                "links_from_instructions": b.rows_affected(),
-                "programs_upserted_from_tags": c.rows_affected(),
-                "links_from_tags": d.rows_affected()
-            });
-            (StatusCode::OK, Json(body))
+        for row in rows {
+            let txid: String = row.get("txid");
+            let data: serde_json::Value = row.get("data");
+            if let Some(instrs) = data.get("message").and_then(|m| m.get("instructions")).and_then(|v| v.as_array()) {
+                for ins in instrs {
+                    if let Some(pid_v) = ins.get("program_id") {
+                        let pid_hex = key_to_hex(pid_v);
+                        if !pid_hex.is_empty() {
+                            // upsert program
+                            let res = sqlx::query(
+                                r#"
+                                INSERT INTO programs (program_id, transaction_count)
+                                VALUES ($1, 0)
+                                ON CONFLICT (program_id) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP
+                                "#
+                            )
+                            .bind(&pid_hex)
+                            .execute(&*pool)
+                            .await;
+                            if let Ok(r) = res { upserted_programs += r.rows_affected(); }
+
+                            // link transaction_programs
+                            let res2 = sqlx::query(
+                                r#"
+                                INSERT INTO transaction_programs (txid, program_id)
+                                VALUES ($1, $2)
+                                ON CONFLICT (txid, program_id) DO NOTHING
+                                "#
+                            )
+                            .bind(&txid)
+                            .bind(&pid_hex)
+                            .execute(&*pool)
+                            .await;
+                            if let Ok(r2) = res2 { linked += r2.rows_affected(); }
+                        }
+                    }
+                }
+            }
         }
-        _ => {
-            let body = json!({ "status": "error" });
-            (StatusCode::INTERNAL_SERVER_ERROR, Json(body))
-        }
+
+        offset += limit;
     }
+
+    let body = json!({
+        "status": "ok",
+        "programs_upserted": upserted_programs,
+        "links_created": linked,
+    });
+    (StatusCode::OK, Json(body))
 }

@@ -16,6 +16,7 @@ export default function TxDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [showRaw, setShowRaw] = useState(false);
+  const [copied, setCopied] = useState(false);
 
   useEffect(() => {
     if (!txid) return;
@@ -70,6 +71,26 @@ export default function TxDetailPage() {
       {showRaw && tx?.data && (
         <section className={styles.searchSection}>
           <h2>Raw JSON</h2>
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
+            <button
+              className={`${styles.searchButton} ${styles.searchButtonSm}`}
+              onClick={async () => {
+                try {
+                  const text = JSON.stringify(tx.data, null, 2);
+                  if (navigator?.clipboard?.writeText) {
+                    await navigator.clipboard.writeText(text);
+                  } else {
+                    const ta = document.createElement('textarea');
+                    ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+                  }
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1500);
+                } catch {}
+              }}
+            >
+              {copied ? 'Copied!' : 'Copy JSON'}
+            </button>
+          </div>
           <div className={styles.rawJson}>
             <JsonViewer data={tx.data} initiallyExpanded={true} />
           </div>

@@ -11,6 +11,8 @@ use crate::arch_rpc::ArchRpcClient;
 use crate::arch_rpc::websocket::WebSocketClient;
 use crate::utils::convert_arch_timestamp;
 use serde_json::Value as JsonValue;
+use bs58;
+use hex;
 
 #[derive(Debug, Clone)]
 pub struct HybridSync {
@@ -38,6 +40,41 @@ impl HybridSync {
 
     pub async fn start(&self) -> Result<()> {
         info!("🚀 Starting Hybrid Sync Manager...");
+
+        // Seed built-in programs from environment variable if provided
+        if let Ok(builtins) = std::env::var("ARCH_BUILTIN_PROGRAMS") {
+            let list: Vec<String> = builtins
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+            if !list.is_empty() {
+                let pool = Arc::clone(&self.pool);
+                tokio::spawn(async move {
+                    for item in list.into_iter() {
+                        // Accept base58 or hex; store as hex
+                        let hex_id = if item.chars().all(|c| c.is_ascii_hexdigit()) && item.len() >= 2 {
+                            item.to_lowercase()
+                        } else {
+                            match bs58::decode(item).into_vec() { Ok(bytes) => hex::encode(bytes), Err(_) => continue }
+                        };
+                        if let Err(e) = sqlx::query(
+                            r#"
+                            INSERT INTO programs (program_id, first_seen_at, last_seen_at, transaction_count)
+                            VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
+                            ON CONFLICT (program_id) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP
+                            "#
+                        )
+                        .bind(&hex_id)
+                        .execute(&*pool)
+                        .await {
+                            tracing::error!("builtin program upsert failed: {}", e);
+                        }
+                    }
+                    tracing::info!("✅ Seeded built-in programs from ARCH_BUILTIN_PROGRAMS");
+                });
+            }
+        }
 
         if self.settings.indexer.enable_realtime && self.settings.websocket.enabled {
             info!("✅ Real-time WebSocket sync enabled");
