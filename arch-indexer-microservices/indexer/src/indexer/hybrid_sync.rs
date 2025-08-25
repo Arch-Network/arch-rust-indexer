@@ -60,8 +60,8 @@ impl HybridSync {
                         };
                         if let Err(e) = sqlx::query(
                             r#"
-                            INSERT INTO programs (program_id, first_seen_at, last_seen_at, transaction_count, display_name)
-                            VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0, NULL)
+                            INSERT INTO programs (program_id, first_seen_at, last_seen_at, transaction_count)
+                            VALUES ($1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP, 0)
                             ON CONFLICT (program_id) DO UPDATE SET last_seen_at = CURRENT_TIMESTAMP
                             "#
                         )

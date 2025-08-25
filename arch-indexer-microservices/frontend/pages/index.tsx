@@ -76,13 +76,20 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    // Toggle meme mode by switching a class on html element
+    // Apply class and persist toggle
     const html = document.querySelector('html');
     if (!html) return;
     if (memeMode) {
       html.classList.add('meme-mode');
     } else {
       html.classList.remove('meme-mode');
+    }
+    try {
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem('memeMode', memeMode ? '1' : '0');
+      }
+    } catch {
+      // ignore storage errors
     }
   }, [memeMode]);
 

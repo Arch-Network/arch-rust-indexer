@@ -73,14 +73,19 @@ fn normalize_program_param(id: &str) -> Option<String> {
 
 fn fallback_program_name_from_b58(b58: &str) -> Option<String> {
     match b58 {
-        "Loader1111111111111111111111111111111" => Some("Loader".to_string()),
+        // Arch IDs
         "11111111111111111111111111111111" => Some("System Program".to_string()),
+        "ComputeBudget1111111111111111111" => Some("Compute Budget".to_string()),
+        "VoteProgram111111111111111111111" => Some("Vote Program".to_string()),
+        "StakeProgram11111111111111111111" => Some("Stake Program".to_string()),
+        "BpfLoader11111111111111111111111" => Some("BPF Loader".to_string()),
+        "NativeLoader11111111111111111111" => Some("Native Loader".to_string()),
+        // Legacy/Solana IDs we may encounter in old data
+        "Loader1111111111111111111111111111111" => Some("Loader".to_string()),
         "ComputeBudget111111111111111111111111111111" => Some("Compute Budget".to_string()),
         "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr" => Some("Memo".to_string()),
         "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" => Some("SPL Token".to_string()),
         "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLkek" => Some("Associated Token Account".to_string()),
-        "Stake11111111111111111111111111111111111111" => Some("Stake Program".to_string()),
-        "Vote111111111111111111111111111111111111111" => Some("Vote Program".to_string()),
         _ => None,
     }
 }
