@@ -3,6 +3,8 @@ import { useRouter } from 'next/router';
 import Link from 'next/link';
 import Layout from '../../components/Layout';
 import styles from '../../styles/Home.module.css';
+import dynamic from 'next/dynamic';
+const JsonViewer = dynamic(() => import('../../components/JsonViewer'), { ssr: false });
 
 type Tx = { txid: string; block_height: number; status?: any; created_at: string; data?: any };
 
@@ -68,7 +70,9 @@ export default function TxDetailPage() {
       {showRaw && tx?.data && (
         <section className={styles.searchSection}>
           <h2>Raw JSON</h2>
-          <pre className={styles.rawJson}>{JSON.stringify(tx.data, null, 2)}</pre>
+          <div className={styles.rawJson}>
+            <JsonViewer data={tx.data} initiallyExpanded={true} />
+          </div>
         </section>
       )}
       <div className={styles.searchTips}><Link href="/tx">← Back to Transactions</Link></div>

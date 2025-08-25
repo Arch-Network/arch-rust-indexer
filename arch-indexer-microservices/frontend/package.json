@@ -9,16 +9,23 @@
     "start": "next start",
     "lint": "next lint"
   },
-  "keywords": ["blockchain", "indexer", "arch", "react", "nextjs"],
+  "keywords": [
+    "blockchain",
+    "indexer",
+    "arch",
+    "react",
+    "nextjs"
+  ],
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "next": "^15.5.0",
-    "react": "^19.1.1",
-    "react-dom": "^19.1.1",
+    "@microlink/react-json-view": "^1.27.0",
     "@types/node": "^24.3.0",
     "@types/react": "^19.1.10",
     "@types/react-dom": "^19.1.7",
+    "next": "^15.5.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
     "typescript": "^5.9.2"
   }
 }
