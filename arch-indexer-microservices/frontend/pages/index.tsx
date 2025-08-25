@@ -53,6 +53,7 @@ export default function Home() {
   const [programResult, setProgramResult] = useState<any | null>(null);
   const [programLoading, setProgramLoading] = useState(false);
   const [programError, setProgramError] = useState<string | null>(null);
+  const [timezone, setTimezone] = useState<string>('local');
 
   // Get API URL from environment or fallback to localhost
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
@@ -63,6 +64,15 @@ export default function Home() {
     loadTransactions();
     connectWebSocket();
     createMatrixRain();
+    try {
+      const savedTz = typeof window !== 'undefined' ? window.localStorage.getItem('tz') : null;
+      if (savedTz) {
+        setTimezone(savedTz);
+      } else {
+        const localTz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        setTimezone(localTz || 'UTC');
+      }
+    } catch {}
   }, []);
 
   // Auto-refresh core summaries and lists
@@ -360,13 +370,16 @@ export default function Home() {
         return 'INVALID DATE';
       }
       
+      const tz = timezone && timezone !== 'local' ? timezone : undefined;
       return date.toLocaleDateString('en-US', {
         month: 'short',
         day: 'numeric',
         year: 'numeric',
         hour: '2-digit',
         minute: '2-digit',
-        hour12: true
+        hour12: true,
+        timeZone: tz,
+        timeZoneName: 'short'
       }).toUpperCase();
     } catch (error) {
       return 'FORMAT ERROR';
@@ -406,9 +419,12 @@ export default function Home() {
   return (
     <Layout
       rightActions={(
-        <button className={styles.refreshButton} onClick={() => setMemeMode(v => !v)}>
-          {memeMode ? 'Meme Mode: ON' : 'Meme Mode: OFF'}
-        </button>
+        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+          <a className={styles.refreshButton} href="/settings">Settings</a>
+          <button className={styles.refreshButton} onClick={() => setMemeMode(v => !v)}>
+            {memeMode ? 'Meme Mode: ON' : 'Meme Mode: OFF'}
+          </button>
+        </div>
       )}
     >
       <Head>

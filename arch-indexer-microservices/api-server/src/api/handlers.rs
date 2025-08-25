@@ -15,6 +15,7 @@ use axum::http::StatusCode;
 use axum::extract::Path as AxPath;
 
 use super::types::{ApiError, NetworkStats, SyncStatus, ProgramStats};
+use super::program_ids as pid;
 use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::BlockProcessor};
 use crate::arch_rpc::ArchRpcClient;
 
@@ -74,18 +75,20 @@ fn normalize_program_param(id: &str) -> Option<String> {
 fn fallback_program_name_from_b58(b58: &str) -> Option<String> {
     match b58 {
         // Arch IDs
-        "11111111111111111111111111111111" => Some("System Program".to_string()),
-        "ComputeBudget1111111111111111111" => Some("Compute Budget".to_string()),
-        "VoteProgram111111111111111111111" => Some("Vote Program".to_string()),
-        "StakeProgram11111111111111111111" => Some("Stake Program".to_string()),
-        "BpfLoader11111111111111111111111" => Some("BPF Loader".to_string()),
-        "NativeLoader11111111111111111111" => Some("Native Loader".to_string()),
+        pid::SYSTEM_PROGRAM => Some("System Program".to_string()),
+        pid::VOTE_PROGRAM => Some("Vote Program".to_string()),
+        pid::STAKE_PROGRAM => Some("Stake Program".to_string()),
+        pid::BPF_LOADER => Some("BPF Loader".to_string()),
+        pid::NATIVE_LOADER => Some("Native Loader".to_string()),
+        // Arch Token programs
+        pid::APL_TOKEN_PROGRAM => Some("APL Token".to_string()),
+        pid::APL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM => Some("Associated Token Account".to_string()),
         // Legacy/Solana IDs we may encounter in old data
-        "Loader1111111111111111111111111111111" => Some("Loader".to_string()),
-        "ComputeBudget111111111111111111111111111111" => Some("Compute Budget".to_string()),
-        "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr" => Some("Memo".to_string()),
-        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" => Some("SPL Token".to_string()),
-        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLkek" => Some("Associated Token Account".to_string()),
+        pid::SOL_LOADER => Some("Loader".to_string()),
+        pid::SOL_COMPUTE_BUDGET => Some("Compute Budget (Solana)".to_string()),
+        pid::SOL_MEMO => Some("Memo (Solana)".to_string()),
+        pid::SOL_SPL_TOKEN => Some("SPL Token (Solana)".to_string()),
+        pid::SOL_ASSOCIATED_TOKEN_ACCOUNT => Some("Associated Token Account (Solana)".to_string()),
         _ => None,
     }
 }
@@ -995,8 +998,8 @@ pub async fn get_transaction_instructions(
                 }
             }
         }
-        // SPL Token Program (common id)
-        if program_b58 == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" {
+        // Token Program (support Arch APL Token and legacy SPL Token IDs)
+        if program_b58 == pid::APL_TOKEN_PROGRAM || program_b58 == pid::SOL_SPL_TOKEN {
             if !data.is_empty() {
                 let tag = data[0];
                 // 0: InitializeMint { decimals, mint_authority, freeze_authority: COption<Pubkey> }
@@ -1013,7 +1016,7 @@ pub async fn get_transaction_instructions(
                     } else {
                         obj.insert("freeze_authority".to_string(), json!(null));
                     }
-                    return (Some("SPL Token: InitializeMint".to_string()), Some(serde_json::Value::Object(obj)));
+                    return (Some("Token: InitializeMint".to_string()), Some(serde_json::Value::Object(obj)));
                 }
                 // 1: InitializeAccount (no data)
                 if tag == 1 {
@@ -1023,7 +1026,7 @@ pub async fn get_transaction_instructions(
                         "mint": accounts.get(1),
                         "owner": accounts.get(2),
                     });
-                    return (Some("SPL Token: InitializeAccount".to_string()), Some(decoded));
+                    return (Some("Token: InitializeAccount".to_string()), Some(decoded));
                 }
                 // 3: Transfer { amount: u64 }, accounts: [source, destination, authority]
                 if tag == 3 && data.len() >= 1 + 8 {
@@ -1032,13 +1035,13 @@ pub async fn get_transaction_instructions(
                     let destination = accounts.get(1).cloned();
                     let authority = accounts.get(2).cloned();
                     let decoded = json!({
-                        "discriminator": {"type":"u8", "data": tag},
-                        "amount": {"type":"u64", "data": amount},
-                        "source": source,
-                        "destination": destination,
+                        "type": "transfer",
+                        "amount": amount,
+                        "from": source,
+                        "to": destination,
                         "authority": authority,
                     });
-                    return (Some("SPL Token: Transfer".to_string()), Some(decoded));
+                    return (Some("Token: Transfer".to_string()), Some(decoded));
                 }
                 // 12: TransferChecked { amount: u64, decimals: u8 }
                 if tag == 12 && data.len() >= 1 + 8 + 1 {
@@ -1059,7 +1062,7 @@ pub async fn get_transaction_instructions(
                         "destination": destination,
                         "authority": authority,
                     });
-                    return (Some("SPL Token: TransferChecked".to_string()), Some(decoded));
+                    return (Some("Token: TransferChecked".to_string()), Some(decoded));
                 }
                 // 4: Approve { amount: u64 }
                 if tag == 4 && data.len() >= 1 + 8 {
@@ -1072,7 +1075,7 @@ pub async fn get_transaction_instructions(
                         "source": source,
                         "delegate": delegate,
                     });
-                    return (Some("SPL Token: Approve".to_string()), Some(decoded));
+                    return (Some("Token: Approve".to_string()), Some(decoded));
                 }
                 // 5: Revoke
                 if tag == 5 {
@@ -1081,7 +1084,7 @@ pub async fn get_transaction_instructions(
                         "discriminator": {"type":"u8", "data": tag},
                         "source": source,
                     });
-                    return (Some("SPL Token: Revoke".to_string()), Some(decoded));
+                    return (Some("Token: Revoke".to_string()), Some(decoded));
                 }
                 // 7: MintTo { amount: u64 }
                 if tag == 7 && data.len() >= 1 + 8 {
@@ -1094,7 +1097,7 @@ pub async fn get_transaction_instructions(
                         "mint": mint,
                         "destination": dest,
                     });
-                    return (Some("SPL Token: MintTo".to_string()), Some(decoded));
+                    return (Some("Token: MintTo".to_string()), Some(decoded));
                 }
                 // 8: Burn { amount: u64 }
                 if tag == 8 && data.len() >= 1 + 8 {
@@ -1107,7 +1110,7 @@ pub async fn get_transaction_instructions(
                         "account": account,
                         "mint": mint,
                     });
-                    return (Some("SPL Token: Burn".to_string()), Some(decoded));
+                    return (Some("Token: Burn".to_string()), Some(decoded));
                 }
                 // 9: CloseAccount
                 if tag == 9 {
@@ -1118,7 +1121,7 @@ pub async fn get_transaction_instructions(
                         "account": account,
                         "destination": destination,
                     });
-                    return (Some("SPL Token: CloseAccount".to_string()), Some(decoded));
+                    return (Some("Token: CloseAccount".to_string()), Some(decoded));
                 }
                 // 10: FreezeAccount
                 if tag == 10 {
@@ -1129,7 +1132,7 @@ pub async fn get_transaction_instructions(
                         "account": account,
                         "mint": mint,
                     });
-                    return (Some("SPL Token: FreezeAccount".to_string()), Some(decoded));
+                    return (Some("Token: FreezeAccount".to_string()), Some(decoded));
                 }
                 // 11: ThawAccount
                 if tag == 11 {
@@ -1140,7 +1143,7 @@ pub async fn get_transaction_instructions(
                         "account": account,
                         "mint": mint,
                     });
-                    return (Some("SPL Token: ThawAccount".to_string()), Some(decoded));
+                    return (Some("Token: ThawAccount".to_string()), Some(decoded));
                 }
                 // 17: SyncNative (no data)
                 if tag == 17 {
@@ -1149,9 +1152,28 @@ pub async fn get_transaction_instructions(
                         "discriminator": {"type":"u8", "data": tag},
                         "account": account,
                     });
-                    return (Some("SPL Token: SyncNative".to_string()), Some(decoded));
+                    return (Some("Token: SyncNative".to_string()), Some(decoded));
                 }
             }
+        }
+        // Associated Token Account Program (Arch). Instruction has no data
+        if program_b58 == pid::APL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM && data.is_empty() {
+            let funder = accounts.get(0).cloned();
+            let associated_account = accounts.get(1).cloned();
+            let wallet = accounts.get(2).cloned();
+            let mint = accounts.get(3).cloned();
+            let system_program = accounts.get(4).cloned();
+            let token_program = accounts.get(5).cloned();
+            let decoded = json!({
+                "type": "create_associated_token_account",
+                "funder": funder,
+                "associated_account": associated_account,
+                "wallet": wallet,
+                "mint": mint,
+                "system_program": system_program,
+                "token_program": token_program,
+            });
+            return (Some("Associated Token Account: Create".to_string()), Some(decoded));
         }
         // Memo program: utf-8
         if program_b58 == "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr" {

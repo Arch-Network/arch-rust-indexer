@@ -235,13 +235,13 @@ export default function TxDetailPage() {
                         })()}
                       </div>
                     )}
-                    {/* Raw instruction toggle */}
-                    {ins.data_hex && (
+                    {/* Raw instruction toggle (show even when 0 bytes) */}
+                    {(ins.data_hex !== undefined) && (
                       <div style={{ marginTop: 8 }}>
                         <details>
                           <summary className={styles.muted} style={{ cursor: 'pointer' }}>Show raw instruction ({ins.data_len} bytes)</summary>
                           <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
-                            <code style={{ overflowWrap: 'anywhere' }}>{ins.data_hex}</code>
+                            <code style={{ overflowWrap: 'anywhere' }}>{ins.data_hex || '—'}</code>
                             <button className={`${styles.searchButton} ${styles.searchButtonSm}`} onClick={async () => {
                               try { await navigator.clipboard.writeText(ins.data_hex || ''); } catch {}
                             }}>Copy</button>
