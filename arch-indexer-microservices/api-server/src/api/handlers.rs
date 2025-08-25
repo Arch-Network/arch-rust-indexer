@@ -269,6 +269,214 @@ pub async fn list_programs(
     })))
 }
 
+#[derive(serde::Serialize)]
+pub struct AccountSummary {
+    pub address: String,
+    pub address_hex: String,
+    pub first_seen: Option<DateTime<Utc>>,
+    pub last_seen: Option<DateTime<Utc>>,
+    pub transaction_count: i64,
+}
+
+pub async fn get_account_summary(
+    State(pool): State<Arc<PgPool>>,
+    AxPath(address): AxPath<String>,
+) -> Result<Json<AccountSummary>, ApiError> {
+    let address_hex = normalize_program_param(&address).ok_or(ApiError::BadRequest("Invalid address".into()))?;
+    // Prefer account_participation if present; otherwise fall back to scanning transactions JSON
+    let has_participation: bool = sqlx::query_scalar(
+        r#"SELECT to_regclass('public.account_participation') IS NOT NULL"#
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap_or(false);
+
+    let row = if has_participation {
+        sqlx::query(
+            r#"
+            SELECT MIN(created_at) AS first_seen, MAX(created_at) AS last_seen, COUNT(*) AS tx_count
+            FROM account_participation ap
+            WHERE ap.address_hex ILIKE $1
+            "#)
+            .bind(address_hex.clone())
+            .fetch_optional(&*pool)
+            .await?
+    } else {
+        sqlx::query(
+            r#"
+            WITH accs AS (
+                SELECT t.txid, t.created_at,
+                    CASE 
+                        WHEN jsonb_typeof(acc.value) = 'string' THEN normalize_program_id(trim(both '"' from (acc.value)::text))
+                        ELSE normalize_program_id((acc.value)::text)
+                    END AS acc_hex
+                FROM transactions t
+                CROSS JOIN LATERAL jsonb_array_elements(t.data->'message'->'account_keys') AS acc(value)
+            )
+            SELECT MIN(created_at) AS first_seen,
+                   MAX(created_at) AS last_seen,
+                   COUNT(*) AS tx_count
+            FROM accs
+            WHERE acc_hex ILIKE $1
+            "#)
+            .bind(address_hex.clone())
+            .fetch_optional(&*pool)
+            .await
+            .map_err(|e| { error!("get_account_summary fallback query error: {:?}", e); ApiError::Database(e) })?
+    };
+
+    let (first_seen, last_seen, tx_count) = if let Some(row) = row {
+        (
+            row.try_get::<Option<DateTime<Utc>>, _>("first_seen").ok().flatten(),
+            row.try_get::<Option<DateTime<Utc>>, _>("last_seen").ok().flatten(),
+            row.try_get::<i64, _>("tx_count").unwrap_or(0),
+        )
+    } else { (None, None, 0) };
+
+    Ok(Json(AccountSummary {
+        address,
+        address_hex,
+        first_seen,
+        last_seen,
+        transaction_count: tx_count,
+    }))
+}
+
+pub async fn get_account_transactions(
+    State(pool): State<Arc<PgPool>>,
+    AxPath(address): AxPath<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let limit = params.get("limit").and_then(|v| v.parse::<i64>().ok()).map(|v| v.min(200)).unwrap_or(50);
+    let page = params.get("page").and_then(|v| v.parse::<i64>().ok()).unwrap_or(1).max(1);
+    let offset = (page - 1) * limit;
+    let address_hex = normalize_program_param(&address).ok_or(ApiError::BadRequest("Invalid address".into()))?;
+
+    let has_participation: bool = sqlx::query_scalar(
+        r#"SELECT to_regclass('public.account_participation') IS NOT NULL"#
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap_or(false);
+
+    let rows = if has_participation {
+        sqlx::query(
+            r#"
+            SELECT ap.txid, ap.block_height, ap.created_at
+            FROM account_participation ap
+            WHERE ap.address_hex ILIKE $1
+            ORDER BY ap.created_at DESC
+            LIMIT $2 OFFSET $3
+            "#)
+            .bind(address_hex)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&*pool)
+            .await?
+    } else {
+        sqlx::query(
+            r#"
+            WITH accs AS (
+                SELECT t.txid, t.block_height, t.created_at,
+                    CASE 
+                        WHEN jsonb_typeof(acc.value) = 'string' THEN normalize_program_id(trim(both '"' from (acc.value)::text))
+                        ELSE normalize_program_id((acc.value)::text)
+                    END AS acc_hex
+                FROM transactions t
+                CROSS JOIN LATERAL jsonb_array_elements(t.data->'message'->'account_keys') AS acc(value)
+            )
+            SELECT txid, block_height, created_at
+            FROM accs
+            WHERE acc_hex ILIKE $1
+            ORDER BY created_at DESC
+            LIMIT $2 OFFSET $3
+            "#)
+            .bind(address_hex)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&*pool)
+            .await
+            .map_err(|e| { error!("get_account_transactions fallback query error: {:?}", e); ApiError::Database(e) })?
+    };
+
+    let list: Vec<serde_json::Value> = rows.into_iter().map(|r| json!({
+        "txid": r.get::<String,_>("txid"),
+        "block_height": r.get::<i64,_>("block_height"),
+        "created_at": r.get::<DateTime<Utc>,_>("created_at"),
+    })).collect();
+
+    Ok(Json(json!({
+        "page": page,
+        "limit": limit,
+        "transactions": list
+    })))
+}
+
+#[derive(serde::Serialize)]
+pub struct AccountProgramRow {
+    pub program_id: String,
+    pub transaction_count: i64,
+}
+
+pub async fn get_account_programs(
+    State(pool): State<Arc<PgPool>>,
+    AxPath(address): AxPath<String>,
+) -> Result<Json<Vec<AccountProgramRow>>, ApiError> {
+    let address_hex = normalize_program_param(&address).ok_or(ApiError::BadRequest("Invalid address".into()))?;
+    let has_participation: bool = sqlx::query_scalar(
+        r#"SELECT to_regclass('public.account_participation') IS NOT NULL"#
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap_or(false);
+
+    let rows = if has_participation {
+        sqlx::query(
+            r#"
+            SELECT tp.program_id, COUNT(*)::bigint as cnt
+            FROM account_participation ap
+            JOIN transactions t ON t.txid = ap.txid
+            JOIN transaction_programs tp ON tp.txid = t.txid
+            WHERE ap.address_hex ILIKE $1
+            GROUP BY tp.program_id
+            ORDER BY cnt DESC
+            LIMIT 200
+            "#)
+            .bind(address_hex)
+            .fetch_all(&*pool)
+            .await?
+    } else {
+        sqlx::query(
+            r#"
+            WITH accs AS (
+                SELECT t.txid,
+                    CASE 
+                        WHEN jsonb_typeof(acc.value) = 'string' THEN normalize_program_id(trim(both '"' from (acc.value)::text))
+                        ELSE normalize_program_id((acc.value)::text)
+                    END AS acc_hex
+                FROM transactions t
+                CROSS JOIN LATERAL jsonb_array_elements(t.data->'message'->'account_keys') AS acc(value)
+            )
+            SELECT tp.program_id, COUNT(*)::bigint as cnt
+            FROM accs
+            JOIN transaction_programs tp ON tp.txid = accs.txid
+            WHERE accs.acc_hex ILIKE $1
+            GROUP BY tp.program_id
+            ORDER BY cnt DESC
+            LIMIT 200
+            "#)
+            .bind(address_hex)
+            .fetch_all(&*pool)
+            .await
+            .map_err(|e| { error!("get_account_programs fallback query error: {:?}", e); ApiError::Database(e) })?
+    };
+    let out = rows.into_iter().map(|r| AccountProgramRow {
+        program_id: r.get::<String,_>("program_id"),
+        transaction_count: r.get::<i64,_>("cnt"),
+    }).collect();
+    Ok(Json(out))
+}
+
 fn shortvec_len(len: usize) -> usize {
     // Solana short_vec length prefix (LEB128-like, 7 bits per byte)
     let mut n = 0usize;

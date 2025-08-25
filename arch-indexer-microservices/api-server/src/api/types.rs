@@ -10,6 +10,8 @@ use thiserror::Error;
 pub enum ApiError {
     #[error("Not found")]
     NotFound,
+    #[error("Bad request: {0}")]
+    BadRequest(String),
     
     #[error("Database error: {0}")]
     Database(#[from] sqlx::Error),
@@ -25,6 +27,7 @@ impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
         let (status, message) = match self {
             ApiError::NotFound => (StatusCode::NOT_FOUND, "Not found"),
+            ApiError::BadRequest(msg) => (StatusCode::BAD_REQUEST, &*Box::leak(msg.into_boxed_str())),
             ApiError::Database(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Database error"),
             ApiError::Internal(_) => (StatusCode::INTERNAL_SERVER_ERROR, "Internal error"),
             ApiError::Serialization(_) => (StatusCode::BAD_REQUEST, "Serialization error"),

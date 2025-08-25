@@ -135,7 +135,7 @@ export default function TxDetailPage() {
               {participants.map((p, idx) => (
                 <div key={idx} className={styles.detailRow}>
                   <strong style={{ minWidth: 120, display: 'inline-block' }}>Address</strong>
-                  <span className={styles.hashValue}>{p.address_base58}</span>
+                  <Link href={`/accounts/${p.address_base58}`} className={styles.hashButton}>{p.address_base58}</Link>
                   <span style={{ marginLeft: 12, fontSize: 12 }}>
                     {p.is_fee_payer && <span className={styles.statusInfo} style={{ marginRight: 6 }}>fee payer</span>}
                     {p.is_signer && <span className={styles.statusInfo} style={{ marginRight: 6 }}>signer</span>}
@@ -181,9 +181,9 @@ export default function TxDetailPage() {
                           const dst = d.destination || ins.accounts[1];
                           return (
                             <div className={styles.vizRow}>
-                              <span className={styles.pill}>{src}</span>
+                              <Link href={`/accounts/${src}`} className={styles.hashButton}>{src}</Link>
                               <span className={styles.arrow}>→</span>
-                              <span className={styles.pill}>{dst}</span>
+                              <Link href={`/accounts/${dst}`} className={styles.hashButton}>{dst}</Link>
                               <span className={styles.amountPill}>Amount: {sol} SOL</span>
                             </div>
                           );
@@ -195,9 +195,9 @@ export default function TxDetailPage() {
                           const lam = d?.lamports?.data ?? 0; const sol = lam / 1_000_000_000;
                           return (
                             <div className={styles.vizRow}>
-                              <span className={styles.pill}>{funder}</span>
+                              <Link href={`/accounts/${funder}`} className={styles.hashButton}>{funder}</Link>
                               <span className={styles.arrow}>funds</span>
-                              <span className={styles.pill}>{newAcc}</span>
+                              <Link href={`/accounts/${newAcc}`} className={styles.hashButton}>{newAcc}</Link>
                               <span className={styles.amountPill}>{sol} SOL</span>
                               <span className={styles.badge}>space {space} bytes</span>
                             </div>
@@ -210,7 +210,7 @@ export default function TxDetailPage() {
                     <div style={{ marginTop: 8 }}>
                       <span className={styles.muted} style={{ marginRight: 6 }}>Accounts:</span>
                       {ins.accounts.map((a, i) => (
-                        <span key={i} className={styles.hashValue} style={{ marginRight: 6 }}>{a}</span>
+                        <Link key={i} href={`/accounts/${a}`} className={styles.hashButton} style={{ marginRight: 6 }}>{a}</Link>
                       ))}
                     </div>
                     {/* Summary line for common decoded fields */}
