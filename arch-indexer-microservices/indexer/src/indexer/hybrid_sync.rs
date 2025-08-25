@@ -157,8 +157,8 @@ impl HybridSync {
 
                                         if let Err(e) = sqlx::query(
                                             r#"
-                                            INSERT INTO transaction_programs (txid, program_id, created_at)
-                                            VALUES ($1, $2, CURRENT_TIMESTAMP)
+                                            INSERT INTO transaction_programs (txid, program_id)
+                                            VALUES ($1, $2)
                                             ON CONFLICT DO NOTHING
                                             "#
                                         )
@@ -256,11 +256,36 @@ impl HybridSync {
 
 fn extract_program_ids(data: &JsonValue, accounts_tags: Option<&[JsonValue]>) -> Vec<String> {
     let mut ids: Vec<String> = Vec::new();
+    // Preload account_keys as hex strings if available
+    let mut account_keys_hex: Vec<String> = Vec::new();
+    if let Some(keys) = data
+        .get("message")
+        .and_then(|m| m.get("account_keys"))
+        .and_then(|v| v.as_array())
+    {
+        for k in keys {
+            // account key may be array of numbers (bytes)
+            if let Some(arr) = k.as_array() {
+                let bytes: Vec<u8> = arr.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect();
+                account_keys_hex.push(hex::encode(bytes));
+            } else if let Some(s) = k.as_str() { // or hex string
+                account_keys_hex.push(s.to_string());
+            }
+        }
+    }
+
     if let Some(msg) = data.get("message") {
         if let Some(instructions) = msg.get("instructions").and_then(|v| v.as_array()) {
             for ins in instructions {
                 if let Some(pid) = ins.get("program_id").and_then(|v| v.as_str()) {
                     ids.push(pid.to_string());
+                    continue;
+                }
+                if let Some(idx) = ins.get("program_id_index").and_then(|v| v.as_u64()) {
+                    let i = idx as usize;
+                    if i < account_keys_hex.len() {
+                        ids.push(account_keys_hex[i].clone());
+                    }
                 }
             }
         }
@@ -343,8 +368,8 @@ async fn process_block_via_rpc(pool: &PgPool, rpc: &Arc<ArchRpcClient>, height: 
 
                 sqlx::query(
                     r#"
-                    INSERT INTO transaction_programs (txid, program_id, created_at)
-                    VALUES ($1, $2, CURRENT_TIMESTAMP)
+                    INSERT INTO transaction_programs (txid, program_id)
+                    VALUES ($1, $2)
                     ON CONFLICT DO NOTHING
                     "#
                 )

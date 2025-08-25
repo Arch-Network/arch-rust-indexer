@@ -5,6 +5,7 @@ import Layout from '../components/Layout';
 import BlockScroller from '../components/BlockScroller';
 import DonutProgress from '../components/DonutProgress';
 import Sparkline from '../components/Sparkline';
+import { middleEllipsis } from '../utils/format';
 
 interface NetworkStats {
   total_blocks: number;
@@ -266,7 +267,7 @@ export default function Home() {
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
                   {result.data.transactions.map((tx: any) => (
                     <button key={tx.txid} className={styles.hashButton} onClick={() => { setSelectedTransaction(tx); openTxDrawer(tx); }}>
-                      {tx.txid.substring(0,16)}...
+                      {middleEllipsis(tx.txid, 8)}
                     </button>
                   ))}
                 </div>
@@ -278,7 +279,7 @@ export default function Home() {
             <div className={styles.detailRow}>
               <strong>PREVIOUS BLOCK:</strong> 
               {result.data.previous_block_hash ? (
-                <span className={styles.hashValue}>{result.data.previous_block_hash.substring(0, 16)}...</span>
+                <span className={styles.hashValue}>{middleEllipsis(result.data.previous_block_hash, 8)}</span>
               ) : 'GENESIS BLOCK'}
             </div>
             {/* Merkle root removed from API; intentionally not shown */}
@@ -440,7 +441,7 @@ export default function Home() {
           <div style={{ display: 'flex', gap: 24, padding: '8px 12px', animation: 'ticker 40s linear infinite', whiteSpace: 'nowrap' }}>
             {recentMempool.slice(0, 30).map((m) => (
               <span key={m.txid} style={{ color: 'var(--accent-2)', marginRight: 24 }}>
-                TX {m.txid.substring(0,12)}·· fee {m.fee_priority ?? '—'} · {m.size_bytes ?? '—'} bytes
+                TX {middleEllipsis(m.txid, 6)} ·· fee {m.fee_priority ?? '—'} · {m.size_bytes ?? '—'} bytes
               </span>
             ))}
           </div>
@@ -498,7 +499,7 @@ export default function Home() {
                     {blocks.map((block) => (
                       <tr key={block.height}>
                         <td><a className={styles.hashButton} href={`/blocks/${block.height}`}>{block.height}</a></td>
-                        <td><a className={styles.hashButton} href={`/blocks/${block.hash}`}>{block.hash.substring(0, 16)}...</a></td>
+                        <td><a className={styles.hashButton} href={`/blocks/${block.hash}`}>{middleEllipsis(block.hash, 8)}</a></td>
                         <td>{formatTimestamp(block.timestamp)}</td>
                         <td>{block.transaction_count}</td>
                       </tr>
@@ -523,7 +524,7 @@ export default function Home() {
                 <tbody>
                   {transactions.map((tx) => (
                     <tr key={tx.txid}>
-                      <td><a className={styles.hashButton} href={`/tx/${tx.txid}`}>{tx.txid.substring(0, 16)}...</a></td>
+                      <td><a className={styles.hashButton} href={`/tx/${tx.txid}`}>{middleEllipsis(tx.txid, 8)}</a></td>
                       <td><a className={styles.hashButton} href={`/blocks/${tx.block_height}`}>{tx.block_height}</a></td>
                       <td>{formatTransactionStatus(tx.status)}</td>
                       <td>{formatTimestamp(tx.created_at)}</td>

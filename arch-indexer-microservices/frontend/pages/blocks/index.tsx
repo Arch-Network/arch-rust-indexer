@@ -3,6 +3,7 @@ import Link from 'next/link';
 import Layout from '../../components/Layout';
 import styles from '../../styles/Home.module.css';
 import Pagination from '../../components/Pagination';
+import { middleEllipsis } from '../../utils/format';
 
 
 type Block = { height: number; hash: string; timestamp: string; transaction_count: number };
@@ -47,7 +48,7 @@ export default function BlocksPage() {
                 {blocks.map((b) => (
                   <tr key={b.height}>
                     <td><Link href={`/blocks/${b.height}`} className={styles.hashButton}>{b.height}</Link></td>
-                    <td><Link href={`/blocks/${b.hash}`} className={styles.hashButton}>{b.hash?.slice(0,16)}…</Link></td>
+                    <td><Link href={`/blocks/${b.hash}`} className={styles.hashButton}>{middleEllipsis(b.hash, 8)}</Link></td>
                     <td>{b.timestamp ? new Date(b.timestamp).toLocaleString() : '—'}</td>
                     <td>{b.transaction_count}</td>
                   </tr>

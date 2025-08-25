@@ -3,6 +3,7 @@ import Link from 'next/link';
 import Layout from '../../components/Layout';
 import styles from '../../styles/Home.module.css';
 import Pagination from '../../components/Pagination';
+import { middleEllipsis } from '../../utils/format';
 
 type Tx = { txid: string; block_height: number; status?: any; created_at: string };
 
@@ -61,7 +62,7 @@ export default function TransactionsPage() {
           <tbody>
             {txs.map((t) => (
               <tr key={t.txid}>
-                <td><Link href={`/tx/${t.txid}`} className={styles.hashButton}>{t.txid.slice(0,16)}…</Link></td>
+                <td><Link href={`/tx/${t.txid}`} className={styles.hashButton}>{middleEllipsis(t.txid, 8)}</Link></td>
                 <td><Link href={`/blocks/${t.block_height}`} className={styles.hashButton}>{t.block_height}</Link></td>
                 <td>{formatStatus(t.status)}</td>
                 <td>{t.created_at ? new Date(t.created_at).toLocaleString() : '—'}</td>

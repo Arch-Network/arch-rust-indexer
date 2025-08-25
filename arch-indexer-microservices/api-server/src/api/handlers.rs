@@ -9,12 +9,111 @@ use axum::response::IntoResponse;
 use std::time::{SystemTime, UNIX_EPOCH};
 use chrono::{DateTime, NaiveDateTime, Utc};
 use hex;
+use bs58;
 use tracing::{info, debug, error};
 
 use super::types::{ApiError, NetworkStats, SyncStatus, ProgramStats};
 use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::BlockProcessor};
 use crate::arch_rpc::ArchRpcClient;
 use axum::http::StatusCode;
+#[derive(serde::Serialize)]
+pub struct ProgramRowOut {
+    pub program_id_hex: String,
+    pub program_id_base58: String,
+    pub transaction_count: i64,
+    pub first_seen_at: DateTime<Utc>,
+    pub last_seen_at: DateTime<Utc>,
+    pub display_name: Option<String>,
+}
+
+fn try_hex_to_base58(hex_str: &str) -> String {
+    match hex::decode(hex_str) {
+        Ok(bytes) => bs58::encode(bytes).into_string(),
+        Err(_) => String::new(),
+    }
+}
+
+fn normalize_program_param(id: &str) -> Option<String> {
+    if !id.is_empty() && id.chars().all(|c| c.is_ascii_hexdigit()) && id.len() >= 2 {
+        Some(id.to_lowercase())
+    } else {
+        bs58::decode(id).into_vec().ok().map(|b| hex::encode(b))
+    }
+}
+
+pub async fn list_programs(
+    State(pool): State<Arc<PgPool>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let limit = params.get("limit").and_then(|v| v.parse::<i64>().ok()).map(|v| v.min(200)).unwrap_or(100);
+    let page = params.get("page").and_then(|v| v.parse::<i64>().ok()).unwrap_or(1).max(1);
+    let offset = (page - 1) * limit;
+    let search = params.get("search").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+
+    let (where_sql, bind_search): (&str, Option<String>) = if let Some(s) = search {
+        if let Some(hex_norm) = normalize_program_param(&s) {
+            ("WHERE program_id LIKE $3", Some(format!("{}%", hex_norm)))
+        } else {
+            ("", None)
+        }
+    } else {
+        ("", None)
+    };
+
+    // total count
+    let total_count: i64 = if let Some(s) = &bind_search {
+        sqlx::query_scalar("SELECT COUNT(*) FROM programs WHERE program_id LIKE $1")
+            .bind(s)
+            .fetch_one(&*pool)
+            .await?
+    } else {
+        sqlx::query_scalar("SELECT COUNT(*) FROM programs")
+            .fetch_one(&*pool)
+            .await?
+    };
+
+    // rows
+    let sql = format!(
+        "SELECT program_id, transaction_count, first_seen_at, last_seen_at, display_name FROM programs {} ORDER BY last_seen_at DESC LIMIT $1 OFFSET $2",
+        where_sql
+    );
+    let rows = if let Some(s) = bind_search {
+        sqlx::query(&sql)
+            .bind(limit)
+            .bind(offset)
+            .bind(s)
+            .fetch_all(&*pool)
+            .await?
+    } else {
+        sqlx::query(&sql)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&*pool)
+            .await?
+    };
+
+    let items: Vec<ProgramRowOut> = rows
+        .into_iter()
+        .map(|r| {
+            let pid: String = r.get::<String, _>("program_id");
+            ProgramRowOut {
+                program_id_hex: pid.clone(),
+                program_id_base58: try_hex_to_base58(&pid),
+                transaction_count: r.get::<i64, _>("transaction_count"),
+                first_seen_at: r.get::<DateTime<Utc>, _>("first_seen_at"),
+                last_seen_at: r.get::<DateTime<Utc>, _>("last_seen_at"),
+                display_name: r.try_get::<Option<String>, _>("display_name").ok().flatten(),
+            }
+        })
+        .collect();
+
+    Ok(Json(json!({
+        "total_count": total_count,
+        "programs": items,
+        "page": page,
+        "limit": limit,
+    })))
+}
 
 fn shortvec_len(len: usize) -> usize {
     // Solana short_vec length prefix (LEB128-like, 7 bits per byte)
@@ -851,6 +950,17 @@ pub async fn get_transactions_by_program(
         .and_then(|o| o.parse::<i64>().ok())
         .unwrap_or(0);
 
+    // Normalize incoming program_id (accept hex or base58) to canonical hex
+    let pid_hex = if program_id.chars().all(|c| c.is_ascii_hexdigit()) && program_id.len() >= 2 {
+        program_id.clone()
+    } else {
+        // Try base58 decode -> hex
+        match bs58::decode(&program_id).into_vec() {
+            Ok(bytes) => hex::encode(bytes),
+            Err(_) => program_id.clone(),
+        }
+    };
+
     // Get paginated transactions
     let transactions = sqlx::query_as!(
         Transaction,
@@ -868,7 +978,7 @@ pub async fn get_transactions_by_program(
         ORDER BY t.block_height DESC
         LIMIT $2 OFFSET $3
         "#,
-        program_id,
+        pid_hex,
         limit,
         offset
     )
@@ -883,7 +993,7 @@ pub async fn get_transactions_by_program(
         JOIN transaction_programs tp ON t.txid = tp.txid
         WHERE tp.program_id = $1
         "#,
-        program_id
+        pid_hex
     )
     .fetch_one(&*pool)
     .await?
@@ -1114,6 +1224,16 @@ pub async fn get_program_details(
     State(pool): State<Arc<PgPool>>,
     Path(program_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
+    // Normalize input (hex or base58) to hex
+    let pid_hex = if program_id.chars().all(|c| c.is_ascii_hexdigit()) && program_id.len() >= 2 {
+        program_id.clone()
+    } else {
+        match bs58::decode(&program_id).into_vec() {
+            Ok(bytes) => hex::encode(bytes),
+            Err(_) => program_id.clone(),
+        }
+    };
+
     // Basic program stats (runtime query to avoid sqlx prepare at build time)
     let program = sqlx::query(
         r#"
@@ -1121,12 +1241,13 @@ pub async fn get_program_details(
             program_id,
             transaction_count,
             first_seen_at,
-            last_seen_at
+            last_seen_at,
+            display_name
         FROM programs
         WHERE program_id = $1
         "#
     )
-    .bind(&program_id)
+    .bind(&pid_hex)
     .fetch_optional(&*pool)
     .await?;
 
@@ -1162,9 +1283,14 @@ pub async fn get_program_details(
             })
             .collect();
 
+        let display_name: Option<String> = p.try_get::<Option<String>, _>("display_name").ok().flatten();
+
         let payload = json!({
             "program": {
                 "program_id": pid,
+                "program_id_hex": pid,
+                "program_id_base58": bs58::encode(hex::decode(&pid).unwrap_or_default()).into_string(),
+                "display_name": display_name,
                 "transaction_count": tx_count,
                 "first_seen_at": first_seen,
                 "last_seen_at": last_seen

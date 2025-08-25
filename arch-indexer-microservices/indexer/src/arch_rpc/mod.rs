@@ -137,7 +137,7 @@ impl ArchRpcClient {
 				.json(&json!({
 					"jsonrpc": "2.0",
 					"method": "get_block",
-					"params": [hash, "signatures"],
+					"params": [hash],
 					"id": 1
 				}))
 				.send()

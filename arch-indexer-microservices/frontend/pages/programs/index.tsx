@@ -1,6 +1,7 @@
 import React, { useEffect, useMemo, useState } from 'react';
 import Layout from '../../components/Layout';
 import styles from '../../styles/Home.module.css';
+import Pagination from '../../components/Pagination';
 
 export default function ProgramsPage() {
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
@@ -8,6 +9,9 @@ export default function ProgramsPage() {
   const [programs, setPrograms] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const pageSize = 100;
 
   const go = () => {
     const pid = term.trim();
@@ -20,22 +24,22 @@ export default function ProgramsPage() {
       try {
         setLoading(true);
         setError(null);
-        const res = await fetch(`${apiUrl}/api/programs/leaderboard`);
+        const params = new URLSearchParams({ limit: String(pageSize), page: String(page) });
+        const q = term.trim();
+        if (q) params.set('search', q);
+        const res = await fetch(`${apiUrl}/api/programs?${params.toString()}`);
         const json = await res.json();
-        setPrograms(Array.isArray(json) ? json : (json.items || []));
+        setPrograms(json.programs || []);
+        setTotal(json.total_count || 0);
       } catch (e: any) {
         setError('Failed to load programs');
       } finally {
         setLoading(false);
       }
     })();
-  }, [apiUrl]);
+  }, [apiUrl, page, term]);
 
-  const filtered = useMemo(() => {
-    const q = term.trim().toLowerCase();
-    if (!q) return programs;
-    return programs.filter((p: any) => (p.program_id || '').toLowerCase().includes(q));
-  }, [programs, term]);
+  const filtered = useMemo(() => programs, [programs]);
 
   return (
     <Layout>
@@ -60,7 +64,9 @@ export default function ProgramsPage() {
           <table className={styles.transactionsTable}>
             <thead>
               <tr>
-                <th>Program ID</th>
+                <th>Name</th>
+                <th>Program ID (hex)</th>
+                <th>Program ID (base58)</th>
                 <th>Transactions</th>
                 <th>First Seen</th>
                 <th>Last Seen</th>
@@ -68,10 +74,12 @@ export default function ProgramsPage() {
             </thead>
             <tbody>
               {filtered.map((p: any) => (
-                <tr key={p.program_id}>
+                <tr key={p.program_id_hex || p.program_id}>
+                  <td>{p.display_name || '—'}</td>
                   <td style={{ wordBreak: 'break-all' }}>
-                    <a className={styles.hashButton} href={`/programs/${p.program_id}`}>{p.program_id}</a>
+                    <a className={styles.hashButton} href={`/programs/${p.program_id_hex || p.program_id}`}>{p.program_id_hex || p.program_id}</a>
                   </td>
+                  <td style={{ wordBreak: 'break-all' }}>{p.program_id_base58 || ''}</td>
                   <td>{p.transaction_count}</td>
                   <td>{p.first_seen_at ? new Date(p.first_seen_at).toLocaleString() : '—'}</td>
                   <td>{p.last_seen_at ? new Date(p.last_seen_at).toLocaleString() : '—'}</td>
@@ -79,6 +87,9 @@ export default function ProgramsPage() {
               ))}
             </tbody>
           </table>
+        )}
+        {!loading && !error && (
+          <Pagination page={page} pageSize={pageSize} total={total} onPageChange={setPage} />
         )}
       </section>
     </Layout>

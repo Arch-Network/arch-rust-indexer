@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import { useRouter } from 'next/router';
 import Layout from '../../components/Layout';
 import styles from '../../styles/Home.module.css';
+import { middleEllipsis } from '../../utils/format';
 
 type Program = { program_id: string; transaction_count: number; first_seen_at?: string; last_seen_at?: string };
 
@@ -23,7 +24,13 @@ export default function ProgramDetailPage() {
         const res = await fetch(`${apiUrl}/api/programs/${encodeURIComponent(id)}`);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const json = await res.json();
-        setProgram(json.program || json);
+        const p = json.program || json;
+        setProgram({
+          program_id: p.program_id_hex || p.program_id,
+          transaction_count: p.transaction_count,
+          first_seen_at: p.first_seen_at,
+          last_seen_at: p.last_seen_at,
+        });
         setRecent(json.recent_transactions || []);
       } catch (e: any) {
         setError('Program not found');
@@ -79,7 +86,7 @@ export default function ProgramDetailPage() {
             <tbody>
               {recent.map((rt: any) => (
                 <tr key={rt.txid}>
-                  <td><a className={styles.hashButton} href={`/tx/${rt.txid}`}>{rt.txid.slice(0,16)}…</a></td>
+                  <td><a className={styles.hashButton} href={`/tx/${rt.txid}`}>{middleEllipsis(rt.txid, 8)}</a></td>
                   <td><a className={styles.hashButton} href={`/blocks/${rt.block_height}`}>{rt.block_height}</a></td>
                   <td>{rt.created_at ? new Date(rt.created_at).toLocaleString() : '—'}</td>
                 </tr>

@@ -1,6 +1,15 @@
-import { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import Head from 'next/head';
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
 import styles from '../styles/Home.module.css';
+
+// Show start and end of long identifiers like hashes
+const middleEllipsis = (value: string, keep: number = 8): string => {
+  if (!value || typeof value !== 'string') return '';
+  if (value.length <= keep * 2 + 1) return value;
+  return `${value.slice(0, keep)}…${value.slice(-keep)}`;
+};
 
 interface Block {
   height: number;
@@ -302,7 +311,7 @@ export default function Home() {
               {blocks.map((block) => (
                 <tr key={block.height}>
                   <td>{block.height.toLocaleString()}</td>
-                  <td className={styles.hashCell}>{block.hash.substring(0, 16)}...</td>
+                  <td className={styles.hashCell}>{middleEllipsis(block.hash, 8)}</td>
                   <td>{new Date(block.timestamp).toLocaleString()}</td>
                   <td>{block.transactions}</td>
                   <td>{(block.size / 1024).toFixed(2)} KB</td>
@@ -356,7 +365,7 @@ export default function Home() {
             <tbody>
               {transactions.map((tx) => (
                 <tr key={tx.signature}>
-                  <td className={styles.hashCell}>{tx.signature.substring(0, 16)}...</td>
+                  <td className={styles.hashCell}>{middleEllipsis(tx.signature, 8)}</td>
                   <td>{tx.block_height.toLocaleString()}</td>
                   <td>{new Date(tx.timestamp).toLocaleString()}</td>
                   <td>{tx.fee} ARCH</td>

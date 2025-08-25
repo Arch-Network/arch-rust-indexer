@@ -3,6 +3,7 @@ import { useRouter } from 'next/router';
 import Link from 'next/link';
 import Layout from '../../components/Layout';
 import styles from '../../styles/Home.module.css';
+import { middleEllipsis } from '../../utils/format';
 
 type Block = {
   height: number;
@@ -88,11 +89,11 @@ export default function BlockDetailPage() {
                 return (
                 <tr key={t.txid}>
                   <td>
-                    <Link href={`/tx/${t.txid}`} className={styles.hashButton}>{t.txid.slice(0,16)}…</Link>
+                    <Link href={`/tx/${t.txid}`} className={styles.hashButton}>{middleEllipsis(t.txid, 8)}</Link>
                   </td>
                   <td>
                     {btcTx ? (
-                      <a href={`${btcNet}/tx/${btcTx}`} className={styles.hashButton} target="_blank" rel="noreferrer">{btcTx.slice(0,16)}…</a>
+                      <a href={`${btcNet}/tx/${btcTx}`} className={styles.hashButton} target="_blank" rel="noreferrer">{middleEllipsis(btcTx, 8)}</a>
                     ) : (
                       '—'
                     )}

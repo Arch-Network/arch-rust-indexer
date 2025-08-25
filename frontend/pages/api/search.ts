@@ -40,7 +40,7 @@ export default function handler(
   if (query.length > 20) {
     mockResults.push({
       type: 'Transaction',
-      value: query.substring(0, 16) + '...',
+      value: `${query.slice(0,8)}…${query.slice(-8)}`,
       description: 'Transaction signature'
     })
   }
@@ -49,7 +49,7 @@ export default function handler(
   if (query.length > 30 && query.length < 50) {
     mockResults.push({
       type: 'Address',
-      value: query.substring(0, 16) + '...',
+      value: `${query.slice(0,8)}…${query.slice(-8)}`,
       description: 'Wallet address'
     })
   }
