@@ -175,3 +175,14 @@
 .json-null { color: #c586c0; }
 .jsonMuted { color: var(--muted); font-style: italic; }
 .jsonArrayBadge { margin-left: 6px; color: var(--muted); font-size: 11px; }
+
+/* Instruction UI */
+.instructionCard { background: #0a0c10; border: 1px solid rgba(255,255,255,0.08); padding: 14px; margin: 10px 0; box-shadow: var(--shadow); }
+.instructionHeader { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 10px; }
+.instructionMeta { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+.badge { background: #0a0c10; color: var(--muted); padding: 4px 8px; border: 1px solid rgba(255,255,255,0.12); font-size: 11px; text-transform: uppercase; letter-spacing: .06em; }
+.pill { background: #0a0c10; color: var(--text); border: 1px solid var(--accent-2); padding: 4px 8px; font-size: 12px; font-weight: 700; }
+.muted { color: var(--muted); }
+.arrow { color: var(--muted); padding: 0 8px; }
+.vizRow { display: flex; align-items: center; gap: 8px; margin: 6px 0 8px 0; flex-wrap: wrap; }
+.amountPill { background: #05170c; color: var(--ok); border: 1px solid var(--ok); padding: 4px 8px; font-size: 12px; font-weight: 700; }

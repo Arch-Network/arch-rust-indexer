@@ -75,8 +75,49 @@ fn fallback_program_name_from_b58(b58: &str) -> Option<String> {
     match b58 {
         "Loader1111111111111111111111111111111" => Some("Loader".to_string()),
         "11111111111111111111111111111111" => Some("System Program".to_string()),
+        "ComputeBudget111111111111111111111111111111" => Some("Compute Budget".to_string()),
+        "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr" => Some("Memo".to_string()),
+        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" => Some("SPL Token".to_string()),
+        "ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLkek" => Some("Associated Token Account".to_string()),
+        "Stake11111111111111111111111111111111111111" => Some("Stake Program".to_string()),
+        "Vote111111111111111111111111111111111111111" => Some("Vote Program".to_string()),
         _ => None,
     }
+}
+
+fn fallback_program_name_from_hex(hex_id: &str) -> Option<String> {
+    // System Program common representations
+    const SYS_HEX_ALL_ZERO: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+    const SYS_HEX_ONE: &str = "0000000000000000000000000000000000000000000000000000000000000001";
+    if hex_id.eq_ignore_ascii_case(SYS_HEX_ALL_ZERO) || hex_id.eq_ignore_ascii_case(SYS_HEX_ONE) {
+        return Some("System Program".to_string());
+    }
+    None
+}
+
+async fn maybe_persist_display_name(pool: &PgPool, program_hex: &str, name: &str) {
+    // Best-effort: persist name if column exists and currently null
+    let has_col: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS (
+            SELECT 1 FROM information_schema.columns
+            WHERE table_name = 'programs' AND column_name = 'display_name'
+        )"#
+    )
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false);
+    if !has_col { return; }
+    let _ = sqlx::query(
+        r#"
+        UPDATE programs
+        SET display_name = $2
+        WHERE program_id = $1 AND (display_name IS NULL OR display_name = '')
+        "#
+    )
+    .bind(program_hex)
+    .bind(name)
+    .execute(pool)
+    .await;
 }
 
 pub async fn list_programs(
@@ -190,7 +231,17 @@ pub async fn list_programs(
             let pid: String = r.get::<String, _>("program_id");
             let b58 = try_hex_to_base58(&pid);
             let dn: Option<String> = r.try_get::<Option<String>, _>("display_name").ok().flatten();
-            let display = dn.or_else(|| fallback_program_name_from_b58(&b58));
+            let display = dn
+                .or_else(|| fallback_program_name_from_b58(&b58))
+                .or_else(|| fallback_program_name_from_hex(&pid));
+            // fire-and-forget persist
+            if let Some(name_val) = display.clone() {
+                let pool_clone = pool.clone();
+                let pid_clone = pid.clone();
+                tokio::spawn(async move {
+                    maybe_persist_display_name(&*pool_clone, &pid_clone, &name_val).await;
+                });
+            }
             ProgramRowOut {
                 program_id_hex: pid.clone(),
                 program_id_base58: b58,
@@ -799,6 +850,9 @@ pub struct InstructionRow {
     pub program_id_base58: String,
     pub accounts: Vec<String>,
     pub data_len: usize,
+    pub action: Option<String>,
+    pub decoded: Option<serde_json::Value>,
+    pub data_hex: String,
 }
 
 pub async fn get_transaction_instructions(
@@ -823,14 +877,303 @@ pub async fn get_transaction_instructions(
     let keys = message.get("account_keys").and_then(|a| a.as_array()).ok_or(ApiError::NotFound)?;
     let instructions = message.get("instructions").and_then(|a| a.as_array()).ok_or(ApiError::NotFound)?;
 
+    fn u32_le(bytes: &[u8]) -> Option<u32> { if bytes.len() >= 4 { Some(u32::from_le_bytes([bytes[0],bytes[1],bytes[2],bytes[3]])) } else { None } }
+    fn u64_le(bytes: &[u8]) -> Option<u64> { if bytes.len() >= 8 { Some(u64::from_le_bytes([bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7]])) } else { None } }
+
+    fn decode_instruction(program_b58: &str, program_hex: &str, data: &[u8], accounts: &[String]) -> (Option<String>, Option<serde_json::Value>) {
+        fn is_system_b58(s: &str) -> bool {
+            if s.is_empty() { return false; }
+            if s.chars().all(|c| c == '1') { return true; }
+            let ones = "111111111111111111111111111111"; // 30 ones prefix
+            s.starts_with(ones) && s.ends_with('2')
+        }
+        // Compute Budget program (Solana convention)
+        if program_b58 == "ComputeBudget111111111111111111111111111111" {
+            if let Some((&tag, rest)) = data.split_first() {
+                // 1: RequestHeapFrame(u32 size)
+                if tag == 1 { if let Some(size) = u32_le(rest) {
+                    let decoded = json!({
+                        "discriminator": {"type": "u8", "data": tag},
+                        "bytes": {"type": "u32", "data": size}
+                    });
+                    return (Some("Compute Budget: RequestHeapFrame".to_string()), Some(decoded)); }}
+                // 2: SetComputeUnitLimit(u32 units)
+                if tag == 2 && rest.len() >= 4 {
+                    let units = u32_le(rest).unwrap_or(0);
+                    let decoded = json!({
+                        "discriminator": {"type": "u8", "data": tag},
+                        "units": {"type": "u32", "data": units}
+                    });
+                    return (Some("Compute Budget: SetComputeUnitLimit".to_string()), Some(decoded));
+                }
+                // 3: SetComputeUnitPrice(u64 micro_lamports)
+                if tag == 3 && rest.len() >= 8 {
+                    let price = u64_le(rest).unwrap_or(0);
+                    let decoded = json!({
+                        "discriminator": {"type": "u8", "data": tag},
+                        "price_micro_lamports": {"type": "u64", "data": price}
+                    });
+                    return (Some("Compute Budget: SetComputeUnitPrice".to_string()), Some(decoded));
+                }
+            }
+        }
+        // System Program transfer (Solana convention)
+        if is_system_b58(program_b58)
+            || program_hex.eq_ignore_ascii_case("0000000000000000000000000000000000000000000000000000000000000000")
+            || program_hex.eq_ignore_ascii_case("0000000000000000000000000000000000000000000000000000000000000001") {
+            if data.len() >= 4 {
+                let tag = u32_le(&data[0..4]).unwrap_or(9999);
+                // 1: Assign { owner: Pubkey }
+                if tag == 1 && data.len() >= 4 + 32 {
+                    let owner_b58 = bs58::encode(&data[4..36]).into_string();
+                    let account = accounts.get(0).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u32", "data": tag},
+                        "owner": owner_b58,
+                        "account": account,
+                    });
+                    return (Some("System Program: Assign".to_string()), Some(decoded));
+                }
+                // 0: CreateAccount { lamports: u64, space: u64, owner: Pubkey(32) }
+                if tag == 0 && data.len() >= 4 + 8 + 8 + 32 {
+                    let lamports = u64_le(&data[4..12]).unwrap_or(0);
+                    let space = u64_le(&data[12..20]).unwrap_or(0);
+                    let owner = bs58::encode(&data[20..52]).into_string();
+                    let from = accounts.get(0).cloned(); // funder
+                    let new_account = accounts.get(1).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u32", "data": tag},
+                        "lamports": {"type":"u64", "data": lamports},
+                        "space": {"type":"u64", "data": space},
+                        "owner": owner,
+                        "funder": from,
+                        "new_account": new_account,
+                    });
+                    return (Some("System Program: CreateAccount".to_string()), Some(decoded));
+                }
+                // 2 (or 4 on some variants): Transfer { lamports: u64 }
+                if (tag == 2 || tag == 4) && data.len() >= 12 {
+                    let lamports = u64_le(&data[4..12]).unwrap_or(0);
+                    let src = accounts.get(0).cloned();
+                    let dst = accounts.get(1).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u32", "data": tag},
+                        "lamports": {"type":"u64", "data": lamports},
+                        "source": src,
+                        "destination": dst,
+                    });
+                    return (Some("System Program: Transfer".to_string()), Some(decoded));
+                }
+                // Fallback: classic 12-byte payload with two accounts -> transfer
+                if data.len() == 12 && accounts.len() >= 2 {
+                    let lamports = u64_le(&data[4..12]).unwrap_or(0);
+                    let src = accounts.get(0).cloned();
+                    let dst = accounts.get(1).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u32", "data": tag},
+                        "lamports": {"type":"u64", "data": lamports},
+                        "source": src,
+                        "destination": dst,
+                    });
+                    return (Some("System Program: Transfer".to_string()), Some(decoded));
+                }
+                // 8: Allocate { space: u64 }
+                if tag == 8 && data.len() >= 4 + 8 {
+                    let space = u64_le(&data[4..12]).unwrap_or(0);
+                    let account = accounts.get(0).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u32", "data": tag},
+                        "space": {"type":"u64", "data": space},
+                        "account": account,
+                    });
+                    return (Some("System Program: Allocate".to_string()), Some(decoded));
+                }
+            }
+        }
+        // SPL Token Program (common id)
+        if program_b58 == "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA" {
+            if !data.is_empty() {
+                let tag = data[0];
+                // 0: InitializeMint { decimals, mint_authority, freeze_authority: COption<Pubkey> }
+                if tag == 0 && data.len() >= 1 + 1 + 32 + 1 {
+                    let decimals = data[1];
+                    let mint_authority = bs58::encode(&data[2..34]).into_string();
+                    let has_freeze = data[34] != 0;
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("discriminator".to_string(), json!({"type":"u8", "data": tag}));
+                    obj.insert("decimals".to_string(), json!({"type":"u8", "data": decimals}));
+                    obj.insert("mint_authority".to_string(), json!(mint_authority));
+                    if has_freeze && data.len() >= 1 + 1 + 32 + 1 + 32 {
+                        obj.insert("freeze_authority".to_string(), json!(bs58::encode(&data[35..67]).into_string()));
+                    } else {
+                        obj.insert("freeze_authority".to_string(), json!(null));
+                    }
+                    return (Some("SPL Token: InitializeMint".to_string()), Some(serde_json::Value::Object(obj)));
+                }
+                // 1: InitializeAccount (no data)
+                if tag == 1 {
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "account": accounts.get(0),
+                        "mint": accounts.get(1),
+                        "owner": accounts.get(2),
+                    });
+                    return (Some("SPL Token: InitializeAccount".to_string()), Some(decoded));
+                }
+                // 3: Transfer { amount: u64 }, accounts: [source, destination, authority]
+                if tag == 3 && data.len() >= 1 + 8 {
+                    let amount = u64_le(&data[1..9]).unwrap_or(0);
+                    let source = accounts.get(0).cloned();
+                    let destination = accounts.get(1).cloned();
+                    let authority = accounts.get(2).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "amount": {"type":"u64", "data": amount},
+                        "source": source,
+                        "destination": destination,
+                        "authority": authority,
+                    });
+                    return (Some("SPL Token: Transfer".to_string()), Some(decoded));
+                }
+                // 12: TransferChecked { amount: u64, decimals: u8 }
+                if tag == 12 && data.len() >= 1 + 8 + 1 {
+                    let amount = u64_le(&data[1..9]).unwrap_or(0);
+                    let decimals = data[9];
+                    let token = accounts.get(0).cloned();
+                    let source = accounts.get(1).cloned();
+                    let mint = accounts.get(2).cloned();
+                    let destination = accounts.get(3).cloned();
+                    let authority = accounts.get(4).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "amount": {"type":"u64", "data": amount},
+                        "decimals": {"type":"u8", "data": decimals},
+                        "token": token,
+                        "source": source,
+                        "mint": mint,
+                        "destination": destination,
+                        "authority": authority,
+                    });
+                    return (Some("SPL Token: TransferChecked".to_string()), Some(decoded));
+                }
+                // 4: Approve { amount: u64 }
+                if tag == 4 && data.len() >= 1 + 8 {
+                    let amount = u64_le(&data[1..9]).unwrap_or(0);
+                    let source = accounts.get(0).cloned();
+                    let delegate = accounts.get(2).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "amount": {"type":"u64", "data": amount},
+                        "source": source,
+                        "delegate": delegate,
+                    });
+                    return (Some("SPL Token: Approve".to_string()), Some(decoded));
+                }
+                // 5: Revoke
+                if tag == 5 {
+                    let source = accounts.get(0).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "source": source,
+                    });
+                    return (Some("SPL Token: Revoke".to_string()), Some(decoded));
+                }
+                // 7: MintTo { amount: u64 }
+                if tag == 7 && data.len() >= 1 + 8 {
+                    let amount = u64_le(&data[1..9]).unwrap_or(0);
+                    let mint = accounts.get(0).cloned();
+                    let dest = accounts.get(1).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "amount": {"type":"u64", "data": amount},
+                        "mint": mint,
+                        "destination": dest,
+                    });
+                    return (Some("SPL Token: MintTo".to_string()), Some(decoded));
+                }
+                // 8: Burn { amount: u64 }
+                if tag == 8 && data.len() >= 1 + 8 {
+                    let amount = u64_le(&data[1..9]).unwrap_or(0);
+                    let account = accounts.get(0).cloned();
+                    let mint = accounts.get(1).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "amount": {"type":"u64", "data": amount},
+                        "account": account,
+                        "mint": mint,
+                    });
+                    return (Some("SPL Token: Burn".to_string()), Some(decoded));
+                }
+                // 9: CloseAccount
+                if tag == 9 {
+                    let account = accounts.get(0).cloned();
+                    let destination = accounts.get(1).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "account": account,
+                        "destination": destination,
+                    });
+                    return (Some("SPL Token: CloseAccount".to_string()), Some(decoded));
+                }
+                // 10: FreezeAccount
+                if tag == 10 {
+                    let account = accounts.get(0).cloned();
+                    let mint = accounts.get(1).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "account": account,
+                        "mint": mint,
+                    });
+                    return (Some("SPL Token: FreezeAccount".to_string()), Some(decoded));
+                }
+                // 11: ThawAccount
+                if tag == 11 {
+                    let account = accounts.get(0).cloned();
+                    let mint = accounts.get(1).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "account": account,
+                        "mint": mint,
+                    });
+                    return (Some("SPL Token: ThawAccount".to_string()), Some(decoded));
+                }
+                // 17: SyncNative (no data)
+                if tag == 17 {
+                    let account = accounts.get(0).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "account": account,
+                    });
+                    return (Some("SPL Token: SyncNative".to_string()), Some(decoded));
+                }
+            }
+        }
+        // Memo program: utf-8
+        if program_b58 == "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr" {
+            if let Ok(text) = std::str::from_utf8(data) {
+                return (Some("Memo: Write".to_string()), Some(json!({"memo": text})));
+            }
+        }
+        (None, None)
+    }
+
     let mut out = Vec::with_capacity(instructions.len());
     for (idx, ins) in instructions.iter().enumerate() {
-        let program_hex = ins.get("program_id").map(|v| key_to_hex(v)).unwrap_or_default();
-        let program_b58 = ins.get("program_id").map(|v| key_to_base58(v)).unwrap_or_default();
+        // Resolve program id: prefer explicit program_id, else program_id_index into account_keys
+        let program_val = if let Some(v) = ins.get("program_id") {
+            Some(v.clone())
+        } else if let Some(ix) = ins.get("program_id_index").and_then(|v| v.as_i64()) {
+            keys.get(ix as usize).cloned()
+        } else { None };
+        let program_hex = program_val.as_ref().map(|v| key_to_hex(v)).unwrap_or_default();
+        let program_b58 = program_val.as_ref().map(|v| key_to_base58(v)).unwrap_or_default();
         let acc_idx: Vec<usize> = ins.get("accounts").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as usize)).collect()).unwrap_or_default();
         let accounts: Vec<String> = acc_idx.into_iter().filter_map(|i| keys.get(i).map(|k| key_to_base58(k))).collect();
-        let data_len = ins.get("data").and_then(|d| d.as_array()).map(|a| a.len()).unwrap_or(0);
-        out.push(InstructionRow { index: idx, program_id_hex: program_hex, program_id_base58: program_b58, accounts, data_len });
+        let data_vec: Vec<u8> = ins.get("data").and_then(|d| d.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as u8)).collect()).unwrap_or_default();
+        let data_len = data_vec.len();
+        let data_hex = hex::encode(&data_vec);
+        let (action, decoded) = decode_instruction(&program_b58, &program_hex, &data_vec, &accounts);
+        out.push(InstructionRow { index: idx, program_id_hex: program_hex, program_id_base58: program_b58, accounts, data_len, action, decoded, data_hex });
     }
 
     Ok(Json(out))
@@ -1545,7 +1888,12 @@ pub async fn get_program_details(
         let last_seen: DateTime<Utc> = p.get::<DateTime<Utc>, _>("last_seen_at");
         let dn: Option<String> = p.try_get::<Option<String>, _>("display_name").ok().flatten();
         let b58 = bs58::encode(hex::decode(&pid).unwrap_or_default()).into_string();
-        let display_name = dn.or_else(|| fallback_program_name_from_b58(&b58));
+        let display_name = dn
+            .or_else(|| fallback_program_name_from_b58(&b58))
+            .or_else(|| fallback_program_name_from_hex(&pid));
+        if let Some(ref name) = display_name {
+            maybe_persist_display_name(&*pool, &pid, name).await;
+        }
 
         // Recent transactions for this program
         let recent_rows = sqlx::query(
