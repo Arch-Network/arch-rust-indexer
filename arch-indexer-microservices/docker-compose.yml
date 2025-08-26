@@ -9,7 +9,7 @@ services:
       POSTGRES_PASSWORD: postgres
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql
+      - ./db-init:/docker-entrypoint-initdb.d:ro
     ports:
       - "5432:5432"
 
@@ -29,6 +29,8 @@ services:
       ARCH_NODE_WEBSOCKET_URL: ws://44.196.173.35:10081
       ENABLE_REALTIME: true
       WEBSOCKET_ENABLED: true
+      ARCH_FAST_FORWARD_WINDOW: "0"
+      ARCH_BULK_BATCH_SIZE: "250"
       # Arch built-ins: System(hex), ComputeBudget, Vote, Stake, BPF Loader, Native Loader
       ARCH_BUILTIN_PROGRAMS: "0000000000000000000000000000000000000000000000000000000000000001,ComputeBudget111111111111111111111111111111,VoteProgram111111111111111111111,StakeProgram11111111111111111111,BpfLoader11111111111111111111111,NativeLoader11111111111111111111"
     depends_on:

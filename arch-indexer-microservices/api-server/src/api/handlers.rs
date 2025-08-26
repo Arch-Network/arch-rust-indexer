@@ -21,20 +21,39 @@ use crate::arch_rpc::ArchRpcClient;
 
 fn key_to_bytes(v: &serde_json::Value) -> Option<Vec<u8>> {
     if let Some(arr) = v.as_array() {
-        Some(arr.iter().filter_map(|x| x.as_i64().map(|n| n as u8)).collect())
-    } else if let Some(s) = v.as_str() {
-        // Accept base58 program names like Loader111... -> decode base58 if possible, else return None
-        bs58::decode(s).into_vec().ok()
-    } else {
-        None
+        return Some(arr.iter().filter_map(|x| x.as_i64().map(|n| n as u8)).collect());
     }
+    if let Some(s) = v.as_str() {
+        // Try base58 first
+        if let Ok(bytes) = bs58::decode(s).into_vec() {
+            return Some(bytes);
+        }
+        // Then try hex if it looks like hex
+        let maybe_hex = s.len() >= 2 && s.len() % 2 == 0 && s.chars().all(|c| c.is_ascii_hexdigit());
+        if maybe_hex {
+            if let Ok(bytes) = hex::decode(s) {
+                return Some(bytes);
+            }
+        }
+    }
+    None
 }
 
 fn key_to_base58(v: &serde_json::Value) -> String {
     if let Some(bytes) = key_to_bytes(v) {
         return bs58::encode(bytes).into_string();
     }
-    v.as_str().unwrap_or("").to_string()
+    // If it's a hex string, attempt to decode and re-encode as base58
+    if let Some(s) = v.as_str() {
+        let maybe_hex = s.len() >= 2 && s.len() % 2 == 0 && s.chars().all(|c| c.is_ascii_hexdigit());
+        if maybe_hex {
+            if let Ok(bytes) = hex::decode(s) {
+                return bs58::encode(bytes).into_string();
+            }
+        }
+        return s.to_string();
+    }
+    String::new()
 }
 
 fn key_to_hex(v: &serde_json::Value) -> String {
@@ -42,6 +61,10 @@ fn key_to_hex(v: &serde_json::Value) -> String {
         return hex::encode(bytes);
     }
     if let Some(s) = v.as_str() {
+        // If already hex-looking, return normalized lowercase
+        if s.len() >= 2 && s.len() % 2 == 0 && s.chars().all(|c| c.is_ascii_hexdigit()) {
+            return s.to_lowercase();
+        }
         if let Ok(bytes) = bs58::decode(s).into_vec() { return hex::encode(bytes); }
     }
     String::new()
@@ -368,7 +391,7 @@ pub async fn get_account_transactions(
             ORDER BY ap.created_at DESC
             LIMIT $2 OFFSET $3
             "#)
-            .bind(address_hex)
+            .bind(&address_hex)
             .bind(limit)
             .bind(offset)
             .fetch_all(&*pool)
@@ -391,7 +414,7 @@ pub async fn get_account_transactions(
             ORDER BY created_at DESC
             LIMIT $2 OFFSET $3
             "#)
-            .bind(address_hex)
+            .bind(&address_hex)
             .bind(limit)
             .bind(offset)
             .fetch_all(&*pool)
@@ -430,7 +453,18 @@ pub async fn get_account_programs(
     .await
     .unwrap_or(false);
 
-    let rows = if has_participation {
+    // Only use account_participation if it has rows for this address; otherwise fallback
+    let use_participation: bool = if has_participation {
+        sqlx::query_scalar(
+            r#"SELECT EXISTS(SELECT 1 FROM account_participation WHERE address_hex ILIKE $1)"#
+        )
+        .bind(&address_hex)
+        .fetch_one(&*pool)
+        .await
+        .unwrap_or(false)
+    } else { false };
+
+    let rows = if use_participation {
         sqlx::query(
             r#"
             SELECT tp.program_id, COUNT(*)::bigint as cnt
@@ -442,39 +476,367 @@ pub async fn get_account_programs(
             ORDER BY cnt DESC
             LIMIT 200
             "#)
-            .bind(address_hex)
+            .bind(&address_hex)
             .fetch_all(&*pool)
             .await?
     } else {
         sqlx::query(
             r#"
-            WITH accs AS (
-                SELECT t.txid,
-                    CASE 
-                        WHEN jsonb_typeof(acc.value) = 'string' THEN normalize_program_id(trim(both '"' from (acc.value)::text))
-                        ELSE normalize_program_id((acc.value)::text)
-                    END AS acc_hex
+            WITH acc_txs AS (
+                SELECT 
+                    t.txid,
+                    t.data->'message'->'account_keys' AS keys,
+                    jsonb_array_elements(COALESCE(t.data->'message'->'instructions', '[]'::jsonb)) AS inst
                 FROM transactions t
-                CROSS JOIN LATERAL jsonb_array_elements(t.data->'message'->'account_keys') AS acc(value)
+                WHERE EXISTS (
+                    SELECT 1 
+                    FROM jsonb_array_elements(t.data->'message'->'account_keys') AS acc(value)
+                    WHERE normalize_program_id(acc.value) ILIKE $1
+                )
+            ),
+            progs AS (
+                SELECT 
+                    normalize_program_id(
+                        (keys -> ((inst->>'program_id_index')::int))
+                    ) AS program_id
+                FROM acc_txs
             )
-            SELECT tp.program_id, COUNT(*)::bigint as cnt
-            FROM accs
-            JOIN transaction_programs tp ON tp.txid = accs.txid
-            WHERE accs.acc_hex ILIKE $1
-            GROUP BY tp.program_id
+            SELECT program_id, COUNT(*)::bigint AS cnt
+            FROM progs
+            WHERE program_id IS NOT NULL
+            GROUP BY program_id
             ORDER BY cnt DESC
             LIMIT 200
             "#)
-            .bind(address_hex)
+            .bind(&address_hex)
             .fetch_all(&*pool)
             .await
-            .map_err(|e| { error!("get_account_programs fallback query error: {:?}", e); ApiError::Database(e) })?
+            .map_err(|e| { error!("get_account_programs derived fallback error: {:?}", e); ApiError::Database(e) })?
     };
-    let out = rows.into_iter().map(|r| AccountProgramRow {
+    let mut out: Vec<AccountProgramRow> = rows.into_iter().map(|r| AccountProgramRow {
         program_id: r.get::<String,_>("program_id"),
         transaction_count: r.get::<i64,_>("cnt"),
     }).collect();
+
+    if out.is_empty() {
+        // As a last resort, if the account participated but no programs were linked (e.g., only System),
+        // derive total tx count for this account and attribute to System program.
+        let total_for_acct: i64 = sqlx::query_scalar(
+            r#"
+            SELECT COUNT(*)::bigint
+            FROM transactions t
+            WHERE EXISTS (
+                SELECT 1 FROM jsonb_array_elements(t.data->'message'->'account_keys') AS acc(value)
+                WHERE normalize_program_id(acc.value) ILIKE $1
+            )
+            "#
+        )
+        .bind(&address_hex)
+        .fetch_one(&*pool)
+        .await
+        .unwrap_or(0);
+
+        if total_for_acct > 0 {
+            out.push(AccountProgramRow {
+                program_id: "0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+                transaction_count: total_for_acct,
+            });
+        }
+    }
+
     Ok(Json(out))
+}
+
+pub async fn get_account_token_balances(
+    State(pool): State<Arc<PgPool>>,
+    AxPath(address): AxPath<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let limit = params.get("limit").and_then(|v| v.parse::<i64>().ok()).map(|v| v.min(200)).unwrap_or(50);
+    let page = params.get("page").and_then(|v| v.parse::<i64>().ok()).unwrap_or(1).max(1);
+    let offset = (page - 1) * limit;
+    let address_hex = normalize_program_param(&address).ok_or(ApiError::BadRequest("Invalid address".into()))?;
+
+    // Check if token_balances table exists
+    let has_token_balances: bool = sqlx::query_scalar(
+        r#"SELECT to_regclass('public.token_balances') IS NOT NULL"#
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap_or(false);
+
+    if !has_token_balances {
+        // Return empty result if table doesn't exist yet
+        return Ok(Json(json!({
+            "page": page,
+            "limit": limit,
+            "balances": [],
+            "total": 0
+        })));
+    }
+
+    // Get total count
+    let total_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*)::bigint
+        FROM token_balances tb
+        LEFT JOIN token_mints tm ON tb.mint_address = tm.mint_address
+        WHERE tb.account_address ILIKE $1
+        "#
+    )
+    .bind(address_hex.clone())
+    .fetch_one(&*pool)
+    .await
+    .unwrap_or(0);
+
+    // Get token balances with pagination
+    let rows = sqlx::query(
+        r#"
+        SELECT 
+            tb.mint_address,
+            tb.balance,
+            tb.decimals,
+            tb.owner_address,
+            tb.program_id,
+            tm.supply,
+            tm.is_frozen,
+            tb.last_updated
+        FROM token_balances tb
+        LEFT JOIN token_mints tm ON tb.mint_address = tm.mint_address
+        WHERE tb.account_address ILIKE $1
+        ORDER BY tb.last_updated DESC
+        LIMIT $2 OFFSET $3
+        "#
+    )
+    .bind(address_hex.clone())
+    .bind(limit)
+    .bind(offset)
+    .fetch_all(&*pool)
+    .await?;
+
+    // Build balances and compute total appropriately (fallback path computes its own total)
+    let (balances, total): (Vec<serde_json::Value>, i64) = if !rows.is_empty() {
+        let list = rows.into_iter().map(|r| {
+            let mint_address = r.get::<String, _>("mint_address");
+            let program_id = r.get::<String, _>("program_id");
+            
+            // Convert hex to base58 for display
+            let mint_address_b58 = try_hex_to_base58(&mint_address);
+            let program_id_b58 = try_hex_to_base58(&program_id);
+            
+            // Get program display name
+            let program_name = fallback_program_name_from_hex(&program_id);
+            
+            json!({
+                "mint_address": if mint_address_b58.is_empty() { mint_address.clone() } else { mint_address_b58 },
+                "mint_address_hex": mint_address,
+                "balance": r.get::<String, _>("balance"),
+                "decimals": r.get::<i32, _>("decimals"),
+                "owner_address": r.try_get::<Option<String>, _>("owner_address").ok().flatten(),
+                "program_id": if program_id_b58.is_empty() { program_id.clone() } else { program_id_b58 },
+                "program_name": program_name,
+                "supply": r.try_get::<Option<String>, _>("supply").ok().flatten(),
+                "is_frozen": r.try_get::<Option<bool>, _>("is_frozen").ok().flatten(),
+                "last_updated": r.get::<DateTime<Utc>, _>("last_updated")
+            })
+        }).collect();
+        (list, total_count)
+    } else {
+        // Fallback: compute balances on the fly from past transactions that include this account
+        let target_hex = address_hex.clone();
+        let target_b58 = try_hex_to_base58(&target_hex);
+
+        // Determine if participation table is available
+        let has_participation: bool = sqlx::query_scalar(
+            r#"SELECT to_regclass('public.account_participation') IS NOT NULL"#
+        )
+        .fetch_one(&*pool)
+        .await
+        .unwrap_or(false);
+
+        let mut tx_rows = if has_participation {
+            sqlx::query(
+                r#"
+                SELECT t.data, t.created_at
+                FROM transactions t
+                JOIN account_participation ap ON ap.txid = t.txid
+                WHERE ap.address_hex ILIKE $1
+                ORDER BY t.created_at ASC
+                LIMIT 2000
+                "#
+            )
+            .bind(target_hex.clone())
+            .fetch_all(&*pool)
+            .await
+            .unwrap_or_default()
+        } else { Vec::new() };
+
+        if tx_rows.is_empty() {
+            // Fallback to scanning transactions JSON directly if participation table is missing or has no matches
+            tx_rows = sqlx::query(
+                r#"
+                WITH accs AS (
+                    SELECT t.txid, t.created_at, t.data,
+                        CASE 
+                            WHEN jsonb_typeof(acc.value) = 'string' THEN normalize_program_id(trim(both '"' from (acc.value)::text))
+                            ELSE normalize_program_id((acc.value)::text)
+                        END AS acc_hex
+                    FROM transactions t
+                    CROSS JOIN LATERAL jsonb_array_elements(t.data->'message'->'account_keys') AS acc(value)
+                )
+                SELECT data, created_at
+                FROM accs
+                WHERE acc_hex ILIKE $1
+                ORDER BY created_at ASC
+                LIMIT 2000
+                "#
+            )
+            .bind(target_hex.clone())
+            .fetch_all(&*pool)
+            .await
+            .unwrap_or_default();
+        }
+
+        if tx_rows.is_empty() {
+            // Ultimate fallback: scan a window of recent transactions without pre-filter and compute balances
+            tx_rows = sqlx::query(
+                r#"
+                SELECT data, created_at
+                FROM transactions
+                ORDER BY created_at ASC
+                LIMIT 2000
+                "#
+            )
+            .fetch_all(&*pool)
+            .await
+            .unwrap_or_default();
+        }
+
+        let mut by_mint: std::collections::HashMap<String, (i128, i32)> = std::collections::HashMap::new();
+
+        for row in tx_rows {
+            let data: serde_json::Value = row.get("data");
+            let message = if let Some(m) = data.get("message") { m } else { continue };
+            let keys = if let Some(a) = message.get("account_keys").and_then(|a| a.as_array()) { a } else { continue };
+            let instructions = if let Some(a) = message.get("instructions").and_then(|a| a.as_array()) { a } else { continue };
+
+            for ins in instructions {
+                // Resolve program id: explicit or via program_id_index
+                let program_val = if let Some(v) = ins.get("program_id") {
+                    Some(v.clone())
+                } else if let Some(ix) = ins.get("program_id_index").and_then(|v| v.as_i64()) {
+                    keys.get(ix as usize).cloned()
+                } else { None };
+                let program_b58 = program_val.as_ref().map(|v| key_to_base58(v)).unwrap_or_default();
+                let program_hex = program_val.as_ref().map(|v| key_to_hex(v)).unwrap_or_default();
+                if program_b58 != pid::APL_TOKEN_PROGRAM && program_b58 != pid::SOL_SPL_TOKEN { continue; }
+
+                let acc_idx: Vec<usize> = ins.get("accounts").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as usize)).collect()).unwrap_or_default();
+                let accounts_b58: Vec<String> = acc_idx.iter().filter_map(|i| keys.get(*i).map(|k| key_to_base58(k))).collect();
+                let data_vec: Vec<u8> = ins.get("data").and_then(|d| d.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as u8)).collect()).unwrap_or_default();
+                if data_vec.is_empty() { continue; }
+                let tag = data_vec[0];
+
+                let mint_hex_from_idx = |idx: usize| -> Option<String> {
+                    acc_idx.get(idx).and_then(|i| keys.get(*i)).map(|v| key_to_hex(v)).filter(|s| !s.is_empty())
+                };
+
+                let is_me = |addr: &Option<String>| -> bool {
+                    if let Some(a) = addr { !target_b58.is_empty() && a == &target_b58 } else { false }
+                };
+
+                match tag {
+                    3 => {
+                        // Transfer { amount: u64 }, accounts: [source, destination, authority]
+                        if data_vec.len() >= 1 + 8 && accounts_b58.len() >= 2 {
+                            let amount = u64::from_le_bytes([data_vec[1],data_vec[2],data_vec[3],data_vec[4],data_vec[5],data_vec[6],data_vec[7],data_vec[8]]) as i128;
+                            let src = accounts_b58.get(0).cloned();
+                            let dst = accounts_b58.get(1).cloned();
+                            let delta = if is_me(&dst) { amount } else if is_me(&src) { -amount } else { 0 };
+                            if delta != 0 {
+                                let mint = if !program_hex.is_empty() { program_hex.clone() } else { program_b58.clone() };
+                                let e = by_mint.entry(mint).or_insert((0, 0));
+                                e.0 += delta;
+                            }
+                        }
+                    }
+                    12 => {
+                        // TransferChecked { amount: u64, decimals: u8 }
+                        if data_vec.len() >= 1 + 8 + 1 && accounts_b58.len() >= 4 {
+                            let amount = u64::from_le_bytes([data_vec[1],data_vec[2],data_vec[3],data_vec[4],data_vec[5],data_vec[6],data_vec[7],data_vec[8]]) as i128;
+                            let decimals = data_vec[9] as i32;
+                            let mint_hex = mint_hex_from_idx(2).or_else(|| mint_hex_from_idx(1));
+                            if let Some(mint) = mint_hex {
+                                let src = accounts_b58.get(1).cloned();
+                                let dst = accounts_b58.get(3).cloned();
+                                let delta = if is_me(&dst) { amount } else if is_me(&src) { -amount } else { 0 };
+                                if delta != 0 {
+                                    let e = by_mint.entry(mint).or_insert((0, decimals));
+                                    e.0 += delta;
+                                    if e.1 == 0 { e.1 = decimals; }
+                                }
+                            }
+                        }
+                    }
+                    7 => {
+                        // MintTo { amount: u64 }
+                        if data_vec.len() >= 1 + 8 && accounts_b58.len() >= 2 {
+                            let amount = u64::from_le_bytes([data_vec[1],data_vec[2],data_vec[3],data_vec[4],data_vec[5],data_vec[6],data_vec[7],data_vec[8]]) as i128;
+                            let mint_hex = mint_hex_from_idx(0);
+                            let dst = accounts_b58.get(1).cloned();
+                            if let (Some(mint), Some(d)) = (mint_hex, dst) {
+                                if !target_b58.is_empty() && d == target_b58 {
+                                    let e = by_mint.entry(mint).or_insert((0, 0));
+                                    e.0 += amount;
+                                }
+                            }
+                        }
+                    }
+                    8 => {
+                        // Burn { amount: u64 }
+                        if data_vec.len() >= 1 + 8 && accounts_b58.len() >= 2 {
+                            let amount = u64::from_le_bytes([data_vec[1],data_vec[2],data_vec[3],data_vec[4],data_vec[5],data_vec[6],data_vec[7],data_vec[8]]) as i128;
+                            let mint_hex = mint_hex_from_idx(1);
+                            let acc = accounts_b58.get(0).cloned();
+                            if let (Some(mint), Some(a)) = (mint_hex, acc) {
+                                if !target_b58.is_empty() && a == target_b58 {
+                                    let e = by_mint.entry(mint).or_insert((0, 0));
+                                    e.0 -= amount;
+                                }
+                            }
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let list: Vec<serde_json::Value> = by_mint.into_iter().map(|(mint_hex, (amount, decimals))| {
+            let mint_b58 = try_hex_to_base58(&mint_hex);
+            json!({
+                "mint_address": if mint_b58.is_empty() { mint_hex.clone() } else { mint_b58 },
+                "mint_address_hex": mint_hex,
+                "balance": amount.to_string(),
+                "decimals": decimals.max(0),
+                "owner_address": null,
+                // we don't reliably know the program here; leave hex empty for now
+                "program_id": "",
+                "program_name": null,
+                "supply": null,
+                "is_frozen": null,
+                "last_updated": chrono::Utc::now(),
+            })
+        }).collect();
+        let computed_total = list.len() as i64;
+        (list, computed_total)
+    };
+
+    Ok(Json(json!({
+        "page": page,
+        "limit": limit,
+        "balances": balances,
+        "total": total
+    })))
 }
 
 fn shortvec_len(len: usize) -> usize {
@@ -930,7 +1292,27 @@ pub async fn get_transaction(
     .fetch_optional(&*pool)
     .await {
         Ok(Some(transaction)) => Ok(Json(transaction)),
-        Ok(None) => Err(ApiError::NotFound),
+        Ok(None) => {
+            // Fallback: try RPC so we can serve transactions not yet persisted
+            let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+            let arch_client = ArchRpcClient::new(rpc_url);
+            match arch_client.get_processed_transaction(&txid).await {
+                Ok(rpc_tx) => {
+                    let now = chrono::Utc::now().naive_utc();
+                    // Synthesize a Transaction-like response so the UI can render
+                    let synthesized = Transaction {
+                        txid,
+                        block_height: 0, // unknown until indexed
+                        data: rpc_tx.runtime_transaction,
+                        status: serde_json::json!({"type":"processed"}),
+                        bitcoin_txids: None,
+                        created_at: now,
+                    };
+                    Ok(Json(synthesized))
+                }
+                Err(_) => Err(ApiError::NotFound),
+            }
+        },
         Err(e) => Err(ApiError::Database(e)),
     }
 }

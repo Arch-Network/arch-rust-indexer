@@ -29,6 +29,7 @@ pub fn create_router(pool: Arc<PgPool>) -> Router {
         .route("/api/accounts/:address", get(handlers::get_account_summary))
         .route("/api/accounts/:address/transactions", get(handlers::get_account_transactions))
         .route("/api/accounts/:address/programs", get(handlers::get_account_programs))
+        .route("/api/accounts/:address/token-balances", get(handlers::get_account_token_balances))
         .route("/api/realtime/status", get(handlers::get_realtime_status))
         .route("/api/realtime/events", get(handlers::get_recent_events))
         .route("/api/websocket/stats", get(handlers::get_websocket_stats))

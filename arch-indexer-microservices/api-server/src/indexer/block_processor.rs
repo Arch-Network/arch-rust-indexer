@@ -159,6 +159,31 @@ impl BlockProcessor {
             }
         }
 
+        // Also record account participation explicitly to ensure account pages populate
+        if let Some(message) = transaction.data.get("message") {
+            let keys_opt = message.get("account_keys").or_else(|| message.get("keys"));
+            if let Some(keys) = keys_opt.and_then(|v| v.as_array()) {
+                for key_val in keys {
+                    if let Some(address_hex) = BlockProcessor::normalize_program_id(key_val) {
+                        // Best-effort insert; skip if table missing or any other error
+                        let _ = sqlx::query(
+                            r#"
+                            INSERT INTO account_participation (address_hex, txid, block_height, created_at)
+                            VALUES ($1, $2, $3, $4)
+                            ON CONFLICT (address_hex, txid) DO NOTHING
+                            "#
+                        )
+                        .bind(address_hex)
+                        .bind(&transaction.txid)
+                        .bind(transaction.block_height as i64)
+                        .bind(Utc.from_utc_datetime(&transaction.created_at))
+                        .execute(&mut **tx)
+                        .await;
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -688,6 +713,36 @@ impl BlockProcessor {
                 .execute(&mut **tx)
                 .await {
                     tracing::error!("Failed to insert transaction-program relationship: {}", e);
+                }
+            }
+        }
+
+        // Also record account participation explicitly to ensure account pages populate
+        if let Some(message) = transaction.runtime_transaction.get("message") {
+            let keys_opt = message.get("account_keys").or_else(|| message.get("keys"));
+            if let Some(keys) = keys_opt.and_then(|v| v.as_array()) {
+                for key_val in keys {
+                    // Normalize to hex whether it's base58 string or byte array
+                    let address_hex = match key_val {
+                        serde_json::Value::String(_) | serde_json::Value::Array(_) => {
+                            BlockProcessor::normalize_program_id(key_val)
+                        },
+                        _ => None,
+                    };
+                    if let Some(address_hex) = address_hex {
+                        let _ = sqlx::query(
+                            r#"
+                            INSERT INTO account_participation (address_hex, txid, block_height, created_at)
+                            VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+                            ON CONFLICT (address_hex, txid) DO NOTHING
+                            "#
+                        )
+                        .bind(address_hex)
+                        .bind(&txid)
+                        .bind(block_height as i64)
+                        .execute(&mut **tx)
+                        .await;
+                    }
                 }
             }
         }

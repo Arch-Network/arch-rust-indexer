@@ -77,3 +77,31 @@ pub struct ProgramStats {
     pub first_seen_at: chrono::DateTime<chrono::Utc>,
     pub last_seen_at: chrono::DateTime<chrono::Utc>,
 }
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TokenBalance {
+    pub mint_address: String,
+    pub mint_address_hex: String,
+    pub balance: String,
+    pub decimals: i32,
+    pub owner_address: Option<String>,
+    pub program_id: String,
+    pub program_name: Option<String>,
+    pub supply: Option<String>,
+    pub is_frozen: Option<bool>,
+    pub last_updated: chrono::DateTime<chrono::Utc>,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+pub struct TokenMint {
+    pub mint_address: String,
+    pub mint_address_hex: String,
+    pub program_id: String,
+    pub decimals: i32,
+    pub supply: String,
+    pub is_frozen: bool,
+    pub mint_authority: Option<String>,
+    pub freeze_authority: Option<String>,
+    pub first_seen_at: chrono::DateTime<chrono::Utc>,
+    pub last_seen_at: chrono::DateTime<chrono::Utc>,
+}

@@ -19,6 +19,19 @@ type TxRow = {
 
 type ProgramRow = { program_id: string; transaction_count: number };
 
+type TokenBalance = {
+  mint_address: string;
+  mint_address_hex: string;
+  balance: string;
+  decimals: number;
+  owner_address?: string;
+  program_id: string;
+  program_name?: string;
+  supply?: string;
+  is_frozen?: boolean;
+  last_updated: string;
+};
+
 function safeDate(v?: string | null): string {
   if (!v) return '—';
   const d = new Date(v);
@@ -36,6 +49,10 @@ export default function AccountPage() {
   const [error, setError] = useState<string | null>(null);
   const [tab, setTab] = useState<'tx' | 'programs' | 'balances'>('tx');
   const [programs, setPrograms] = useState<ProgramRow[]>([]);
+  const [tokenBalances, setTokenBalances] = useState<TokenBalance[]>([]);
+  const [balancesPage, setBalancesPage] = useState(1);
+  const [balancesLimit, setBalancesLimit] = useState(25);
+  const [balancesTotal, setBalancesTotal] = useState(0);
 
   const baseApi = useMemo(() => {
     if (typeof window === 'undefined') return '';
@@ -59,6 +76,21 @@ export default function AccountPage() {
       .catch((e) => setError(String(e)))
       .finally(() => setLoading(false));
   }, [address, page, limit, baseApi]);
+
+  // Fetch token balances when balances tab is selected
+  useEffect(() => {
+    if (!address || tab !== 'balances') return;
+    setLoading(true);
+    setError(null);
+    fetch(`${baseApi}/api/accounts/${address}/token-balances?limit=${balancesLimit}&page=${balancesPage}`)
+      .then(r => r.ok ? r.json() : Promise.reject(r.statusText))
+      .then((data) => {
+        setTokenBalances((data?.balances as TokenBalance[]) || []);
+        setBalancesTotal(data?.total || 0);
+      })
+      .catch((e) => setError(String(e)))
+      .finally(() => setLoading(false));
+  }, [address, tab, balancesPage, balancesLimit, baseApi]);
 
   const copy = (value: string) => {
     if (navigator?.clipboard) {
@@ -193,10 +225,92 @@ export default function AccountPage() {
       )}
 
       {tab === 'balances' && (
-        <div className={styles.searchSection} style={{ marginTop: 24 }}>
-          <h2>Token Balances</h2>
-          <div style={{ opacity: 0.7 }}>Coming soon.</div>
-        </div>
+        <>
+          <h2 style={{ marginTop: 24 }}>Token Balances</h2>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 16 }}>
+            <label>Page</label>
+            <input
+              type="number"
+              min={1}
+              value={balancesPage}
+              onChange={(e) => setBalancesPage(Math.max(1, parseInt(e.target.value || '1', 10)))}
+              style={{ width: 80 }}
+            />
+            <label>Limit</label>
+            <select value={balancesLimit} onChange={(e) => setBalancesLimit(parseInt(e.target.value, 10))}>
+              <option value={10}>10</option>
+              <option value={25}>25</option>
+              <option value={50}>50</option>
+              <option value={100}>100</option>
+            </select>
+            <span style={{ marginLeft: 16, opacity: 0.7 }}>
+              Total: {balancesTotal.toLocaleString()}
+            </span>
+          </div>
+          <div className={styles.searchSection} style={{ overflowX: 'auto' }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #333', padding: '8px 4px' }}>Mint Address</th>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #333', padding: '8px 4px' }}>Balance</th>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #333', padding: '8px 4px' }}>Program</th>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #333', padding: '8px 4px' }}>Supply</th>
+                  <th style={{ textAlign: 'left', borderBottom: '1px solid #333', padding: '8px 4px' }}>Last Updated</th>
+                </tr>
+              </thead>
+              <tbody>
+                {tokenBalances.map((balance) => (
+                  <tr key={`${balance.mint_address}-${balance.program_id}`}>
+                    <td style={{ padding: '8px 4px', fontFamily: 'monospace' }}>
+                      <div style={{ fontSize: 12 }}>
+                        <div>{balance.mint_address}</div>
+                        <div style={{ opacity: 0.6, fontSize: 10 }}>{balance.mint_address_hex}</div>
+                      </div>
+                    </td>
+                    <td style={{ padding: '8px 4px' }}>
+                      <div>
+                        <div>{parseFloat(balance.balance).toLocaleString()}</div>
+                        {balance.decimals > 0 && (
+                          <div style={{ opacity: 0.6, fontSize: 12 }}>
+                            {parseFloat(balance.balance) / Math.pow(10, balance.decimals)}
+                          </div>
+                        )}
+                      </div>
+                    </td>
+                    <td style={{ padding: '8px 4px' }}>
+                      <div style={{ fontSize: 12 }}>
+                        <div>{balance.program_name || balance.program_id}</div>
+                        <div style={{ opacity: 0.6, fontSize: 10 }}>{balance.program_id}</div>
+                      </div>
+                    </td>
+                    <td style={{ padding: '8px 4px' }}>
+                      {balance.supply ? (
+                        <div>
+                          <div>{parseFloat(balance.supply).toLocaleString()}</div>
+                          {balance.decimals > 0 && (
+                            <div style={{ opacity: 0.6, fontSize: 12 }}>
+                              {parseFloat(balance.supply) / Math.pow(10, balance.decimals)}
+                            </div>
+                          )}
+                        </div>
+                      ) : (
+                        <span style={{ opacity: 0.5 }}>—</span>
+                      )}
+                    </td>
+                    <td style={{ padding: '8px 4px' }}>{safeDate(balance.last_updated)}</td>
+                  </tr>
+                ))}
+                {!loading && tokenBalances.length === 0 && (
+                  <tr>
+                    <td colSpan={5} style={{ padding: 12, opacity: 0.7 }}>
+                      No token balances found for this account.
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+        </>
       )}
       </section>
     </Layout>

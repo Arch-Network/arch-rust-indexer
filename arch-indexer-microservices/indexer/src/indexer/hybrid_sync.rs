@@ -122,10 +122,18 @@ impl HybridSync {
                 is_realtime_active.store(true, Ordering::Relaxed);
                 last_realtime_update.store(chrono::Utc::now().timestamp(), Ordering::Relaxed);
 
-                match evt.topic.as_str() {
+                // Normalize topic names from server (e.g., "blocks" -> "block")
+                let topic_norm = match evt.topic.as_str() {
+                    "blocks" => "block",
+                    "transactions" => "transaction",
+                    other => other,
+                };
+
+                match topic_norm {
                     "block" => {
                         // On block event, fetch latest block via RPC if hash present
                         if let Some(hash) = evt.data.get("hash").and_then(|v| v.as_str()) {
+                            info!("🔔 Realtime block event: {}", hash);
                             // Height may not be present; attempt to get height from tip for now
                             // or we could ignore and let bulk catch up. We'll attempt fetch by hash only.
                             match rpc.get_block(hash, 0).await {
@@ -155,6 +163,7 @@ impl HybridSync {
                     }
                     "transaction" => {
                         if let Some(hash) = evt.data.get("hash").and_then(|v| v.as_str()) {
+                            info!("📨 Realtime transaction event: {}", hash);
                             match rpc.get_processed_transaction(hash).await {
                                 Ok(processed) => {
                                     let data = match serde_json::to_value(&processed.runtime_transaction) { Ok(v)=>v, Err(_)=>serde_json::Value::Null };
@@ -178,6 +187,7 @@ impl HybridSync {
 
                                     // Extract and upsert program IDs
                                     let pids = extract_program_ids(&data, Some(&processed.accounts_tags));
+                                    info!("↳ programs in tx {}: {}", hash, pids.len());
                                     for pid in pids {
                                         if let Err(e) = sqlx::query(
                                             r#"
@@ -204,12 +214,16 @@ impl HybridSync {
                                         .execute(&*pool)
                                         .await { error!("transaction_programs insert failed: {}", e); }
                                     }
+                                    info!("✅ Realtime transaction persisted: {}", hash);
                                 }
                                 Err(e) => error!("Realtime failed to fetch transaction {}: {}", hash, e),
                             }
                         }
                     }
-                    _ => {}
+                    other => {
+                        // Ignore other topics, but log once at debug
+                        tracing::debug!("Ignoring realtime topic: {}", other);
+                    }
                 }
             }
         });
@@ -247,7 +261,29 @@ impl HybridSync {
                 start_height = 0;
             }
 
-            // Full reindex from the beginning; do not fast-forward
+            // If database is empty, optionally fast-forward start to a recent window.
+            // Controlled by ARCH_FAST_FORWARD_WINDOW (set to 0 to start at block 1/genesis).
+            if last_height.is_none() {
+                let ff_window_env = std::env::var("ARCH_FAST_FORWARD_WINDOW").ok();
+                let window: i64 = ff_window_env
+                    .as_deref()
+                    .and_then(|s| s.parse::<i64>().ok())
+                    .unwrap_or(10_000);
+                if window > 0 {
+                    let recent_start = tip.saturating_sub(window);
+                    if recent_start > start_height {
+                        info!(
+                            "Empty DB detected. Fast-forwarding bulk sync start from {} to recent window {} (window={})",
+                            start_height,
+                            recent_start,
+                            window
+                        );
+                        start_height = recent_start;
+                    }
+                } else {
+                    info!("Empty DB detected. Fast-forward disabled (ARCH_FAST_FORWARD_WINDOW=0); starting from {}", start_height);
+                }
+            }
 
             info!("📈 Bulk sync starting at {} up to {}", start_height, tip);
 
@@ -258,8 +294,12 @@ impl HybridSync {
                     continue;
                 }
 
-                // Process in batches
-                let batch_size = 25;
+                // Process in batches (configurable via ARCH_BULK_BATCH_SIZE)
+                let batch_size: i64 = std::env::var("ARCH_BULK_BATCH_SIZE")
+                    .ok()
+                    .and_then(|v| v.parse::<i64>().ok())
+                    .filter(|&n| n > 0 && n <= 1000)
+                    .unwrap_or(25);
                 let end = (start_height + batch_size as i64 - 1).min(tip);
                 info!("📦 Processing blocks {}..{}", start_height, end);
 
@@ -305,17 +345,31 @@ fn extract_program_ids(data: &JsonValue, accounts_tags: Option<&[JsonValue]>) ->
             if let Some(arr) = k.as_array() {
                 let bytes: Vec<u8> = arr.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect();
                 account_keys_hex.push(hex::encode(bytes));
-            } else if let Some(s) = k.as_str() { // or hex string
-                account_keys_hex.push(s.to_string());
+            } else if let Some(s) = k.as_str() { // base58 or hex string
+                // If it's hex already, keep; otherwise try base58 decode
+                if s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() >= 2 {
+                    account_keys_hex.push(s.to_string());
+                } else if let Ok(bytes) = bs58::decode(s).into_vec() {
+                    account_keys_hex.push(hex::encode(bytes));
+                }
             }
         }
     }
 
     if let Some(msg) = data.get("message") {
-        if let Some(instructions) = msg.get("instructions").and_then(|v| v.as_array()) {
+        // Support both "instructions" and "compiled_instructions" shapes
+        let inst_array_opt = msg.get("instructions").and_then(|v| v.as_array())
+            .or_else(|| msg.get("compiled_instructions").and_then(|v| v.as_array()));
+        if let Some(instructions) = inst_array_opt {
             for ins in instructions {
                 if let Some(pid) = ins.get("program_id").and_then(|v| v.as_str()) {
-                    ids.push(pid.to_string());
+                    // normalize program_id string (hex or base58) to hex
+                    let hex_pid = if pid.chars().all(|c| c.is_ascii_hexdigit()) && pid.len() >= 2 {
+                        pid.to_string()
+                    } else if let Ok(bytes) = bs58::decode(pid).into_vec() {
+                        hex::encode(bytes)
+                    } else { pid.to_string() };
+                    ids.push(hex_pid);
                     continue;
                 }
                 if let Some(idx) = ins.get("program_id_index").and_then(|v| v.as_u64()) {
@@ -330,7 +384,13 @@ fn extract_program_ids(data: &JsonValue, accounts_tags: Option<&[JsonValue]>) ->
     if let Some(tags) = accounts_tags {
         for tag in tags {
             if let Some(pid) = tag.get("program_id").and_then(|v| v.as_str()) {
-                ids.push(pid.to_string());
+                // normalize to hex
+                let hex_pid = if pid.chars().all(|c| c.is_ascii_hexdigit()) && pid.len() >= 2 {
+                    pid.to_string()
+                } else if let Ok(bytes) = bs58::decode(pid).into_vec() {
+                    hex::encode(bytes)
+                } else { pid.to_string() };
+                ids.push(hex_pid);
             }
         }
     }
@@ -386,6 +446,7 @@ async fn process_block_via_rpc(pool: &PgPool, rpc: &Arc<ArchRpcClient>, height: 
             .bind(bitcoin_txids)
             .execute(&mut *tx)
             .await?;
+            tracing::info!("📥 Inserted/updated transaction {} at height {}", txid, height);
 
             // Extract and upsert program IDs
             let pids = extract_program_ids(&data, Some(&processed.accounts_tags));
@@ -402,6 +463,7 @@ async fn process_block_via_rpc(pool: &PgPool, rpc: &Arc<ArchRpcClient>, height: 
                 .bind(&pid)
                 .execute(&mut *tx)
                 .await?;
+                tracing::info!("📥 Upserted program {} due to tx {}", pid, txid);
 
                 sqlx::query(
                     r#"
@@ -414,6 +476,7 @@ async fn process_block_via_rpc(pool: &PgPool, rpc: &Arc<ArchRpcClient>, height: 
                 .bind(&pid)
                 .execute(&mut *tx)
                 .await?;
+                tracing::info!("🔗 Linked tx {} -> program {}", txid, pid);
             }
         }
         tx.commit().await?;
