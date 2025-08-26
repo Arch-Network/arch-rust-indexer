@@ -382,7 +382,18 @@ pub async fn get_account_transactions(
     .await
     .unwrap_or(false);
 
-    let rows = if has_participation {
+    // Only use participation if it actually has rows for this address; otherwise fallback to scanning transactions
+    let use_participation: bool = if has_participation {
+        sqlx::query_scalar(
+            r#"SELECT EXISTS(SELECT 1 FROM account_participation WHERE address_hex ILIKE $1)"#
+        )
+        .bind(&address_hex)
+        .fetch_one(&*pool)
+        .await
+        .unwrap_or(false)
+    } else { false };
+
+    let rows = if use_participation {
         sqlx::query(
             r#"
             SELECT ap.txid, ap.block_height, ap.created_at
@@ -406,7 +417,7 @@ pub async fn get_account_transactions(
                         ELSE normalize_program_id((acc.value)::text)
                     END AS acc_hex
                 FROM transactions t
-                CROSS JOIN LATERAL jsonb_array_elements(t.data->'message'->'account_keys') AS acc(value)
+                CROSS JOIN LATERAL jsonb_array_elements(COALESCE(t.data#>'{message,account_keys}', t.data#>'{message,keys}', '[]'::jsonb)) AS acc(value)
             )
             SELECT txid, block_height, created_at
             FROM accs
@@ -1293,20 +1304,39 @@ pub async fn get_transaction(
     .await {
         Ok(Some(transaction)) => Ok(Json(transaction)),
         Ok(None) => {
-            // Fallback: try RPC so we can serve transactions not yet persisted
+            // Fallback: try RPC so we can serve transactions not yet persisted.
+            // Additionally, opportunistically persist the transaction into Postgres so
+            // account participation and program links populate immediately via triggers.
             let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
             let arch_client = ArchRpcClient::new(rpc_url);
             match arch_client.get_processed_transaction(&txid).await {
                 Ok(rpc_tx) => {
-                    let now = chrono::Utc::now().naive_utc();
-                    // Synthesize a Transaction-like response so the UI can render
+                    let now = chrono::Utc::now();
+
+                    // Best-effort persist into DB (fires DB triggers on INSERT/UPDATE)
+                    let _ = sqlx::query(
+                        r#"
+                        INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at)
+                        VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                        ON CONFLICT (txid) DO UPDATE SET data = $3, status = $4, bitcoin_txids = $5
+                        "#
+                    )
+                    .bind(&txid)
+                    .bind(0i64)
+                    .bind(&rpc_tx.runtime_transaction)
+                    .bind(serde_json::to_value(&rpc_tx.status).unwrap_or(serde_json::json!({})))
+                    .bind(rpc_tx.bitcoin_txids.as_deref())
+                    .execute(&*pool)
+                    .await;
+
+                    // Synthesize a Transaction-like response so the UI can render immediately
                     let synthesized = Transaction {
                         txid,
-                        block_height: 0, // unknown until indexed
+                        block_height: 0, // unknown until fully indexed in a block
                         data: rpc_tx.runtime_transaction,
-                        status: serde_json::json!({"type":"processed"}),
-                        bitcoin_txids: None,
-                        created_at: now,
+                        status: serde_json::to_value(&rpc_tx.status).unwrap_or(serde_json::json!({"type":"processed"})),
+                        bitcoin_txids: rpc_tx.bitcoin_txids.clone(),
+                        created_at: now.naive_utc(),
                     };
                     Ok(Json(synthesized))
                 }
