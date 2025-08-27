@@ -173,6 +173,7 @@ impl HybridSync {
                                     let logs: Vec<String> = if let Some(arr) = processed.runtime_transaction.get("logs").and_then(|v| v.as_array()) {
                                         arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
                                     } else { processed.logs.clone() };
+                                    let logs_json = serde_json::to_value(&logs).unwrap_or(serde_json::Value::Array(vec![]));
                                     if let Err(e) = sqlx::query(
                                         r#"
                                         INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, logs, created_at)
@@ -184,7 +185,7 @@ impl HybridSync {
                                     .bind(&data)
                                     .bind(status)
                                     .bind(bitcoin_txids)
-                                    .bind(&logs)
+                                    .bind(&logs_json)
                                     .execute(&*pool)
                                     .await {
                                         error!("Realtime tx upsert failed: {}", e);
@@ -440,6 +441,7 @@ async fn process_block_via_rpc(pool: &PgPool, rpc: &Arc<ArchRpcClient>, height: 
             let logs: Vec<String> = if let Some(arr) = processed.runtime_transaction.get("logs").and_then(|v| v.as_array()) {
                 arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
             } else { processed.logs.clone() };
+            let logs_json = serde_json::to_value(&logs).unwrap_or(serde_json::Value::Array(vec![]));
             sqlx::query(
                 r#"
                 INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, logs, created_at)
@@ -453,7 +455,7 @@ async fn process_block_via_rpc(pool: &PgPool, rpc: &Arc<ArchRpcClient>, height: 
             .bind(&data)
             .bind(&status)
             .bind(bitcoin_txids)
-            .bind(&logs)
+            .bind(&logs_json)
             .execute(&mut *tx)
             .await?;
             tracing::info!("📥 Inserted/updated transaction {} at height {}", txid, height);
@@ -487,6 +489,123 @@ async fn process_block_via_rpc(pool: &PgPool, rpc: &Arc<ArchRpcClient>, height: 
                 .execute(&mut *tx)
                 .await?;
                 tracing::info!("🔗 Linked tx {} -> program {}", txid, pid);
+            }
+
+            // Populate account participation: account_keys and instruction.accounts
+            if let Some(message) = data.get("message") {
+                // account_keys array
+                if let Some(keys) = message.get("account_keys").and_then(|v| v.as_array()) {
+                    for k in keys {
+                        let addr_hex = if let Some(arr) = k.as_array() {
+                            let bytes: Vec<u8> = arr.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect();
+                            hex::encode(bytes)
+                        } else if let Some(s) = k.as_str() {
+                            if s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() >= 2 {
+                                s.to_string()
+                            } else if let Ok(bytes) = bs58::decode(s).into_vec() { hex::encode(bytes) } else { continue }
+                        } else { continue };
+                        sqlx::query(
+                            r#"INSERT INTO account_participation(address_hex, txid, block_height, created_at)
+                               VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+                               ON CONFLICT DO NOTHING"#
+                        )
+                        .bind(&addr_hex)
+                        .bind(&txid)
+                        .bind(height)
+                        .execute(&mut *tx)
+                        .await.ok();
+                    }
+                }
+
+                // instruction.accounts indexes
+                if let Some(instructions) = message.get("instructions").and_then(|v| v.as_array()) {
+                    if let Some(keys) = message.get("account_keys").and_then(|v| v.as_array()) {
+                        for inst in instructions {
+                            if let Some(accs) = inst.get("accounts").and_then(|v| v.as_array()) {
+                                for idx_v in accs {
+                                    if let Some(i) = idx_v.as_u64().map(|n| n as usize) {
+                                        if let Some(k) = keys.get(i) {
+                                            let addr_hex = if let Some(arr) = k.as_array() {
+                                                let bytes: Vec<u8> = arr.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect();
+                                                hex::encode(bytes)
+                                            } else if let Some(s) = k.as_str() {
+                                                if s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() >= 2 { s.to_string() } else if let Ok(bytes) = bs58::decode(s).into_vec() { hex::encode(bytes) } else { continue }
+                                            } else { continue };
+                                            sqlx::query(
+                                                r#"INSERT INTO account_participation(address_hex, txid, block_height, created_at)
+                                                   VALUES ($1, $2, $3, CURRENT_TIMESTAMP)
+                                                   ON CONFLICT DO NOTHING"#
+                                            )
+                                            .bind(&addr_hex)
+                                            .bind(&txid)
+                                            .bind(height)
+                                            .execute(&mut *tx)
+                                            .await.ok();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Token entities seeding: detect Token program instructions [acct, mint, owner]
+            if let Some(instructions) = data.get("message").and_then(|m| m.get("instructions")).and_then(|v| v.as_array()) {
+                // Find token program id in either explicit field or by name
+                for inst in instructions {
+                    let pid_str_opt = inst.get("program_id").and_then(|v| v.as_str());
+                    let program_hex = if let Some(pid_str) = pid_str_opt {
+                        if pid_str.chars().all(|c| c.is_ascii_hexdigit()) && pid_str.len() >= 2 {
+                            pid_str.to_string()
+                        } else if let Ok(bytes) = bs58::decode(pid_str).into_vec() { hex::encode(bytes) } else { continue }
+                    } else { continue };
+                    // If this looks like token program (either ours or SPL), process accounts
+                    if program_hex.len() == 64 {
+                        if let Some(accs) = inst.get("accounts").and_then(|v| v.as_array()) {
+                            // Expect [account, mint, owner] shape
+                            if accs.len() >= 3 {
+                                if let Some(keys) = data.get("message").and_then(|m| m.get("account_keys")).and_then(|v| v.as_array()) {
+                                    let idxs: Vec<usize> = accs.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect();
+                                    if idxs.len() >= 3 && idxs[0] < keys.len() && idxs[1] < keys.len() && idxs[2] < keys.len() {
+                                        let to_hex = |k: &serde_json::Value| -> Option<String> {
+                                            if let Some(arr) = k.as_array() {
+                                                Some(hex::encode(arr.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect::<Vec<u8>>()))
+                                            } else if let Some(s) = k.as_str() {
+                                                if s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() >= 2 { Some(s.to_string()) } else if let Ok(bytes) = bs58::decode(s).into_vec() { Some(hex::encode(bytes)) } else { None }
+                                            } else { None }
+                                        };
+                                        let acct_hex = to_hex(&keys[idxs[0]]);
+                                        let mint_hex = to_hex(&keys[idxs[1]]);
+                                        let owner_hex = to_hex(&keys[idxs[2]]);
+                                        if let (Some(acct), Some(mint)) = (acct_hex, mint_hex) {
+                                            // upsert token_account
+                                            sqlx::query("SELECT upsert_token_account($1, $2, $3, $4)")
+                                                .bind(&acct)
+                                                .bind(&mint)
+                                                .bind(owner_hex.as_deref())
+                                                .bind(&program_hex)
+                                                .execute(&mut *tx)
+                                                .await.ok();
+                                            // seed token_balances
+                                            sqlx::query(
+                                                r#"INSERT INTO token_balances (account_address, mint_address, balance, decimals, owner_address, program_id)
+                                                   VALUES ($1, $2, 0, 0, $3, $4)
+                                                   ON CONFLICT (account_address, mint_address) DO UPDATE SET last_updated = CURRENT_TIMESTAMP"#
+                                            )
+                                            .bind(&acct)
+                                            .bind(&mint)
+                                            .bind(owner_hex.as_deref())
+                                            .bind(&program_hex)
+                                            .execute(&mut *tx)
+                                            .await.ok();
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         tx.commit().await?;

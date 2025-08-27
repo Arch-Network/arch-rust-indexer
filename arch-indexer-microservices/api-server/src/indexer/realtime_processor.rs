@@ -319,7 +319,7 @@ impl RealtimeProcessor {
              ON CONFLICT (height) DO NOTHING",
             block.height,
             block.hash,
-            DateTime::from_timestamp(block.timestamp / 1000, 0).unwrap_or_else(|| Utc::now()),
+            convert_arch_timestamp(block.timestamp),
             block.bitcoin_block_height
         )
         .execute(&*self.pool)

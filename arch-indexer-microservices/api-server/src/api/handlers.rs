@@ -1905,6 +1905,7 @@ pub struct InstructionRow {
     pub index: usize,
     pub program_id_hex: String,
     pub program_id_base58: String,
+    pub program_name: Option<String>,
     pub accounts: Vec<String>,
     pub data_len: usize,
     pub action: Option<String>,
@@ -1938,6 +1939,7 @@ pub async fn get_transaction_instructions(
     fn u64_le(bytes: &[u8]) -> Option<u64> { if bytes.len() >= 8 { Some(u64::from_le_bytes([bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7]])) } else { None } }
 
     fn decode_instruction(program_b58: &str, program_hex: &str, data: &[u8], accounts: &[String]) -> (Option<String>, Option<serde_json::Value>) {
+        println!("program_b58: {}", program_b58);
         fn is_system_b58(s: &str) -> bool {
             if s.is_empty() { return false; }
             if s.chars().all(|c| c == '1') { return true; }
@@ -2047,10 +2049,11 @@ pub async fn get_transaction_instructions(
                 }
             }
         }
-        // Token Program (support Arch APL Token and legacy SPL Token IDs)
-        if program_b58 == pid::APL_TOKEN_PROGRAM || program_b58 == pid::SOL_SPL_TOKEN {
+        // Token Program (Arch APL Token)
+        if program_b58 == pid::APL_TOKEN_PROGRAM_BASE58 {
             if !data.is_empty() {
                 let tag = data[0];
+                println!("tag: {}", tag);
                 // 0: InitializeMint { decimals, mint_authority, freeze_authority: COption<Pubkey> }
                 if tag == 0 && data.len() >= 1 + 1 + 32 + 1 {
                     let decimals = data[1];
@@ -2077,6 +2080,19 @@ pub async fn get_transaction_instructions(
                     });
                     return (Some("Token: InitializeAccount".to_string()), Some(decoded));
                 }
+                // 2: InitializeMultisig { m: u8 } ; accounts: [multisig, signer1..signerN]
+                if tag == 2 && data.len() >= 2 {
+                    let m = data[1];
+                    let multisig = accounts.get(0).cloned();
+                    let signers: Vec<String> = if accounts.len() > 1 { accounts[1..].to_vec() } else { Vec::new() };
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "m": {"type":"u8", "data": m},
+                        "multisig": multisig,
+                        "signers": signers,
+                    });
+                    return (Some("Token: InitializeMultisig".to_string()), Some(decoded));
+                }
                 // 3: Transfer { amount: u64 }, accounts: [source, destination, authority]
                 if tag == 3 && data.len() >= 1 + 8 {
                     let amount = u64_le(&data[1..9]).unwrap_or(0);
@@ -2091,6 +2107,51 @@ pub async fn get_transaction_instructions(
                         "authority": authority,
                     });
                     return (Some("Token: Transfer".to_string()), Some(decoded));
+                }
+                // 4: Approve { amount: u64 }
+                if tag == 4 && data.len() >= 1 + 8 {
+                    let amount = u64_le(&data[1..9]).unwrap_or(0);
+                    let source = accounts.get(0).cloned();
+                    let delegate = accounts.get(2).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "amount": {"type":"u64", "data": amount},
+                        "source": source,
+                        "delegate": delegate,
+                    });
+                    return (Some("Token: Approve".to_string()), Some(decoded));
+                }
+                // 5: Revoke
+                if tag == 5 {
+                    let source = accounts.get(0).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "source": source,
+                    });
+                    return (Some("Token: Revoke".to_string()), Some(decoded));
+                }
+                // 6: SetAuthority { authority_type: u8, new_authority: COption<Pubkey> }
+                if tag == 6 && data.len() >= 2 {
+                    let authority_type = data[1];
+                    let mut idx = 2usize;
+                    let mut new_authority_str: Option<String> = None;
+                    if data.len() > idx {
+                        let flag = data[idx];
+                        idx += 1;
+                        if flag == 1 && data.len() >= idx + 32 {
+                            new_authority_str = Some(bs58::encode(&data[idx..idx+32]).into_string());
+                        }
+                    }
+                    let owned = accounts.get(0).cloned();
+                    let owner = accounts.get(1).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "authority_type": {"type":"u8", "data": authority_type},
+                        "new_authority": new_authority_str,
+                        "owned_account": owned,
+                        "current_authority": owner,
+                    });
+                    return (Some("Token: SetAuthority".to_string()), Some(decoded));
                 }
                 // 12: TransferChecked { amount: u64, decimals: u8 }
                 if tag == 12 && data.len() >= 1 + 8 + 1 {
@@ -2166,28 +2227,6 @@ pub async fn get_transaction_instructions(
                     });
                     return (Some("Token: BurnChecked".to_string()), Some(decoded));
                 }
-                // 4: Approve { amount: u64 }
-                if tag == 4 && data.len() >= 1 + 8 {
-                    let amount = u64_le(&data[1..9]).unwrap_or(0);
-                    let source = accounts.get(0).cloned();
-                    let delegate = accounts.get(2).cloned();
-                    let decoded = json!({
-                        "discriminator": {"type":"u8", "data": tag},
-                        "amount": {"type":"u64", "data": amount},
-                        "source": source,
-                        "delegate": delegate,
-                    });
-                    return (Some("Token: Approve".to_string()), Some(decoded));
-                }
-                // 5: Revoke
-                if tag == 5 {
-                    let source = accounts.get(0).cloned();
-                    let decoded = json!({
-                        "discriminator": {"type":"u8", "data": tag},
-                        "source": source,
-                    });
-                    return (Some("Token: Revoke".to_string()), Some(decoded));
-                }
                 // 7: MintTo { amount: u64 }
                 if tag == 7 && data.len() >= 1 + 8 {
                     let amount = u64_le(&data[1..9]).unwrap_or(0);
@@ -2247,19 +2286,92 @@ pub async fn get_transaction_instructions(
                     });
                     return (Some("Token: ThawAccount".to_string()), Some(decoded));
                 }
-                // 17: SyncNative (no data)
-                if tag == 17 {
+                // 16: InitializeAccount2 { owner: Pubkey }
+                if tag == 16 && data.len() >= 1 + 32 {
+                    let owner = bs58::encode(&data[1..33]).into_string();
+                    let account = accounts.get(0).cloned();
+                    let mint = accounts.get(1).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "owner": owner,
+                        "account": account,
+                        "mint": mint,
+                    });
+                    return (Some("Token: InitializeAccount2".to_string()), Some(decoded));
+                }
+                // 17: InitializeAccount3 { owner: Pubkey }
+                if tag == 17 && data.len() >= 1 + 32 {
+                    let owner = bs58::encode(&data[1..33]).into_string();
+                    let account = accounts.get(0).cloned();
+                    let mint = accounts.get(1).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "owner": owner,
+                        "account": account,
+                        "mint": mint,
+                    });
+                    return (Some("Token: InitializeAccount3".to_string()), Some(decoded));
+                }
+                // 18: InitializeMint2 { decimals, mint_authority, freeze_authority: COption<Pubkey> }
+                if tag == 18 && data.len() >= 1 + 1 + 32 + 1 {
+                    let decimals = data[1];
+                    let mint_authority = bs58::encode(&data[2..34]).into_string();
+                    let has_freeze = data[34] != 0;
+                    let mut obj = serde_json::Map::new();
+                    obj.insert("discriminator".to_string(), json!({"type":"u8", "data": tag}));
+                    obj.insert("decimals".to_string(), json!({"type":"u8", "data": decimals}));
+                    obj.insert("mint_authority".to_string(), json!(mint_authority));
+                    if has_freeze && data.len() >= 1 + 1 + 32 + 1 + 32 {
+                        obj.insert("freeze_authority".to_string(), json!(bs58::encode(&data[35..67]).into_string()));
+                    } else {
+                        obj.insert("freeze_authority".to_string(), json!(null));
+                    }
+                    return (Some("Token: InitializeMint2".to_string()), Some(serde_json::Value::Object(obj)));
+                }
+                // 19: GetAccountDataSize (no data)
+                if tag == 19 {
+                    let mint = accounts.get(0).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "mint": mint,
+                    });
+                    return (Some("Token: GetAccountDataSize".to_string()), Some(decoded));
+                }
+                // 20: InitializeImmutableOwner (no data)
+                if tag == 20 {
                     let account = accounts.get(0).cloned();
                     let decoded = json!({
                         "discriminator": {"type":"u8", "data": tag},
                         "account": account,
                     });
-                    return (Some("Token: SyncNative".to_string()), Some(decoded));
+                    return (Some("Token: InitializeImmutableOwner".to_string()), Some(decoded));
+                }
+                // 21: AmountToUiAmount { amount: u64 }
+                if tag == 21 && data.len() >= 1 + 8 {
+                    let amount = u64_le(&data[1..9]).unwrap_or(0);
+                    let mint = accounts.get(0).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "amount": {"type":"u64", "data": amount},
+                        "mint": mint,
+                    });
+                    return (Some("Token: AmountToUiAmount".to_string()), Some(decoded));
+                }
+                // 22: UiAmountToAmount { ui_amount: string }
+                if tag == 22 && data.len() >= 1 {
+                    let ui_amount = match std::str::from_utf8(&data[1..]) { Ok(s) => s.to_string(), Err(_) => String::new() };
+                    let mint = accounts.get(0).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "ui_amount": ui_amount,
+                        "mint": mint,
+                    });
+                    return (Some("Token: UiAmountToAmount".to_string()), Some(decoded));
                 }
             }
         }
         // Associated Token Account Program (Arch). Instruction has no data
-        if program_b58 == pid::APL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM && data.is_empty() {
+        if program_b58 == pid::APL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_BASE58 && data.is_empty() {
             let funder = accounts.get(0).cloned();
             let associated_account = accounts.get(1).cloned();
             let wallet = accounts.get(2).cloned();
@@ -2296,13 +2408,15 @@ pub async fn get_transaction_instructions(
         } else { None };
         let program_hex = program_val.as_ref().map(|v| key_to_hex(v)).unwrap_or_default();
         let program_b58 = program_val.as_ref().map(|v| key_to_base58(v)).unwrap_or_default();
+        let program_name = super::program_ids::get_program_name(&program_b58).map(|s| s.to_string());
         let acc_idx: Vec<usize> = ins.get("accounts").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as usize)).collect()).unwrap_or_default();
         let accounts: Vec<String> = acc_idx.into_iter().filter_map(|i| keys.get(i).map(|k| key_to_base58(k))).collect();
         let data_vec: Vec<u8> = ins.get("data").and_then(|d| d.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as u8)).collect()).unwrap_or_default();
         let data_len = data_vec.len();
         let data_hex = hex::encode(&data_vec);
         let (action, decoded) = decode_instruction(&program_b58, &program_hex, &data_vec, &accounts);
-        out.push(InstructionRow { index: idx, program_id_hex: program_hex, program_id_base58: program_b58, accounts, data_len, action, decoded, data_hex });
+        println!("action: {:?}", action);
+        out.push(InstructionRow { index: idx, program_id_hex: program_hex, program_id_base58: program_b58, program_name, accounts, data_len, action, decoded, data_hex });
     }
 
     Ok(Json(out))
@@ -2745,14 +2859,13 @@ pub async fn get_transactions_by_program(
 pub async fn get_program_leaderboard(
     State(pool): State<Arc<PgPool>>,
 ) -> Result<Json<Vec<ProgramStats>>, ApiError> {
-    let programs = sqlx::query_as!(
-        ProgramStats,
+    let programs = sqlx::query_as::<_, ProgramStats>(
         r#"
         SELECT 
             program_id,
             transaction_count,
-            first_seen_at as "first_seen_at!: DateTime<Utc>",
-            last_seen_at as "last_seen_at!: DateTime<Utc>"
+            first_seen_at,
+            last_seen_at
         FROM programs
         ORDER BY transaction_count DESC
         LIMIT 10

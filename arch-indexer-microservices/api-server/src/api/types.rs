@@ -70,7 +70,7 @@ pub struct SyncStatus {
     pub average_block_time: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, sqlx::FromRow)]
 pub struct ProgramStats {
     pub program_id: String,
     pub transaction_count: i64,

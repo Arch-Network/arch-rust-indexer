@@ -5,11 +5,12 @@ import Layout from '../../components/Layout';
 import styles from '../../styles/Home.module.css';
 import dynamic from 'next/dynamic';
 import Button from '../../components/Button';
+import AccountChips from '../../components/AccountChips';
 const JsonViewer = dynamic(() => import('../../components/JsonViewer'), { ssr: false });
 
 type Tx = { txid: string; block_height: number; status?: any; created_at: string; data?: any };
 type Participant = { address_hex: string; address_base58: string; is_signer: boolean; is_writable: boolean; is_readonly: boolean; is_fee_payer: boolean };
-type Instruction = { index: number; program_id_hex: string; program_id_base58: string; accounts: string[]; data_len: number; action?: string | null; decoded?: any; data_hex?: string };
+type Instruction = { index: number; program_id_hex: string; program_id_base58: string; program_name?: string | null; accounts: string[]; data_len: number; action?: string | null; decoded?: any; data_hex?: string };
 type Execution = { status: any; logs: string[]; bitcoin_txid?: string | null; rollback_status?: any; compute_units_consumed?: number | null; runtime_transaction?: any };
 
 export default function TxDetailPage() {
@@ -167,7 +168,7 @@ export default function TxDetailPage() {
                       <div className={styles.instructionMeta}>
                         <span className={styles.badge}>#{ins.index}</span>
                         <Link href={`/programs/${ins.program_id_hex}`} className={styles.hashButton}>
-                          {ins.program_id_base58 || ins.program_id_hex || 'Unknown program'}
+                          {ins.program_name || ins.program_id_base58 || ins.program_id_hex || 'Unknown program'}
                         </Link>
                         {ins.action && <span className={styles.statusInfo}>{ins.action}</span>}
                       </div>
@@ -210,9 +211,7 @@ export default function TxDetailPage() {
 
                     <div style={{ marginTop: 8 }}>
                       <span className={styles.muted} style={{ marginRight: 6 }}>Accounts:</span>
-                      {ins.accounts.map((a, i) => (
-                        <Link key={i} href={`/accounts/${a}`} className={styles.hashButton} style={{ marginRight: 6 }}>{a}</Link>
-                      ))}
+                      <AccountChips accounts={ins.accounts} />
                     </div>
                     {/* Summary line for common decoded fields */}
                     {ins.decoded && (
