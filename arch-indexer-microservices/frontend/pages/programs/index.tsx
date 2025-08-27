@@ -61,32 +61,32 @@ export default function ProgramsPage() {
         {loading && <div className={styles.loading}>Loading…</div>}
         {error && <div className={styles.statusOther}>{error}</div>}
         {!loading && !error && (
-          <table className={styles.transactionsTable}>
-            <thead>
-              <tr>
-                <th>Name</th>
-                <th>Program ID (hex)</th>
-                <th>Program ID (base58)</th>
-                <th>Transactions</th>
-                <th>First Seen</th>
-                <th>Last Seen</th>
-              </tr>
-            </thead>
-            <tbody>
-              {filtered.map((p: any) => (
-                <tr key={p.program_id_hex || p.program_id}>
-                  <td>{p.display_name || '—'}</td>
-                  <td style={{ wordBreak: 'break-all' }}>
-                    <a className={styles.hashButton} href={`/programs/${p.program_id_hex || p.program_id}`}>{p.program_id_hex || p.program_id}</a>
-                  </td>
-                  <td style={{ wordBreak: 'break-all' }}>{p.program_id_base58 || ''}</td>
-                  <td>{p.transaction_count}</td>
-                  <td>{p.first_seen_at ? new Date(p.first_seen_at).toLocaleString() : '—'}</td>
-                  <td>{p.last_seen_at ? new Date(p.last_seen_at).toLocaleString() : '—'}</td>
+            <table className={styles.transactionsTable}>
+              <thead>
+                <tr>
+                  <th>Name</th>
+                  <th>Program ID (hex)</th>
+                  <th>Program ID (base58)</th>
+                  <th>Transactions</th>
+                  <th>First Seen</th>
+                  <th>Last Seen</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {filtered.map((p: any) => (
+                  <tr key={p.program_id_hex || p.program_id}>
+                    <td>{p.display_name || '—'}</td>
+                    <td style={{ wordBreak: 'break-all' }}>
+                      <a className={styles.hashButton} href={`/programs/${p.program_id_hex || p.program_id}`}>{p.program_id_hex || p.program_id}</a>
+                    </td>
+                    <td style={{ wordBreak: 'break-all' }}>{p.program_id_base58 || ''}</td>
+                    <td>{p.transaction_count}</td>
+                    <td>{p.first_seen_at ? new Date(p.first_seen_at).toLocaleString() : '—'}</td>
+                    <td>{p.last_seen_at ? new Date(p.last_seen_at).toLocaleString() : '—'}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
         )}
         {!loading && !error && (
           <Pagination page={page} pageSize={pageSize} total={total} onPageChange={setPage} />

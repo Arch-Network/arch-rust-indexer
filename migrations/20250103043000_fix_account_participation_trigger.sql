@@ -28,3 +28,4 @@ DROP TRIGGER IF EXISTS account_participation_trigger ON transactions;
 CREATE TRIGGER account_participation_trigger
 AFTER INSERT OR UPDATE ON transactions
 FOR EACH ROW EXECUTE FUNCTION populate_account_participation();
+

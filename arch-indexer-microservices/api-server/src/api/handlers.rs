@@ -537,6 +537,98 @@ pub async fn get_account_transactions(
 }
 
 #[derive(serde::Serialize)]
+pub struct TokenLeaderboardRow {
+    pub mint_address: String,
+    pub program_id: String,
+    pub holders: i64,
+    pub total_balance: String,
+    pub decimals: i32,
+    pub supply: Option<String>,
+    pub mint_authority: Option<String>,
+}
+
+pub async fn get_token_leaderboard(
+    State(pool): State<Arc<PgPool>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let limit = params.get("limit").and_then(|v| v.parse::<i64>().ok()).map(|v| v.min(200)).unwrap_or(50);
+    let page = params.get("page").and_then(|v| v.parse::<i64>().ok()).unwrap_or(1).max(1);
+    let offset = (page - 1) * limit;
+    let authority = params.get("authority").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
+
+    // Aggregate holders and balances per mint
+    let base_sql = r#"
+        WITH agg AS (
+            SELECT 
+                tb.mint_address,
+                COALESCE(MAX(tb.program_id), '') AS program_id,
+                COUNT(DISTINCT tb.account_address) AS holders,
+                SUM(tb.balance) AS total_balance,
+                COALESCE(MAX(tb.decimals), 0) AS decimals
+            FROM token_balances tb
+            GROUP BY tb.mint_address
+        )
+        SELECT 
+            a.mint_address,
+            a.program_id,
+            a.holders,
+            a.total_balance,
+            a.decimals,
+            tm.supply,
+            tm.mint_authority
+        FROM agg a
+        LEFT JOIN token_mints tm ON tm.mint_address = a.mint_address
+    "#;
+    let sql = if authority.is_some() {
+        format!("{} WHERE tm.mint_authority = $3 ORDER BY a.holders DESC, a.total_balance DESC LIMIT $1 OFFSET $2", base_sql)
+    } else {
+        format!("{} ORDER BY a.holders DESC, a.total_balance DESC LIMIT $1 OFFSET $2", base_sql)
+    };
+
+    let mut q = sqlx::query(&sql)
+        .bind(limit)
+        .bind(offset);
+    if let Some(a) = &authority { q = q.bind(a); }
+    let rows = q.fetch_all(&*pool)
+    .await
+    .map_err(ApiError::Database)?;
+
+    let items: Vec<TokenLeaderboardRow> = rows.into_iter().map(|r| TokenLeaderboardRow {
+        mint_address: r.get::<String, _>("mint_address"),
+        program_id: r.get::<String, _>("program_id"),
+        holders: r.get::<i64, _>("holders"),
+        total_balance: {
+            // balance is NUMERIC, fetch as String to avoid precision loss
+            let v: String = r.get("total_balance"); v
+        },
+        decimals: r.get::<i32, _>("decimals"),
+        supply: r.try_get::<Option<String>, _>("supply").ok().flatten(),
+        mint_authority: r.try_get::<Option<String>, _>("mint_authority").ok().flatten(),
+    }).collect();
+
+    // Total distinct mints
+    let total: i64 = if let Some(a) = &authority {
+        sqlx::query_scalar("SELECT COUNT(*) FROM token_mints WHERE mint_authority = $1")
+            .bind(a)
+            .fetch_one(&*pool)
+            .await
+            .unwrap_or(0)
+    } else {
+        sqlx::query_scalar("SELECT COUNT(DISTINCT mint_address) FROM token_balances")
+            .fetch_one(&*pool)
+            .await
+            .unwrap_or(0)
+    };
+
+    Ok(Json(json!({
+        "page": page,
+        "limit": limit,
+        "total": total,
+        "tokens": items
+    })))
+}
+
+#[derive(serde::Serialize)]
 pub struct AccountProgramRow {
     pub program_id: String,
     pub transaction_count: i64,
@@ -1773,6 +1865,59 @@ pub async fn get_transaction_instructions(
                         "authority": authority,
                     });
                     return (Some("Token: TransferChecked".to_string()), Some(decoded));
+                }
+                // 13: ApproveChecked { amount: u64, decimals: u8 }
+                if tag == 13 && data.len() >= 1 + 8 + 1 {
+                    let amount = u64_le(&data[1..9]).unwrap_or(0);
+                    let decimals = data[9];
+                    let source = accounts.get(0).cloned();
+                    let mint = accounts.get(1).cloned();
+                    let delegate = accounts.get(2).cloned();
+                    let owner = accounts.get(3).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "amount": {"type":"u64", "data": amount},
+                        "decimals": {"type":"u8", "data": decimals},
+                        "source": source,
+                        "mint": mint,
+                        "delegate": delegate,
+                        "owner": owner,
+                    });
+                    return (Some("Token: ApproveChecked".to_string()), Some(decoded));
+                }
+                // 14: MintToChecked { amount: u64, decimals: u8 }
+                if tag == 14 && data.len() >= 1 + 8 + 1 {
+                    let amount = u64_le(&data[1..9]).unwrap_or(0);
+                    let decimals = data[9];
+                    let mint = accounts.get(0).cloned();
+                    let destination = accounts.get(1).cloned();
+                    let authority = accounts.get(2).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "amount": {"type":"u64", "data": amount},
+                        "decimals": {"type":"u8", "data": decimals},
+                        "mint": mint,
+                        "destination": destination,
+                        "authority": authority,
+                    });
+                    return (Some("Token: MintToChecked".to_string()), Some(decoded));
+                }
+                // 15: BurnChecked { amount: u64, decimals: u8 }
+                if tag == 15 && data.len() >= 1 + 8 + 1 {
+                    let amount = u64_le(&data[1..9]).unwrap_or(0);
+                    let decimals = data[9];
+                    let account = accounts.get(0).cloned();
+                    let mint = accounts.get(1).cloned();
+                    let owner = accounts.get(2).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u8", "data": tag},
+                        "amount": {"type":"u64", "data": amount},
+                        "decimals": {"type":"u8", "data": decimals},
+                        "account": account,
+                        "mint": mint,
+                        "owner": owner,
+                    });
+                    return (Some("Token: BurnChecked".to_string()), Some(decoded));
                 }
                 // 4: Approve { amount: u64 }
                 if tag == 4 && data.len() >= 1 + 8 {

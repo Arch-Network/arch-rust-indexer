@@ -61,3 +61,4 @@ export default function Button({ variant = 'primary', size = 'md', style, disabl
     <button {...rest} style={finalStyle} disabled={disabled} />
   );
 }
+

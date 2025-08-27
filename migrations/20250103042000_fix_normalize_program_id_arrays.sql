@@ -46,3 +46,4 @@ BEGIN
     RETURN normalize_program_id(input_id::text);
 END;
 $$ LANGUAGE plpgsql IMMUTABLE;
+

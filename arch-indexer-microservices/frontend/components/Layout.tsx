@@ -20,6 +20,7 @@ export default function Layout({ rightActions, children }: LayoutProps) {
             <Link href="/blocks">Blocks</Link>
             <Link href="/tx">Transactions</Link>
             <Link href="/programs">Programs</Link>
+            <Link href="/tokens">Tokens</Link>
           </nav>
         </div>
         <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>

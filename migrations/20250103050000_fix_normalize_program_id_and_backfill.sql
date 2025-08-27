@@ -91,3 +91,4 @@ WHERE normalize_program_id(acc.value) IS NOT NULL
 ON CONFLICT (address_hex, txid) DO NOTHING;
 
 COMMIT;
+
