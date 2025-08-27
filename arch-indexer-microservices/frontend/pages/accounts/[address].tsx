@@ -18,7 +18,7 @@ type TxRow = {
   created_at: string;
 };
 
-type ProgramRow = { program_id: string; transaction_count: number };
+type ProgramRow = { program_id: string; program_id_base58?: string; transaction_count: number };
 
 type TokenBalance = {
   mint_address: string;
@@ -213,7 +213,9 @@ export default function AccountPage() {
                 {programs.map((p) => (
                   <tr key={p.program_id}>
                     <td style={{ padding: '8px 4px', fontFamily: 'monospace' }}>
-                      <a href={`/programs/${p.program_id}`} style={{ color: '#5cf' }}>{p.program_id}</a>
+                      <a href={`/programs/${p.program_id_base58 || p.program_id}`} style={{ color: '#5cf' }}>
+                        {p.program_id_base58 || p.program_id}
+                      </a>
                     </td>
                     <td style={{ padding: '8px 4px' }}>{(p.transaction_count ?? 0).toLocaleString()}</td>
                   </tr>

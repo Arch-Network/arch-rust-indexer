@@ -556,68 +556,134 @@ pub async fn get_token_leaderboard(
     let offset = (page - 1) * limit;
     let authority = params.get("authority").map(|s| s.trim().to_string()).filter(|s| !s.is_empty());
 
-    // Aggregate holders and balances per mint
-    let base_sql = r#"
-        WITH agg AS (
-            SELECT 
-                tb.mint_address,
-                COALESCE(MAX(tb.program_id), '') AS program_id,
-                COUNT(DISTINCT tb.account_address) AS holders,
-                SUM(tb.balance) AS total_balance,
-                COALESCE(MAX(tb.decimals), 0) AS decimals
-            FROM token_balances tb
-            GROUP BY tb.mint_address
-        )
-        SELECT 
-            a.mint_address,
-            a.program_id,
-            a.holders,
-            a.total_balance,
-            a.decimals,
-            tm.supply,
-            tm.mint_authority
-        FROM agg a
-        LEFT JOIN token_mints tm ON tm.mint_address = a.mint_address
-    "#;
-    let sql = if authority.is_some() {
-        format!("{} WHERE tm.mint_authority = $3 ORDER BY a.holders DESC, a.total_balance DESC LIMIT $1 OFFSET $2", base_sql)
-    } else {
-        format!("{} ORDER BY a.holders DESC, a.total_balance DESC LIMIT $1 OFFSET $2", base_sql)
-    };
-
-    let mut q = sqlx::query(&sql)
-        .bind(limit)
-        .bind(offset);
-    if let Some(a) = &authority { q = q.bind(a); }
-    let rows = q.fetch_all(&*pool)
+    // Guard: required tables must exist, otherwise return empty result gracefully
+    let has_token_balances: bool = sqlx::query_scalar(
+        r#"SELECT to_regclass('public.token_balances') IS NOT NULL"#
+    )
+    .fetch_one(&*pool)
     .await
-    .map_err(ApiError::Database)?;
+    .unwrap_or(false);
+    if !has_token_balances {
+        return Ok(Json(json!({
+            "page": page,
+            "limit": limit,
+            "total": 0i64,
+            "tokens": []
+        })));
+    }
+    let has_token_mints: bool = sqlx::query_scalar(
+        r#"SELECT to_regclass('public.token_mints') IS NOT NULL"#
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap_or(false);
 
-    let items: Vec<TokenLeaderboardRow> = rows.into_iter().map(|r| TokenLeaderboardRow {
-        mint_address: r.get::<String, _>("mint_address"),
-        program_id: r.get::<String, _>("program_id"),
-        holders: r.get::<i64, _>("holders"),
-        total_balance: {
-            // balance is NUMERIC, fetch as String to avoid precision loss
-            let v: String = r.get("total_balance"); v
-        },
-        decimals: r.get::<i32, _>("decimals"),
-        supply: r.try_get::<Option<String>, _>("supply").ok().flatten(),
-        mint_authority: r.try_get::<Option<String>, _>("mint_authority").ok().flatten(),
-    }).collect();
+    // Aggregate holders and balances per mint from indexed tables
+    let (items, total): (Vec<TokenLeaderboardRow>, i64) = if has_token_mints {
+        let base_sql = r#"
+            WITH agg AS (
+                SELECT 
+                    tb.mint_address,
+                    COALESCE(MAX(tb.program_id), '') AS program_id,
+                    COUNT(DISTINCT tb.account_address) AS holders,
+                    SUM(tb.balance)::text AS total_balance,
+                    COALESCE(MAX(tb.decimals), 0) AS decimals
+                FROM token_balances tb
+                GROUP BY tb.mint_address
+            )
+            SELECT 
+                a.mint_address,
+                a.program_id,
+                a.holders,
+                a.total_balance,
+                a.decimals,
+                tm.supply,
+                tm.mint_authority
+            FROM agg a
+            LEFT JOIN token_mints tm ON tm.mint_address = a.mint_address
+            WHERE COALESCE(tm.program_id, a.program_id) IN (
+                normalize_program_id('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+                normalize_program_id('7ZMyUmgbNckx7G5BCrdmX2XUasjDAk5uhcMpDbUDxHQ3')
+            )
+        "#;
+        let sql = if authority.is_some() {
+            format!("{} AND tm.mint_authority = $3 ORDER BY a.holders DESC, a.total_balance DESC LIMIT $1 OFFSET $2", base_sql)
+        } else {
+            format!("{} ORDER BY a.holders DESC, a.total_balance DESC LIMIT $1 OFFSET $2", base_sql)
+        };
 
-    // Total distinct mints
-    let total: i64 = if let Some(a) = &authority {
-        sqlx::query_scalar("SELECT COUNT(*) FROM token_mints WHERE mint_authority = $1")
-            .bind(a)
-            .fetch_one(&*pool)
-            .await
-            .unwrap_or(0)
+        let mut q = sqlx::query(&sql)
+            .bind(limit)
+            .bind(offset);
+        if let Some(a) = &authority { q = q.bind(a); }
+        let rows = q.fetch_all(&*pool)
+        .await
+        .map_err(ApiError::Database)?;
+
+        let items: Vec<TokenLeaderboardRow> = rows.into_iter().map(|r| TokenLeaderboardRow {
+            mint_address: r.get::<String, _>("mint_address"),
+            program_id: r.get::<String, _>("program_id"),
+            holders: r.get::<i64, _>("holders"),
+            total_balance: { let v: String = r.get("total_balance"); v },
+            decimals: r.get::<i32, _>("decimals"),
+            supply: r.try_get::<Option<String>, _>("supply").ok().flatten(),
+            mint_authority: r.try_get::<Option<String>, _>("mint_authority").ok().flatten(),
+        }).collect();
+
+        let total: i64 = if let Some(a) = &authority {
+            sqlx::query_scalar("SELECT COUNT(*) FROM token_mints WHERE mint_authority = $1")
+                .bind(a)
+                .fetch_one(&*pool)
+                .await
+                .unwrap_or(0)
+        } else {
+            sqlx::query_scalar("SELECT COUNT(DISTINCT mint_address) FROM token_balances")
+                .fetch_one(&*pool)
+                .await
+                .unwrap_or(0)
+        };
+        (items, total)
     } else {
-        sqlx::query_scalar("SELECT COUNT(DISTINCT mint_address) FROM token_balances")
+        // token_mints doesn't exist yet; return aggregated balances without join, ignore authority filter
+        let sql = r#"
+            WITH agg AS (
+                SELECT 
+                    tb.mint_address,
+                    COALESCE(MAX(tb.program_id), '') AS program_id,
+                    COUNT(DISTINCT tb.account_address) AS holders,
+                    SUM(tb.balance)::text AS total_balance,
+                    COALESCE(MAX(tb.decimals), 0) AS decimals
+                FROM token_balances tb
+                GROUP BY tb.mint_address
+            )
+            SELECT * FROM agg a
+            WHERE a.program_id IN (
+                normalize_program_id('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
+                normalize_program_id('7ZMyUmgbNckx7G5BCrdmX2XUasjDAk5uhcMpDbUDxHQ3')
+            )
+            ORDER BY a.holders DESC, a.total_balance DESC
+            LIMIT $1 OFFSET $2
+        "#;
+        let rows = sqlx::query(sql)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&*pool)
+            .await
+            .map_err(ApiError::Database)?;
+        let items: Vec<TokenLeaderboardRow> = rows.into_iter().map(|r| TokenLeaderboardRow {
+            mint_address: r.get::<String, _>("mint_address"),
+            program_id: r.get::<String, _>("program_id"),
+            holders: r.get::<i64, _>("holders"),
+            total_balance: { let v: String = r.get("total_balance"); v },
+            decimals: r.get::<i32, _>("decimals"),
+            supply: None,
+            mint_authority: None,
+        }).collect();
+        let total: i64 = sqlx::query_scalar("SELECT COUNT(DISTINCT mint_address) FROM token_balances")
             .fetch_one(&*pool)
             .await
-            .unwrap_or(0)
+            .unwrap_or(0);
+        (items, total)
     };
 
     Ok(Json(json!({
@@ -631,6 +697,7 @@ pub async fn get_token_leaderboard(
 #[derive(serde::Serialize)]
 pub struct AccountProgramRow {
     pub program_id: String,
+    pub program_id_base58: String,
     pub transaction_count: i64,
 }
 
@@ -706,9 +773,14 @@ pub async fn get_account_programs(
             .await
             .map_err(|e| { error!("get_account_programs derived fallback error: {:?}", e); ApiError::Database(e) })?
     };
-    let mut out: Vec<AccountProgramRow> = rows.into_iter().map(|r| AccountProgramRow {
-        program_id: r.get::<String,_>("program_id"),
-        transaction_count: r.get::<i64,_>("cnt"),
+    let mut out: Vec<AccountProgramRow> = rows.into_iter().map(|r| {
+        let pid_hex: String = r.get::<String,_>("program_id");
+        let pid_b58: String = bs58::encode(hex::decode(&pid_hex).unwrap_or_default()).into_string();
+        AccountProgramRow {
+            program_id: pid_hex,
+            program_id_base58: pid_b58,
+            transaction_count: r.get::<i64,_>("cnt"),
+        }
     }).collect();
 
     if out.is_empty() {
@@ -730,8 +802,11 @@ pub async fn get_account_programs(
         .unwrap_or(0);
 
         if total_for_acct > 0 {
+            let sys_hex = "0000000000000000000000000000000000000000000000000000000000000001".to_string();
+            let sys_b58 = bs58::encode(hex::decode(&sys_hex).unwrap_or_default()).into_string();
             out.push(AccountProgramRow {
-                program_id: "0000000000000000000000000000000000000000000000000000000000000001".to_string(),
+                program_id: sys_hex,
+                program_id_base58: sys_b58,
                 transaction_count: total_for_acct,
             });
         }
