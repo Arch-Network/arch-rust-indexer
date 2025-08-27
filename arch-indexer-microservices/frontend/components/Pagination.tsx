@@ -1,4 +1,5 @@
 import React from 'react';
+import Button from './Button';
 
 type Props = {
   page: number; // 1-indexed
@@ -27,21 +28,23 @@ export default function Pagination({ page, pageSize, total, onPageChange }: Prop
 
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12 }}>
-      <button disabled={!canPrev} onClick={() => goto(1)} style={btn}>« First</button>
-      <button disabled={!canPrev} onClick={() => goto(clampedPage - 1)} style={btn}>‹ Prev</button>
+      <Button size="sm" variant="secondary" disabled={!canPrev} onClick={() => goto(1)}>« First</Button>
+      <Button size="sm" variant="secondary" disabled={!canPrev} onClick={() => goto(clampedPage - 1)}>‹ Prev</Button>
       <div style={{ display: 'flex', gap: 6 }}>
         {pages.map((p) => (
-          <button
+          <Button
             key={p}
+            size="sm"
+            variant={p === clampedPage ? 'primary' : 'secondary'}
+            style={p === clampedPage ? { borderColor: 'var(--accent)', color: 'var(--accent)', fontWeight: 700 } : undefined}
             onClick={() => goto(p)}
-            style={p === clampedPage ? { ...btn, ...btnActive } : btn}
           >
             {p}
-          </button>
+          </Button>
         ))}
       </div>
-      <button disabled={!canNext} onClick={() => goto(clampedPage + 1)} style={btn}>Next ›</button>
-      <button disabled={!canNext} onClick={() => goto(totalPages)} style={btn}>Last »</button>
+      <Button size="sm" variant="secondary" disabled={!canNext} onClick={() => goto(clampedPage + 1)}>Next ›</Button>
+      <Button size="sm" variant="secondary" disabled={!canNext} onClick={() => goto(totalPages)}>Last »</Button>
       <span style={{ marginLeft: 8, color: 'var(--muted)', fontSize: 12 }}>
         Page {clampedPage} / {totalPages} · {total.toLocaleString()} items
       </span>
@@ -49,17 +52,4 @@ export default function Pagination({ page, pageSize, total, onPageChange }: Prop
   );
 }
 
-const btn: React.CSSProperties = {
-  background: 'var(--panel)',
-  color: 'var(--text)',
-  border: '1px solid rgba(255,255,255,0.12)',
-  padding: '6px 10px',
-  fontSize: 12,
-  cursor: 'pointer',
-};
-
-const btnActive: React.CSSProperties = {
-  borderColor: 'var(--accent)',
-  color: 'var(--accent)',
-  fontWeight: 700,
-};
+// deprecated local button styles replaced by shared Button component

@@ -9,6 +9,7 @@ type AccountSummary = {
   first_seen: string | null;
   last_seen: string | null;
   transaction_count: number;
+  lamports_balance?: number | null;
 };
 
 type TxRow = {
@@ -124,6 +125,10 @@ export default function AccountPage() {
           <div style={{ border: '1px solid #222', borderRadius: 8, padding: 12 }}>
             <div style={{ opacity: 0.7, fontSize: 12 }}>Transactions</div>
             <div>{(summary.transaction_count ?? 0).toLocaleString()}</div>
+          </div>
+          <div style={{ border: '1px solid #222', borderRadius: 8, padding: 12 }}>
+            <div style={{ opacity: 0.7, fontSize: 12 }}>Lamports (computed)</div>
+            <div>{(summary.lamports_balance ?? 0).toLocaleString()}</div>
           </div>
           <div style={{ border: '1px solid #222', borderRadius: 8, padding: 12 }}>
             <div style={{ opacity: 0.7, fontSize: 12 }}>Address (hex)</div>

@@ -299,6 +299,7 @@ pub struct AccountSummary {
     pub first_seen: Option<DateTime<Utc>>,
     pub last_seen: Option<DateTime<Utc>>,
     pub transaction_count: i64,
+    pub lamports_balance: Option<i128>,
 }
 
 pub async fn get_account_summary(
@@ -356,13 +357,102 @@ pub async fn get_account_summary(
         )
     } else { (None, None, 0) };
 
+    // Opportunistically compute lamports balance by scanning system transfers involving this account
+    let lamports_balance = compute_account_lamports_balance(&*pool, &address, &address_hex).await.ok();
+
     Ok(Json(AccountSummary {
         address,
         address_hex,
         first_seen,
         last_seen,
         transaction_count: tx_count,
+        lamports_balance,
     }))
+}
+
+async fn compute_account_lamports_balance(pool: &PgPool, address_b58: &str, address_hex: &str) -> Result<i128, ApiError> {
+    // Pull a reasonable window of transactions that reference this account
+    let rows = sqlx::query(
+        r#"
+        WITH accs AS (
+            SELECT t.txid, t.created_at, t.data
+            FROM transactions t
+            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(t.data#>'{message,account_keys}', t.data#>'{message,keys}', '[]'::jsonb)) AS acc(value)
+            WHERE CASE 
+                WHEN jsonb_typeof(acc.value) = 'string' THEN normalize_program_id(trim(both '"' from (acc.value)::text))
+                ELSE normalize_program_id((acc.value)::text)
+            END ILIKE $1
+        )
+        SELECT data FROM accs
+        ORDER BY created_at ASC
+        LIMIT 5000
+        "#
+    )
+    .bind(address_hex)
+    .fetch_all(pool)
+    .await
+    .map_err(ApiError::Database)?;
+
+    fn u32_le(bytes: &[u8]) -> Option<u32> { if bytes.len() >= 4 { Some(u32::from_le_bytes([bytes[0],bytes[1],bytes[2],bytes[3]])) } else { None } }
+    fn u64_le(bytes: &[u8]) -> Option<u64> { if bytes.len() >= 8 { Some(u64::from_le_bytes([bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7]])) } else { None } }
+
+    fn is_system_b58(s: &str) -> bool {
+        if s.is_empty() { return false; }
+        if s.chars().all(|c| c == '1') { return true; }
+        let ones = "111111111111111111111111111111"; // 30 ones prefix
+        s.starts_with(ones) && s.ends_with('2')
+    }
+
+    let mut balance_delta: i128 = 0;
+    for row in rows {
+        let data: serde_json::Value = row.get("data");
+        let message = if let Some(m) = data.get("message") { m } else { continue };
+        let keys = if let Some(a) = message.get("account_keys").and_then(|a| a.as_array()) { a } else { continue };
+        let instructions = if let Some(a) = message.get("instructions").and_then(|a| a.as_array()) { a } else { continue };
+
+        // Resolve base58 accounts for quick comparisons
+        let keys_b58: Vec<String> = keys.iter().map(|k| key_to_base58(k)).collect();
+
+        for ins in instructions {
+            // Determine program id for instruction
+            let program_val = if let Some(v) = ins.get("program_id") {
+                Some(v.clone())
+            } else if let Some(ix) = ins.get("program_id_index").and_then(|v| v.as_i64()) {
+                keys.get(ix as usize).cloned()
+            } else { None };
+            let program_hex = program_val.as_ref().map(|v| key_to_hex(v)).unwrap_or_default();
+            let program_b58 = program_val.as_ref().map(|v| key_to_base58(v)).unwrap_or_default();
+
+            let acc_idx: Vec<usize> = ins.get("accounts").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as usize)).collect()).unwrap_or_default();
+            let accounts_b58: Vec<String> = acc_idx.iter().filter_map(|i| keys_b58.get(*i)).cloned().collect();
+            let data_vec: Vec<u8> = ins.get("data").and_then(|d| d.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as u8)).collect()).unwrap_or_default();
+
+            // Only consider System Program transfers
+            let is_system = is_system_b58(&program_b58)
+                || program_hex.eq_ignore_ascii_case("0000000000000000000000000000000000000000000000000000000000000000")
+                || program_hex.eq_ignore_ascii_case("0000000000000000000000000000000000000000000000000000000000000001");
+            if !is_system || data_vec.len() < 4 { continue; }
+
+            let tag = u32_le(&data_vec[0..4]).unwrap_or(9999);
+            if (tag == 2 || tag == 4) && data_vec.len() >= 12 && accounts_b58.len() >= 2 {
+                let lamports = u64_le(&data_vec[4..12]).unwrap_or(0) as i128;
+                let src = accounts_b58.get(0);
+                let dst = accounts_b58.get(1);
+                if let Some(d) = dst { if d == address_b58 { balance_delta += lamports; continue; } }
+                if let Some(s) = src { if s == address_b58 { balance_delta -= lamports; continue; } }
+            }
+            // Fallback: exactly 12 bytes payload treated as transfer
+            if data_vec.len() == 12 && accounts_b58.len() >= 2 {
+                let lamports = u64_le(&data_vec[4..12]).unwrap_or(0) as i128;
+                let src = accounts_b58.get(0);
+                let dst = accounts_b58.get(1);
+                if let Some(d) = dst { if d == address_b58 { balance_delta += lamports; continue; } }
+                if let Some(s) = src { if s == address_b58 { balance_delta -= lamports; continue; } }
+            }
+        }
+    }
+
+    Ok(balance_delta)
 }
 
 pub async fn get_account_transactions(

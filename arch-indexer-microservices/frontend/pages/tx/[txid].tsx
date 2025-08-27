@@ -4,6 +4,7 @@ import Link from 'next/link';
 import Layout from '../../components/Layout';
 import styles from '../../styles/Home.module.css';
 import dynamic from 'next/dynamic';
+import Button from '../../components/Button';
 const JsonViewer = dynamic(() => import('../../components/JsonViewer'), { ssr: false });
 
 type Tx = { txid: string; block_height: number; status?: any; created_at: string; data?: any };
@@ -99,9 +100,9 @@ export default function TxDetailPage() {
       {showRaw && tx?.data && (
         <section className={styles.searchSection}>
           <h2>Raw JSON</h2>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8 }}>
-            <button
-              className={`${styles.searchButton} ${styles.searchButtonSm}`}
+          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: 8, gap: 8 }}>
+            <Button
+              size="sm"
               onClick={async () => {
                 try {
                   const text = JSON.stringify(tx.data, null, 2);
@@ -117,7 +118,7 @@ export default function TxDetailPage() {
               }}
             >
               {copied ? 'Copied!' : 'Copy JSON'}
-            </button>
+            </Button>
           </div>
           <div className={styles.rawJson}>
             <JsonViewer data={tx.data} initiallyExpanded={true} />
@@ -242,9 +243,7 @@ export default function TxDetailPage() {
                           <summary className={styles.muted} style={{ cursor: 'pointer' }}>Show raw instruction ({ins.data_len} bytes)</summary>
                           <div style={{ marginTop: 6, display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
                             <code style={{ overflowWrap: 'anywhere' }}>{ins.data_hex || '—'}</code>
-                            <button className={`${styles.searchButton} ${styles.searchButtonSm}`} onClick={async () => {
-                              try { await navigator.clipboard.writeText(ins.data_hex || ''); } catch {}
-                            }}>Copy</button>
+                            <Button size="sm" onClick={async () => { try { await navigator.clipboard.writeText(ins.data_hex || ''); } catch {} }}>Copy</Button>
                           </div>
                         </details>
                       </div>
