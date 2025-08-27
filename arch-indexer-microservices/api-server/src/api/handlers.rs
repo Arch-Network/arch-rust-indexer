@@ -985,6 +985,22 @@ pub async fn get_account_token_balances(
                             }
                         }
                     }
+                    14 => {
+                        // MintToChecked { amount: u64, decimals: u8 }
+                        if data_vec.len() >= 1 + 8 + 1 && accounts_b58.len() >= 2 {
+                            let amount = u64::from_le_bytes([data_vec[1],data_vec[2],data_vec[3],data_vec[4],data_vec[5],data_vec[6],data_vec[7],data_vec[8]]) as i128;
+                            let decimals = data_vec[9] as i32;
+                            let mint_hex = mint_hex_from_idx(0);
+                            let dst = accounts_b58.get(1).cloned();
+                            if let (Some(mint), Some(d)) = (mint_hex, dst) {
+                                if !target_b58.is_empty() && d == target_b58 {
+                                    let e = by_mint.entry(mint).or_insert((0, decimals));
+                                    e.0 += amount;
+                                    if e.1 == 0 { e.1 = decimals; }
+                                }
+                            }
+                        }
+                    }
                     8 => {
                         // Burn { amount: u64 }
                         if data_vec.len() >= 1 + 8 && accounts_b58.len() >= 2 {
@@ -995,6 +1011,22 @@ pub async fn get_account_token_balances(
                                 if !target_b58.is_empty() && a == target_b58 {
                                     let e = by_mint.entry(mint).or_insert((0, 0));
                                     e.0 -= amount;
+                                }
+                            }
+                        }
+                    }
+                    15 => {
+                        // BurnChecked { amount: u64, decimals: u8 }
+                        if data_vec.len() >= 1 + 8 + 1 && accounts_b58.len() >= 2 {
+                            let amount = u64::from_le_bytes([data_vec[1],data_vec[2],data_vec[3],data_vec[4],data_vec[5],data_vec[6],data_vec[7],data_vec[8]]) as i128;
+                            let decimals = data_vec[9] as i32;
+                            let mint_hex = mint_hex_from_idx(1);
+                            let acc = accounts_b58.get(0).cloned();
+                            if let (Some(mint), Some(a)) = (mint_hex, acc) {
+                                if !target_b58.is_empty() && a == target_b58 {
+                                    let e = by_mint.entry(mint).or_insert((0, decimals));
+                                    e.0 -= amount;
+                                    if e.1 == 0 { e.1 = decimals; }
                                 }
                             }
                         }
