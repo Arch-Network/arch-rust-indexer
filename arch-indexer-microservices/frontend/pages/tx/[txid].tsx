@@ -177,7 +177,7 @@ export default function TxDetailPage() {
                       try {
                         const d = ins.decoded;
                         if (ins.action?.toLowerCase().includes('transfer') && d?.lamports?.data != null) {
-                          const lam = d.lamports.data as number; const sol = lam / 1_000_000_000;
+                          const lam = d.lamports.data as number; const arch = lam / 1_000_000_000;
                           const src = d.source || ins.accounts[0];
                           const dst = d.destination || ins.accounts[1];
                           return (
@@ -185,7 +185,7 @@ export default function TxDetailPage() {
                               <Link href={`/accounts/${src}`} className={styles.hashButton}>{src}</Link>
                               <span className={styles.arrow}>→</span>
                               <Link href={`/accounts/${dst}`} className={styles.hashButton}>{dst}</Link>
-                              <span className={styles.amountPill}>Amount: {sol} SOL</span>
+                              <span className={styles.amountPill}>Amount: {arch} ARCH</span>
                             </div>
                           );
                         }
@@ -193,13 +193,13 @@ export default function TxDetailPage() {
                           const funder = d?.funder || ins.accounts[0];
                           const newAcc = d?.new_account || ins.accounts[1];
                           const space = d?.space?.data ?? 0;
-                          const lam = d?.lamports?.data ?? 0; const sol = lam / 1_000_000_000;
+                          const lam = d?.lamports?.data ?? 0; const arch = lam / 1_000_000_000;
                           return (
                             <div className={styles.vizRow}>
                               <Link href={`/accounts/${funder}`} className={styles.hashButton}>{funder}</Link>
                               <span className={styles.arrow}>funds</span>
                               <Link href={`/accounts/${newAcc}`} className={styles.hashButton}>{newAcc}</Link>
-                              <span className={styles.amountPill}>{sol} SOL</span>
+                              <span className={styles.amountPill}>{arch} ARCH</span>
                               <span className={styles.badge}>space {space} bytes</span>
                             </div>
                           );
@@ -222,8 +222,8 @@ export default function TxDetailPage() {
                             const d = ins.decoded;
                             if (d?.lamports?.data != null) {
                               const lam = d.lamports.data as number;
-                              const sol = lam / 1_000_000_000;
-                              return <div className={styles.statusOther}>Amount: {sol} SOL</div>;
+                              const arch = lam / 1_000_000_000;
+                              return <div className={styles.statusOther}>Amount: {arch} ARCH</div>;
                             }
                             if (d?.memo) {
                               return <div className={styles.statusOther}>Memo: {String(d.memo)}</div>;

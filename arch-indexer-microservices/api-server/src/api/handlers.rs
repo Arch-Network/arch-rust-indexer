@@ -366,32 +366,83 @@ pub async fn get_account_summary(
         first_seen,
         last_seen,
         transaction_count: tx_count,
-        lamports_balance,
+        lamports_balance: {
+            // Prefer persisted native balance if present
+            let nb: Option<i128> = sqlx::query_scalar("SELECT balance::numeric(65,0) FROM native_balances WHERE address_hex ILIKE $1")
+                .bind(&address_hex)
+                .fetch_optional(&*pool)
+                .await
+                .unwrap_or(None);
+            nb.or(lamports_balance).or(Some(0)).flatten()
+        },
     }))
 }
 
 async fn compute_account_lamports_balance(pool: &PgPool, address_b58: &str, address_hex: &str) -> Result<i128, ApiError> {
-    // Pull a reasonable window of transactions that reference this account
-    let rows = sqlx::query(
-        r#"
-        WITH accs AS (
-            SELECT t.txid, t.created_at, t.data
-            FROM transactions t
-            CROSS JOIN LATERAL jsonb_array_elements(COALESCE(t.data#>'{message,account_keys}', t.data#>'{message,keys}', '[]'::jsonb)) AS acc(value)
-            WHERE CASE 
-                WHEN jsonb_typeof(acc.value) = 'string' THEN normalize_program_id(trim(both '"' from (acc.value)::text))
-                ELSE normalize_program_id((acc.value)::text)
-            END ILIKE $1
-        )
-        SELECT data FROM accs
-        ORDER BY created_at ASC
-        LIMIT 5000
-        "#
+    // Prefer account_participation if available; it's robust to encoding differences
+    let has_participation: bool = sqlx::query_scalar(
+        r#"SELECT to_regclass('public.account_participation') IS NOT NULL"#
     )
-    .bind(address_hex)
-    .fetch_all(pool)
+    .fetch_one(pool)
     .await
-    .map_err(ApiError::Database)?;
+    .unwrap_or(false);
+
+    let use_participation: bool = if has_participation {
+        sqlx::query_scalar(
+            r#"SELECT EXISTS(SELECT 1 FROM account_participation WHERE address_hex ILIKE $1)"#
+        )
+        .bind(address_hex)
+        .fetch_one(pool)
+        .await
+        .unwrap_or(false)
+    } else { false };
+
+    let rows = if use_participation {
+        sqlx::query(
+            r#"
+            SELECT t.data
+            FROM account_participation ap
+            JOIN transactions t ON t.txid = ap.txid
+            WHERE ap.address_hex ILIKE $1
+            ORDER BY t.created_at ASC
+            LIMIT 10000
+            "#
+        )
+        .bind(address_hex)
+        .fetch_all(pool)
+        .await
+        .map_err(ApiError::Database)?
+    } else {
+        // Fallback: scan account_keys for this address (handles hex and jsonb arrays)
+        sqlx::query(
+            r#"
+            WITH accs AS (
+                SELECT t.txid, t.created_at, t.data
+                FROM transactions t
+                CROSS JOIN LATERAL jsonb_array_elements(COALESCE(t.data#>'{message,account_keys}', t.data#>'{message,keys}', '[]'::jsonb)) AS acc(value)
+                WHERE (
+                    CASE 
+                        WHEN jsonb_typeof(acc.value) = 'string' THEN normalize_program_id(trim(both '"' from (acc.value)::text))
+                        WHEN jsonb_typeof(acc.value) = 'array' THEN normalize_program_id(acc.value)
+                        WHEN jsonb_typeof(acc.value) = 'object' THEN normalize_program_id(acc.value->'pubkey')
+                        ELSE NULL
+                    END ILIKE $1
+                    OR (
+                        jsonb_typeof(acc.value) = 'string' AND (acc.value #>> '{}') = $2
+                    )
+                )
+            )
+            SELECT data FROM accs
+            ORDER BY created_at ASC
+            LIMIT 10000
+            "#
+        )
+        .bind(address_hex)
+        .bind(address_b58)
+        .fetch_all(pool)
+        .await
+        .map_err(ApiError::Database)?
+    };
 
     fn u32_le(bytes: &[u8]) -> Option<u32> { if bytes.len() >= 4 { Some(u32::from_le_bytes([bytes[0],bytes[1],bytes[2],bytes[3]])) } else { None } }
     fn u64_le(bytes: &[u8]) -> Option<u64> { if bytes.len() >= 8 { Some(u64::from_le_bytes([bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7]])) } else { None } }
@@ -434,6 +485,17 @@ async fn compute_account_lamports_balance(pool: &PgPool, address_b58: &str, addr
             if !is_system || data_vec.len() < 4 { continue; }
 
             let tag = u32_le(&data_vec[0..4]).unwrap_or(9999);
+            // 0: CreateAccount { lamports: u64, space: u64, owner: Pubkey }
+            if tag == 0 && data_vec.len() >= 12 && accounts_b58.len() >= 2 {
+                let lamports = u64_le(&data_vec[4..12]).unwrap_or(0) as i128;
+                let src = accounts_b58.get(0);
+                let dst = accounts_b58.get(1);
+                if let Some(d) = dst { if d == address_b58 { balance_delta += lamports; }
+                }
+                if let Some(s) = src { if s == address_b58 { balance_delta -= lamports; }
+                }
+                continue;
+            }
             if (tag == 2 || tag == 4) && data_vec.len() >= 12 && accounts_b58.len() >= 2 {
                 let lamports = u64_le(&data_vec[4..12]).unwrap_or(0) as i128;
                 let src = accounts_b58.get(0);
