@@ -39,7 +39,7 @@ BEGIN
         END;
 
         IF program_id NOT IN (
-            normalize_program_id('7ZMyUmgbNckx7G5BCrdmX2XUasjDAk5uhcMpDbUDxHQ3'),
+            normalize_program_id('AplToken111111111111111111111111'),
             normalize_program_id('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
         ) THEN
             CONTINUE;

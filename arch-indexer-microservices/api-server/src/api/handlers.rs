@@ -81,10 +81,41 @@ pub struct ProgramRowOut {
 }
 
 fn try_hex_to_base58(hex_str: &str) -> String {
-    match hex::decode(hex_str) {
-        Ok(bytes) => bs58::encode(bytes).into_string(),
-        Err(_) => String::new(),
+    if let Ok(bytes) = hex::decode(hex_str) {
+        // First, check if this hex represents one of our known program string constants
+        if let Ok(s) = std::str::from_utf8(&bytes) {
+            // Check if this is one of our known program string constants
+            match s {
+                "VoteProgram111111111111111111111" |
+                "StakeProgram11111111111111111111" |
+                "BpfLoader11111111111111111111111" |
+                "NativeLoader11111111111111111111" |
+                "ComputeBudget111111111111111111111111111111" |
+                "AplToken111111111111111111111111" |
+                "AssociatedTokenAccount1111111111" => {
+                    return s.to_string(); // Always return the friendly string constant
+                }
+                _ => {
+                    // For other string constants, check if they look like base58 labels
+                    let is_b58_label = !s.is_empty() && s.chars().all(|c| {
+                        matches!(c,
+                            '1'|'2'|'3'|'4'|'5'|'6'|'7'|'8'|'9'|
+                            'A'..='H'|'J'..='N'|'P'..='Z'|
+                            'a'..='k'|'m'..='z'
+                        )
+                    });
+                    if is_b58_label { 
+                        return s.to_string();
+                    }
+                }
+            }
+        }
+        
+        // If not a known program or string constant, convert to base58
+        // This will handle cases like 01de36762ac00d066bfc0a96641499bb850aebfde3b2f400 -> 5QVc8gaXMdjnfS8JS1K8NbQQVPhVHfVPY2asS8b1xY8g
+        return bs58::encode(bytes).into_string();
     }
+    String::new()
 }
 
 fn normalize_program_param(id: &str) -> Option<String> {
@@ -96,22 +127,25 @@ fn normalize_program_param(id: &str) -> Option<String> {
 }
 
 fn fallback_program_name_from_b58(b58: &str) -> Option<String> {
+    // First try our new comprehensive mapping
+    if let Some(name) = crate::api::program_ids::get_program_name(b58) {
+        return Some(name.to_string());
+    }
+    
+    // Check if the base58 field contains a string constant that we can map
     match b58 {
-        // Arch IDs
-        pid::SYSTEM_PROGRAM => Some("System Program".to_string()),
-        pid::VOTE_PROGRAM => Some("Vote Program".to_string()),
-        pid::STAKE_PROGRAM => Some("Stake Program".to_string()),
-        pid::BPF_LOADER => Some("BPF Loader".to_string()),
-        pid::NATIVE_LOADER => Some("Native Loader".to_string()),
-        // Arch Token programs
-        pid::APL_TOKEN_PROGRAM => Some("APL Token".to_string()),
-        pid::APL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM => Some("Associated Token Account".to_string()),
-        // Legacy/Solana IDs we may encounter in old data
-        pid::SOL_LOADER => Some("Loader".to_string()),
-        pid::SOL_COMPUTE_BUDGET => Some("Compute Budget (Solana)".to_string()),
-        pid::SOL_MEMO => Some("Memo (Solana)".to_string()),
-        pid::SOL_SPL_TOKEN => Some("SPL Token (Solana)".to_string()),
-        pid::SOL_ASSOCIATED_TOKEN_ACCOUNT => Some("Associated Token Account (Solana)".to_string()),
+        // Arch canonical program IDs (string constants)
+        "VoteProgram111111111111111111111" => Some("Vote Program".to_string()),
+        "StakeProgram11111111111111111111" => Some("Stake Program".to_string()),
+        "BpfLoader11111111111111111111111" => Some("BPF Loader".to_string()),
+        "NativeLoader11111111111111111111" => Some("Native Loader".to_string()),
+        "ComputeBudget111111111111111111111111111111" => Some("Compute Budget Program".to_string()),
+        "AplToken111111111111111111111111" => Some("APL Token Program".to_string()),
+        "AssociatedTokenAccount1111111111" => Some("APL Associated Token Account Program".to_string()),
+        
+        // Accept legacy/base58 forms for friendly label
+        "7ZMyUmgbNckx7G5BCrdmX2XUasjDAk5uhcMpDbUDxHQ3" => Some("APL Token".to_string()),
+        "7ZQepXoDxPadjZnu618jicRj89uLzM3ucvyEEt72G1fm" => Some("Associated Token Account".to_string()),
         _ => None,
     }
 }
@@ -122,6 +156,29 @@ fn fallback_program_name_from_hex(hex_id: &str) -> Option<String> {
     const SYS_HEX_ONE: &str = "0000000000000000000000000000000000000000000000000000000000000001";
     if hex_id.eq_ignore_ascii_case(SYS_HEX_ALL_ZERO) || hex_id.eq_ignore_ascii_case(SYS_HEX_ONE) {
         return Some("System Program".to_string());
+    }
+
+    // Only map hex IDs that decode to our known string constants
+    if let Ok(bytes) = hex::decode(hex_id) {
+        if let Ok(label) = std::str::from_utf8(&bytes) {
+            // Only map exact matches to our known program string constants
+            match label {
+                "VoteProgram111111111111111111111" => return Some("Vote Program".to_string()),
+                "StakeProgram11111111111111111111" => return Some("Stake Program".to_string()),
+                "BpfLoader11111111111111111111111" => return Some("BPF Loader".to_string()),
+                "NativeLoader11111111111111111111" => return Some("Native Loader".to_string()),
+                "ComputeBudget111111111111111111111111111111" => return Some("Compute Budget Program".to_string()),
+                "AplToken111111111111111111111111" => return Some("APL Token Program".to_string()),
+                "AssociatedTokenAccount1111111111" => return Some("APL Associated Token Account Program".to_string()),
+                _ => {}
+            }
+        }
+        
+        // For other hex IDs, try the base58 mapping as a fallback
+        let b58 = bs58::encode(&bytes).into_string();
+        if let Some(name) = fallback_program_name_from_b58(&b58) {
+            return Some(name);
+        }
     }
     None
 }
@@ -362,18 +419,19 @@ pub async fn get_account_summary(
 
     Ok(Json(AccountSummary {
         address,
-        address_hex,
+        address_hex: address_hex.clone(),
         first_seen,
         last_seen,
         transaction_count: tx_count,
         lamports_balance: {
-            // Prefer persisted native balance if present
-            let nb: Option<i128> = sqlx::query_scalar("SELECT balance::numeric(65,0) FROM native_balances WHERE address_hex ILIKE $1")
+            // Prefer persisted native balance if present; read as text and parse to i128
+            let nb_text: Option<String> = sqlx::query_scalar("SELECT balance::text FROM native_balances WHERE address_hex ILIKE $1")
                 .bind(&address_hex)
                 .fetch_optional(&*pool)
                 .await
                 .unwrap_or(None);
-            nb.or(lamports_balance).or(Some(0)).flatten()
+            let nb_parsed: Option<i128> = nb_text.and_then(|s| s.parse::<i128>().ok());
+            nb_parsed.or(lamports_balance).or(Some(0))
         },
     }))
 }
@@ -665,7 +723,7 @@ pub async fn get_token_leaderboard(
             LEFT JOIN token_mints tm ON tm.mint_address = a.mint_address
             WHERE COALESCE(tm.program_id, a.program_id) IN (
                 normalize_program_id('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
-                normalize_program_id('7ZMyUmgbNckx7G5BCrdmX2XUasjDAk5uhcMpDbUDxHQ3')
+                normalize_program_id('AplToken111111111111111111111111')
             )
         "#;
         let sql = if authority.is_some() {
@@ -721,7 +779,7 @@ pub async fn get_token_leaderboard(
             SELECT * FROM agg a
             WHERE a.program_id IN (
                 normalize_program_id('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'),
-                normalize_program_id('7ZMyUmgbNckx7G5BCrdmX2XUasjDAk5uhcMpDbUDxHQ3')
+                normalize_program_id('AplToken111111111111111111111111')
             )
             ORDER BY a.holders DESC, a.total_balance DESC
             LIMIT $1 OFFSET $2
@@ -1057,13 +1115,14 @@ pub async fn get_account_token_balances(
                 } else if let Some(ix) = ins.get("program_id_index").and_then(|v| v.as_i64()) {
                     keys.get(ix as usize).cloned()
                 } else { None };
-                let program_b58 = program_val.as_ref().map(|v| key_to_base58(v)).unwrap_or_default();
                 let program_hex = program_val.as_ref().map(|v| key_to_hex(v)).unwrap_or_default();
+                let program_b58 = program_val.as_ref().map(|v| key_to_base58(v)).unwrap_or_default();
                 if program_b58 != pid::APL_TOKEN_PROGRAM && program_b58 != pid::SOL_SPL_TOKEN { continue; }
 
                 let acc_idx: Vec<usize> = ins.get("accounts").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as usize)).collect()).unwrap_or_default();
                 let accounts_b58: Vec<String> = acc_idx.iter().filter_map(|i| keys.get(*i).map(|k| key_to_base58(k))).collect();
                 let data_vec: Vec<u8> = ins.get("data").and_then(|d| d.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as u8)).collect()).unwrap_or_default();
+
                 if data_vec.is_empty() { continue; }
                 let tag = data_vec[0];
 
@@ -1763,8 +1822,27 @@ pub async fn get_transaction_execution(
 }
 
 fn rpc_runtime_logs_fallback(r: &crate::arch_rpc::ProcessedTransaction) -> Vec<String> {
-    // our current struct doesn't expose logs directly, but RPC returns logs at top-level in some cases
-    // We attempt to parse from status if embedded, else empty
+    // Try to extract logs from the runtime_transaction first
+    if let Some(logs) = r.runtime_transaction.get("logs") {
+        if let Some(logs_array) = logs.as_array() {
+            return logs_array.iter()
+                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .collect();
+        }
+    }
+    
+    // Fallback to the logs field if present
+    if !r.logs.is_empty() {
+        return r.logs.clone();
+    }
+    
+    // Try to extract from status if it contains error information
+    if let Some(status_obj) = r.status.as_object() {
+        if let Some(error_msg) = status_obj.get("message").and_then(|v| v.as_str()) {
+            return vec![format!("Error: {}", error_msg)];
+        }
+    }
+    
     Vec::new()
 }
 

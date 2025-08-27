@@ -42,6 +42,8 @@ pub struct ProcessedTransaction {
 	pub bitcoin_txids: Option<Vec<String>>,
 	#[serde(default)]
 	pub accounts_tags: Vec<serde_json::Value>,
+	#[serde(default)]
+	pub logs: Vec<String>,
 }
 
 impl ArchRpcClient {

@@ -41,7 +41,7 @@ SELECT DISTINCT
     program_id
 FROM tok
 WHERE program_id IN (
-  normalize_program_id('7ZMyUmgbNckx7G5BCrdmX2XUasjDAk5uhcMpDbUDxHQ3'),
+  normalize_program_id('AplToken111111111111111111111111'),
   normalize_program_id('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
 )
   AND (
@@ -89,7 +89,7 @@ SELECT DISTINCT
     program_id
 FROM tok
 WHERE program_id IN (
-  normalize_program_id('7ZMyUmgbNckx7G5BCrdmX2XUasjDAk5uhcMpDbUDxHQ3'),
+  normalize_program_id('AplToken111111111111111111111111'),
   normalize_program_id('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
 )
   AND (
@@ -148,7 +148,7 @@ SELECT DISTINCT
     program_id AS program_id_hex
 FROM tok
 WHERE program_id IN (
-  normalize_program_id('7ZMyUmgbNckx7G5BCrdmX2XUasjDAk5uhcMpDbUDxHQ3'),
+  normalize_program_id('AplToken111111111111111111111111'),
   normalize_program_id('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA')
 )
   AND opcode = 1

@@ -22,6 +22,10 @@ BEGIN
 
     -- Default path: derive hex using existing normalization
     hex := normalize_program_id(v);
+    -- Map legacy explicit base58 IDs to new canonical forms
+    IF hex = normalize_program_id('7ZMyUmgbNckx7G5BCrdmX2XUasjDAk5uhcMpDbUDxHQ3') THEN
+        RETURN normalize_program_id('AplToken111111111111111111111111');
+    END IF;
     IF hex IS NULL THEN
         RETURN NULL;
     END IF;
@@ -37,11 +41,11 @@ BEGIN
         IF label LIKE 'spl-token%' OR label LIKE 'spl_token%' THEN
             RETURN normalize_program_id('TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA');
         ELSIF label LIKE 'apl-token%' OR label LIKE 'apl_token%' THEN
-            RETURN normalize_program_id('7ZMyUmgbNckx7G5BCrdmX2XUasjDAk5uhcMpDbUDxHQ3');
+            RETURN normalize_program_id('AplToken111111111111111111111111');
         ELSIF label LIKE 'spl-associated-token-account%' OR label LIKE 'spl_associated_token_account%' THEN
             RETURN normalize_program_id('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
         ELSIF label LIKE 'apl-associated-token-account%' OR label LIKE 'apl_associated_token_account%' THEN
-            RETURN normalize_program_id('ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL');
+            RETURN normalize_program_id('AssociatedTokenAccount1111111111');
         END IF;
     END IF;
 

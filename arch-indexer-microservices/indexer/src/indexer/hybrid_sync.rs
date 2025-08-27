@@ -169,17 +169,22 @@ impl HybridSync {
                                     let data = match serde_json::to_value(&processed.runtime_transaction) { Ok(v)=>v, Err(_)=>serde_json::Value::Null };
                                     let status = match serde_json::to_value(&processed.status) { Ok(v)=>v, Err(_)=>serde_json::Value::Null };
                                     let bitcoin_txids: Option<&[String]> = processed.bitcoin_txids.as_deref();
+                                    // Extract logs from runtime or struct field
+                                    let logs: Vec<String> = if let Some(arr) = processed.runtime_transaction.get("logs").and_then(|v| v.as_array()) {
+                                        arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+                                    } else { processed.logs.clone() };
                                     if let Err(e) = sqlx::query(
                                         r#"
-                                        INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at)
-                                        VALUES ($1, COALESCE((SELECT MAX(height) FROM blocks), 0), $2, $3, $4, CURRENT_TIMESTAMP)
-                                        ON CONFLICT (txid) DO UPDATE SET data = $2, status = $3, bitcoin_txids = $4
+                                        INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, logs, created_at)
+                                        VALUES ($1, COALESCE((SELECT MAX(height) FROM blocks), 0), $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                                        ON CONFLICT (txid) DO UPDATE SET data = $2, status = $3, bitcoin_txids = $4, logs = $5
                                         "#,
                                     )
                                     .bind(hash)
                                     .bind(&data)
                                     .bind(status)
                                     .bind(bitcoin_txids)
+                                    .bind(&logs)
                                     .execute(&*pool)
                                     .await {
                                         error!("Realtime tx upsert failed: {}", e);
@@ -431,12 +436,16 @@ async fn process_block_via_rpc(pool: &PgPool, rpc: &Arc<ArchRpcClient>, height: 
             let data = serde_json::to_value(&processed.runtime_transaction)?;
             let status = serde_json::to_value(&processed.status)?;
             let bitcoin_txids = processed.bitcoin_txids.as_ref().map(|v| v.as_slice());
+            // Extract logs from runtime or struct field
+            let logs: Vec<String> = if let Some(arr) = processed.runtime_transaction.get("logs").and_then(|v| v.as_array()) {
+                arr.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+            } else { processed.logs.clone() };
             sqlx::query(
                 r#"
-                INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at)
-                VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
+                INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, logs, created_at)
+                VALUES ($1, $2, $3, $4, $5, $6, CURRENT_TIMESTAMP)
                 ON CONFLICT (txid) DO UPDATE 
-                SET block_height = $2, data = $3, status = $4, bitcoin_txids = $5
+                SET block_height = $2, data = $3, status = $4, bitcoin_txids = $5, logs = $6
                 "#,
             )
             .bind(&txid)
@@ -444,6 +453,7 @@ async fn process_block_via_rpc(pool: &PgPool, rpc: &Arc<ArchRpcClient>, height: 
             .bind(&data)
             .bind(&status)
             .bind(bitcoin_txids)
+            .bind(&logs)
             .execute(&mut *tx)
             .await?;
             tracing::info!("📥 Inserted/updated transaction {} at height {}", txid, height);

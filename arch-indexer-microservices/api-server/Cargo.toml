@@ -33,6 +33,7 @@ metrics-exporter-prometheus = { version = "0.12", default-features = false }
 tokio-retry = "0.3"
 http-body-util = "0.1"
 clap = { version = "4.5.45", features = ["derive"] }
+arch_program = "0.5.5"
 
 [lib]
 name = "api_server"

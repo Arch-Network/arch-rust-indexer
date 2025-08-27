@@ -138,7 +138,7 @@ BEGIN
         program_id text PRIMARY KEY
     ) ON COMMIT DROP;
 
-    -- Process each instruction
+    -- Process each instruction (canonicalize to Arch fixed IDs)
     FOR inst IN SELECT * FROM jsonb_array_elements(
         CASE 
             WHEN jsonb_typeof(NEW.data#>'{message,instructions}') = 'array' 
@@ -147,21 +147,19 @@ BEGIN
         END
     )
     LOOP
-        -- Extract and normalize program_id based on type
-        program_id := CASE
-            WHEN jsonb_typeof(inst->'program_id') = 'string' THEN
-                normalize_program_id(inst->>'program_id')
-            WHEN jsonb_typeof(inst->'program_id') = 'array' THEN
-                normalize_program_id(
-                    array_to_string(
-                        ARRAY(
-                            SELECT jsonb_array_elements_text(inst->'program_id')
-                        ),
-                        ','
-                    )
-                )
-            ELSE NULL
-        END;
+        -- Extract and canonicalize program_id based on type
+        program_id := NULL;
+        BEGIN
+            IF (inst ? 'program_id_index') THEN
+                program_id := canonical_program_id((NEW.data#>'{message,account_keys}') -> ((inst->>'program_id_index')::int));
+            ELSIF (inst ? 'program_id') THEN
+                IF jsonb_typeof(inst->'program_id') = 'object' THEN
+                    program_id := canonical_program_id((inst->'program_id')->'pubkey');
+                ELSE
+                    program_id := canonical_program_id(inst->'program_id');
+                END IF;
+            END IF;
+        EXCEPTION WHEN others THEN program_id := NULL; END;
 
         -- Insert into temp table if valid
         IF program_id IS NOT NULL THEN

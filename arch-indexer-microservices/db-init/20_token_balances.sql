@@ -63,8 +63,8 @@ BEGIN
         
         -- Only process known token programs
         IF program_id NOT IN (
-            '7ZMyUmgbNckx7G5BCrdmX2XUasjDAk5uhcMpDbUDxHQ3', -- APL Token
-            'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'   -- SPL Token
+            'AplToken111111111111111111111111',
+            'TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA'
         ) THEN
             CONTINUE;
         END IF;
