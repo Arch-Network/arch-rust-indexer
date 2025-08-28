@@ -10,6 +10,18 @@ type Program = {
   transaction_count: number;
   first_seen_at?: string;
   last_seen_at?: string;
+  display_name?: string | null;
+};
+
+function isHex(str: string): boolean {
+  return /^[0-9a-fA-F]+$/.test(str) && str.length >= 2;
+}
+
+// Known mapped IDs we care about on the client for canonicalizing
+const MAPPED: Record<string, string> = {
+  // base58 -> mapped label used in routes
+  'AplToken111111111111111111111111': 'AplToken111111111111111111111111',
+  'AplAssociatedTokenAccount11111111111111111': 'AplAssociatedTokenAccount11111111111111111',
 };
 
 export default function ProgramDetailPage() {
@@ -21,8 +33,45 @@ export default function ProgramDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // Canonicalize route on mount/change
   useEffect(() => {
     if (!id) return;
+    // If hex, try to fetch program to obtain base58/display_name and redirect
+    if (isHex(id)) {
+      (async () => {
+        try {
+          const res = await fetch(`${apiUrl}/api/programs/${encodeURIComponent(id)}`);
+          if (!res.ok) throw new Error('not found');
+          const json = await res.json();
+          const p = json.program || json;
+          const base58 = p.program_id_base58 || '';
+          const mapped = p.display_name && typeof p.display_name === 'string' ? p.display_name : undefined;
+          const canonical = mapped && MAPPED[mapped] ? MAPPED[mapped] : (base58 || undefined);
+          if (canonical) {
+            router.replace(`/programs/${encodeURIComponent(canonical)}`);
+          } else {
+            // If we cannot canonicalize, show 404
+            setError('Program not found');
+          }
+        } catch {
+          setError('Program not found');
+        } finally {
+          setLoading(false);
+        }
+      })();
+      return;
+    }
+    // If base58 matches a mapped id, ensure we are at mapped path (already base58)
+    if (MAPPED[id]) {
+      if (id !== MAPPED[id]) {
+        router.replace(`/programs/${encodeURIComponent(MAPPED[id])}`);
+        return;
+      }
+    }
+  }, [id, apiUrl, router]);
+
+  useEffect(() => {
+    if (!id || isHex(id)) return; // hex is handled by canonicalization above
     (async () => {
       try {
         setLoading(true);
@@ -33,10 +82,11 @@ export default function ProgramDetailPage() {
         const p = json.program || json;
         setProgram({
           program_id_hex: p.program_id_hex || p.program_id,
-          program_id_base58: p.program_id_base58 || '',
+          program_id_base58: p.program_id_base58 || id,
           transaction_count: p.transaction_count,
           first_seen_at: p.first_seen_at,
           last_seen_at: p.last_seen_at,
+          display_name: p.display_name || null,
         });
         setRecent(json.recent_transactions || []);
       } catch (e: any) {
@@ -58,7 +108,7 @@ export default function ProgramDetailPage() {
             <div className={styles.statCard}>
               <h3>Program ID</h3>
               <div className={styles.value} style={{ fontSize: '1rem', wordBreak: 'break-all' }}>
-                {program.program_id_base58 || program.program_id_hex}
+                {program.display_name || program.program_id_base58}
               </div>
               <div className={styles.label}>Identifier</div>
               {program.program_id_hex && (

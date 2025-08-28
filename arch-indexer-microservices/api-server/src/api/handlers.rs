@@ -656,6 +656,160 @@ pub async fn get_account_transactions(
     })))
 }
 
+pub async fn get_account_transactions_v2(
+    State(pool): State<Arc<PgPool>>,
+    AxPath(address): AxPath<String>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let limit = params.get("limit").and_then(|v| v.parse::<i64>().ok()).map(|v| v.min(200)).unwrap_or(50);
+    let page = params.get("page").and_then(|v| v.parse::<i64>().ok()).unwrap_or(1).max(1);
+    let offset = (page - 1) * limit;
+    let address_hex = normalize_program_param(&address).ok_or(ApiError::BadRequest("Invalid address".into()))?;
+
+    // We prefer participation if available
+    let use_participation: bool = sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM information_schema.tables WHERE table_name = 'account_participation')"#
+    )
+    .fetch_one(&*pool)
+    .await
+    .unwrap_or(false)
+    && sqlx::query_scalar(
+        r#"SELECT EXISTS(SELECT 1 FROM account_participation WHERE address_hex ILIKE $1)"#
+    )
+    .bind(&address_hex)
+    .fetch_one(&*pool)
+    .await
+    .unwrap_or(false);
+
+    // Fetch candidate txids
+    let tx_rows = if use_participation {
+        sqlx::query(
+            r#"
+            SELECT ap.txid, ap.block_height, ap.created_at
+            FROM account_participation ap
+            WHERE ap.address_hex ILIKE $1
+            ORDER BY ap.created_at DESC
+            LIMIT $2 OFFSET $3
+            "#
+        )
+        .bind(&address_hex)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&*pool)
+        .await?
+    } else {
+        sqlx::query(
+            r#"
+            WITH accs AS (
+                SELECT t.txid, t.block_height, t.created_at,
+                       CASE 
+                         WHEN jsonb_typeof(acc.value) = 'string' THEN normalize_program_id(trim(both '"' from (acc.value)::text))
+                         ELSE normalize_program_id((acc.value)::text)
+                       END AS acc_hex
+                FROM transactions t
+                CROSS JOIN LATERAL jsonb_array_elements(COALESCE(t.data#>'{message,account_keys}', t.data#>'{message,keys}', '[]'::jsonb)) AS acc(value)
+            )
+            SELECT txid, block_height, created_at
+            FROM accs
+            WHERE acc_hex ILIKE $1
+            ORDER BY created_at DESC
+            LIMIT $2 OFFSET $3
+            "#
+        )
+        .bind(&address_hex)
+        .bind(limit)
+        .bind(offset)
+        .fetch_all(&*pool)
+        .await?
+    };
+
+    // Hydrate each transaction with enriched fields
+    let mut out: Vec<serde_json::Value> = Vec::with_capacity(tx_rows.len());
+    for r in tx_rows {
+        let txid: String = r.get("txid");
+        let block_height: i64 = r.get("block_height");
+        let created_at: DateTime<Utc> = r.get("created_at");
+
+        // Load transaction JSON and logs for compute units, programs, and instruction chips
+        let row = sqlx::query(
+            r#"
+            SELECT data, status, logs, compute_units_consumed
+            FROM transactions
+            WHERE txid = $1
+            "#
+        )
+        .bind(&txid)
+        .fetch_optional(&*pool)
+        .await?;
+
+        let (data, status, logs, compute_units): (serde_json::Value, String, Vec<String>, Option<i64>) = if let Some(rr) = row {
+            let d: serde_json::Value = rr.get("data");
+            let s: serde_json::Value = rr.get("status");
+            let st = if s.is_string() { s.as_str().unwrap_or("").to_string() } else { s.to_string() };
+            let l: serde_json::Value = rr.get("logs");
+            let logs_vec = l.as_array().map(|a| a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()).unwrap_or_else(Vec::new);
+            let cu: Option<i64> = rr.try_get::<Option<i32>, _>("compute_units_consumed").ok().flatten().map(|v| v as i64);
+            (d, st, logs_vec, cu)
+        } else { (serde_json::json!({}), "unknown".to_string(), Vec::new(), None) };
+
+        // Fee payer (first signer in message header; or participants row order) best-effort
+        let fee_payer = data.get("message")
+            .and_then(|m| m.get("account_keys").or_else(|| m.get("keys")))
+            .and_then(|v| v.as_array())
+            .and_then(|arr| arr.get(0))
+            .map(|k| key_to_base58(k))
+            .unwrap_or_default();
+
+        // Programs involved (from transaction_programs if present; else derive from instructions)
+        let prows = sqlx::query(
+            r#"SELECT program_id FROM transaction_programs WHERE txid = $1 LIMIT 20"#
+        )
+        .bind(&txid)
+        .fetch_all(&*pool)
+        .await
+        .unwrap_or_default();
+        let programs_hex: Vec<String> = prows.into_iter().map(|pr| pr.get::<String,_>("program_id")).collect();
+        let programs_b58: Vec<String> = programs_hex.iter().map(|h| try_hex_to_base58(h)).collect();
+
+        // Build instruction summaries directly from transaction JSON using our decoder
+        let instrs = build_instruction_summaries_from_tx(&data);
+        let chips: Vec<String> = instrs.iter().filter_map(|v| v.get("action").and_then(|a| a.as_str()).map(|s| s.to_string())).collect();
+
+        // Fee estimation: unit price from any instruction tag (ComputeBudget SetComputeUnitPrice) × compute units
+        let unit_price_micro: Option<u64> = instrs.iter().find_map(|ins| {
+            let decoded = ins.get("decoded")?;
+            let price = decoded.get("price_micro_lamports").and_then(|v| v.get("data")).and_then(|v| v.as_u64());
+            price
+        });
+        let fee_estimated_arch: Option<f64> = match (unit_price_micro, compute_units) {
+            (Some(price), Some(units)) => Some((price as f64 / 1_000_000.0) * units as f64 / 1_000_000_000.0),
+            _ => None,
+        };
+
+        // Native value delta for this address
+        let value_delta_lamports = compute_native_balance_delta_for_address_in_tx(&data, &address_hex).unwrap_or(0);
+        let value_arch = (value_delta_lamports as f64) / 1_000_000_000.0;
+
+        out.push(json!({
+            "txid": txid,
+            "block_height": block_height,
+            "created_at": created_at,
+            "status": status,
+            "fee_payer": fee_payer,
+            "value_arch": value_arch,
+            "fee_estimated_arch": fee_estimated_arch,
+            "programs": programs_b58,
+            "instructions": chips,
+        }));
+    }
+
+    Ok(Json(json!({
+        "page": page,
+        "limit": limit,
+        "transactions": out
+    })))
+}
+
 #[derive(serde::Serialize)]
 pub struct TokenLeaderboardRow {
     pub mint_address: String,
@@ -3144,6 +3298,32 @@ pub async fn get_program_details(
         hex::encode(super::program_ids::APL_TOKEN_PROGRAM.as_bytes())
     } else if program_id == super::program_ids::APL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_BASE58 {
         hex::encode(super::program_ids::APL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM.as_bytes())
+    } else if program_id == super::program_ids::APL_TOKEN_PROGRAM {
+        hex::encode(super::program_ids::APL_TOKEN_PROGRAM.as_bytes())
+    } else if program_id == super::program_ids::APL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM {
+        hex::encode(super::program_ids::APL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM.as_bytes())
+    } else if program_id == super::program_ids::SYSTEM_PROGRAM {
+        hex::encode(super::program_ids::SYSTEM_PROGRAM.as_bytes())
+    } else if program_id == super::program_ids::VOTE_PROGRAM {
+        hex::encode(super::program_ids::VOTE_PROGRAM.as_bytes())
+    } else if program_id == super::program_ids::STAKE_PROGRAM {
+        hex::encode(super::program_ids::STAKE_PROGRAM.as_bytes())
+    } else if program_id == super::program_ids::BPF_LOADER {
+        hex::encode(super::program_ids::BPF_LOADER.as_bytes())
+    } else if program_id == super::program_ids::NATIVE_LOADER {
+        hex::encode(super::program_ids::NATIVE_LOADER.as_bytes())
+    } else if program_id == super::program_ids::COMPUTE_BUDGET {
+        hex::encode(super::program_ids::COMPUTE_BUDGET.as_bytes())
+    } else if program_id == super::program_ids::SOL_LOADER {
+        hex::encode(super::program_ids::SOL_LOADER.as_bytes())
+    } else if program_id == super::program_ids::SOL_COMPUTE_BUDGET {
+        hex::encode(super::program_ids::SOL_COMPUTE_BUDGET.as_bytes())
+    } else if program_id == super::program_ids::SOL_MEMO {
+        hex::encode(super::program_ids::SOL_MEMO.as_bytes())
+    } else if program_id == super::program_ids::SOL_SPL_TOKEN {
+        hex::encode(super::program_ids::SOL_SPL_TOKEN.as_bytes())
+    } else if program_id == super::program_ids::SOL_ASSOCIATED_TOKEN_ACCOUNT {
+        hex::encode(super::program_ids::SOL_ASSOCIATED_TOKEN_ACCOUNT.as_bytes())
     } else if program_id.chars().all(|c| c.is_ascii_hexdigit()) && program_id.len() >= 2 {
         program_id.clone()
     } else {
@@ -3391,4 +3571,105 @@ pub async fn backfill_programs(State(pool): State<Arc<PgPool>>) -> impl IntoResp
         "links_created": linked,
     });
     (StatusCode::OK, Json(body))
+}
+
+// ---- helper utilities for v2 account transactions ----
+fn v2_u32_le(bytes: &[u8]) -> Option<u32> { if bytes.len() >= 4 { Some(u32::from_le_bytes([bytes[0],bytes[1],bytes[2],bytes[3]])) } else { None } }
+fn v2_u64_le(bytes: &[u8]) -> Option<u64> { if bytes.len() >= 8 { Some(u64::from_le_bytes([bytes[0],bytes[1],bytes[2],bytes[3],bytes[4],bytes[5],bytes[6],bytes[7]])) } else { None } }
+
+fn v2_is_system_b58(s: &str) -> bool {
+    if s.is_empty() { return false; }
+    if s.chars().all(|c| c == '1') { return true; }
+    let ones = "111111111111111111111111111111";
+    s.starts_with(ones) && s.ends_with('2')
+}
+
+fn compute_native_balance_delta_for_address_in_tx(data: &serde_json::Value, address_hex: &str) -> Option<i128> {
+    let message = data.get("message")?;
+    let keys = message.get("account_keys")?.as_array()?;
+    let instructions = message.get("instructions")?.as_array()?;
+    let address_b58 = try_hex_to_base58(address_hex);
+    let keys_b58: Vec<String> = keys.iter().map(|k| key_to_base58(k)).collect();
+    let mut delta: i128 = 0;
+    for ins in instructions {
+        let program_val = if let Some(v) = ins.get("program_id") { Some(v.clone()) } else if let Some(ix) = ins.get("program_id_index").and_then(|v| v.as_i64()) { keys.get(ix as usize).cloned() } else { None };
+        let program_hex = program_val.as_ref().map(|v| key_to_hex(v)).unwrap_or_default();
+        let program_b58 = program_val.as_ref().map(|v| key_to_base58(v)).unwrap_or_default();
+        let is_system = v2_is_system_b58(&program_b58)
+            || program_hex.eq_ignore_ascii_case("0000000000000000000000000000000000000000000000000000000000000000")
+            || program_hex.eq_ignore_ascii_case("0000000000000000000000000000000000000000000000000000000000000001");
+        if !is_system { continue; }
+        let acc_idx: Vec<usize> = ins.get("accounts").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as usize)).collect()).unwrap_or_default();
+        let accounts_b58: Vec<String> = acc_idx.iter().filter_map(|i| keys_b58.get(*i)).cloned().collect();
+        let data_vec: Vec<u8> = ins.get("data").and_then(|d| d.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as u8)).collect()).unwrap_or_default();
+        if data_vec.len() < 4 || accounts_b58.len() < 2 { continue; }
+        let tag = v2_u32_le(&data_vec[0..4]).unwrap_or(9999);
+        if tag == 0 || tag == 2 || tag == 4 || data_vec.len() == 12 {
+            let lamports = v2_u64_le(&data_vec[4..12]).unwrap_or(0) as i128;
+            let src = accounts_b58.get(0);
+            let dst = accounts_b58.get(1);
+            if let Some(d) = dst { if d == &address_b58 { delta += lamports; } }
+            if let Some(s) = src { if s == &address_b58 { delta -= lamports; } }
+        }
+    }
+    Some(delta)
+}
+
+fn build_instruction_summaries_from_tx(data: &serde_json::Value) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    let message = match data.get("message") { Some(m) => m, None => return out };
+    let keys = match message.get("account_keys").and_then(|a| a.as_array()) { Some(k) => k, None => return out };
+    let instructions = match message.get("instructions").and_then(|a| a.as_array()) { Some(i) => i, None => return out };
+    let key_b58 = |k: &serde_json::Value| -> String { key_to_base58(k) };
+    for ins in instructions {
+        let program_val = if let Some(v) = ins.get("program_id") { Some(v.clone()) } else if let Some(ix) = ins.get("program_id_index").and_then(|v| v.as_i64()) { keys.get(ix as usize).cloned() } else { None };
+        let program_b58 = program_val.as_ref().map(|v| key_to_base58(v)).unwrap_or_default();
+        let acc_idx: Vec<usize> = ins.get("accounts").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as usize)).collect()).unwrap_or_default();
+        let accounts: Vec<String> = acc_idx.into_iter().filter_map(|i| keys.get(i).map(|k| key_b58(k))).collect();
+        let data_vec: Vec<u8> = ins.get("data").and_then(|d| d.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as u8)).collect()).unwrap_or_default();
+
+        // Compute Budget unit price
+        if program_b58 == "ComputeBudget111111111111111111111111111111" {
+            if let Some((&tag, rest)) = data_vec.split_first() { if tag == 3 && rest.len() >= 8 {
+                let price = v2_u64_le(rest).unwrap_or(0);
+                out.push(json!({"action": "Compute Budget: SetComputeUnitPrice", "decoded": {"price_micro_lamports": {"type": "u64", "data": price}} }));
+                continue;
+            }}
+        }
+        // Token transfers
+        if program_b58 == pid::APL_TOKEN_PROGRAM_BASE58 {
+            if !data_vec.is_empty() {
+                let tag = data_vec[0];
+                if tag == 3 && data_vec.len() >= 9 {
+                    let amount = v2_u64_le(&data_vec[1..9]).unwrap_or(0);
+                    let source = accounts.get(0).cloned();
+                    let destination = accounts.get(1).cloned();
+                    let authority = accounts.get(2).cloned();
+                    out.push(json!({"action":"Token: Transfer","decoded": {"type":"transfer","amount": amount, "from": source, "to": destination, "authority": authority}}));
+                    continue;
+                }
+                if tag == 12 && data_vec.len() >= 10 {
+                    let amount = v2_u64_le(&data_vec[1..9]).unwrap_or(0);
+                    let decimals = data_vec[9] as u64;
+                    out.push(json!({"action":"Token: TransferChecked","decoded": {"amount": amount, "decimals": decimals}}));
+                    continue;
+                }
+            }
+        }
+        // System transfer summary
+        if v2_is_system_b58(&program_b58) && data_vec.len() >= 12 {
+            let tag = v2_u32_le(&data_vec[0..4]).unwrap_or(9999);
+            if tag == 2 || tag == 4 {
+                let lamports = v2_u64_le(&data_vec[4..12]).unwrap_or(0);
+                let src = accounts.get(0).cloned();
+                let dst = accounts.get(1).cloned();
+                out.push(json!({"action":"System: Transfer","decoded": {"lamports": {"type":"u64","data": lamports}, "source": src, "destination": dst}}));
+                continue;
+            }
+        }
+        // Fallback chip: program name
+        let label = pid::get_program_name(&program_b58).unwrap_or("Program").to_string();
+        out.push(json!({"action": label }));
+    }
+    out
 }
