@@ -190,6 +190,21 @@ export default function TxDetailPage() {
                             </div>
                           );
                         }
+                        // APL Token: Transfer visualization
+                        if ((ins.action?.toLowerCase().includes('token: transfer') || d?.type === 'transfer') && d) {
+                          const amtRaw = typeof d.amount === 'string' ? Number(d.amount) : (d.amount ?? 0);
+                          const src = d.from || ins.accounts[0];
+                          const dst = d.to || ins.accounts[1];
+                          return (
+                            <div className={styles.vizRow}>
+                              <Link href={`/accounts/${src}`} className={styles.hashButton}>{src}</Link>
+                              <span className={styles.arrow}>→</span>
+                              <Link href={`/accounts/${dst}`} className={styles.hashButton}>{dst}</Link>
+                              <span className={styles.amountPill}>Amount: {amtRaw} tokens</span>
+                              {d.authority && <span className={styles.badge} style={{ marginLeft: 8 }}>by {String(d.authority)}</span>}
+                            </div>
+                          );
+                        }
                         if (ins.action?.toLowerCase().includes('createaccount')) {
                           const funder = d?.funder || ins.accounts[0];
                           const newAcc = d?.new_account || ins.accounts[1];
