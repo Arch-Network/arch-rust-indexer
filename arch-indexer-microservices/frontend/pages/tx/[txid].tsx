@@ -167,7 +167,7 @@ export default function TxDetailPage() {
                     <div style={{display:'flex', alignItems:'center', justifyContent:'space-between', flexWrap:'wrap'}}>
                       <div className={styles.instructionMeta}>
                         <span className={styles.badge}>#{ins.index}</span>
-                        <Link href={`/programs/${ins.program_id_hex}`} className={styles.hashButton}>
+                        <Link href={`/programs/${encodeURIComponent(ins.program_id_base58 || ins.program_id_hex)}`} className={styles.hashButton}>
                           {ins.program_name || ins.program_id_base58 || ins.program_id_hex || 'Unknown program'}
                         </Link>
                         {ins.action && <span className={styles.statusInfo}>{ins.action}</span>}

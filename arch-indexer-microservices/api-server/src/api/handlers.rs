@@ -982,11 +982,11 @@ pub async fn get_account_token_balances(
         r#"
         SELECT 
             tb.mint_address,
-            tb.balance,
+            tb.balance::text AS balance,
             tb.decimals,
             tb.owner_address,
             tb.program_id,
-            tm.supply,
+            tm.supply::text AS supply,
             tm.is_frozen,
             tb.last_updated
         FROM token_balances tb
@@ -2049,6 +2049,72 @@ pub async fn get_transaction_instructions(
                 }
             }
         }
+        // BPF Loader (program deployment/management)
+        if program_b58 == pid::BPF_LOADER_BASE58 {
+            if data.len() >= 4 {
+                let tag = u32_le(&data[0..4]).unwrap_or(9999);
+                let rest = &data[4..];
+                // 0: Write { offset: u64, bytes: Vec<u8> (len: u64, then bytes) }
+                if tag == 0 {
+                    let mut offset_val: Option<u64> = None;
+                    let mut bytes_hex: Option<String> = None;
+                    if rest.len() >= 8 {
+                        let offset = u64_le(&rest[0..8]).unwrap_or(0);
+                        offset_val = Some(offset);
+                        if rest.len() >= 16 {
+                            let len = u64_le(&rest[8..16]).unwrap_or(0) as usize;
+                            if rest.len() >= 16 + len {
+                                let slice = &rest[16..16+len];
+                                bytes_hex = Some(hex::encode(slice));
+                            }
+                        }
+                    }
+                    let decoded = json!({
+                        "discriminator": {"type":"u32", "data": tag},
+                        "offset": offset_val,
+                        "bytes_hex": bytes_hex,
+                    });
+                    return (Some("BPF Loader: Write".to_string()), Some(decoded));
+                }
+                // 1: Truncate { new_size: u64 }
+                if tag == 1 {
+                    let new_size = if rest.len() >= 8 { Some(u64_le(&rest[0..8]).unwrap_or(0)) } else { None };
+                    let decoded = json!({
+                        "discriminator": {"type":"u32", "data": tag},
+                        "new_size": new_size
+                    });
+                    return (Some("BPF Loader: Truncate".to_string()), Some(decoded));
+                }
+                // 2: Deploy
+                if tag == 2 {
+                    let decoded = json!({
+                        "discriminator": {"type":"u32", "data": tag}
+                    });
+                    return (Some("BPF Loader: Deploy".to_string()), Some(decoded));
+                }
+                // 3: Retract
+                if tag == 3 {
+                    let decoded = json!({
+                        "discriminator": {"type":"u32", "data": tag}
+                    });
+                    return (Some("BPF Loader: Retract".to_string()), Some(decoded));
+                }
+                // 4: TransferAuthority
+                if tag == 4 {
+                    let decoded = json!({
+                        "discriminator": {"type":"u32", "data": tag}
+                    });
+                    return (Some("BPF Loader: TransferAuthority".to_string()), Some(decoded));
+                }
+                // 5: Finalize
+                if tag == 5 {
+                    let decoded = json!({
+                        "discriminator": {"type":"u32", "data": tag}
+                    });
+                    return (Some("BPF Loader: Finalize".to_string()), Some(decoded));
+                }
+            }
+        }
         // Token Program (Arch APL Token)
         if program_b58 == pid::APL_TOKEN_PROGRAM_BASE58 {
             if !data.is_empty() {
@@ -3072,8 +3138,13 @@ pub async fn get_program_details(
     State(pool): State<Arc<PgPool>>,
     Path(program_id): Path<String>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Normalize input (hex or base58) to hex
-    let pid_hex = if program_id.chars().all(|c| c.is_ascii_hexdigit()) && program_id.len() >= 2 {
+    // Normalize input to our canonical hex storage
+    // Prefer mapping well-known base58 IDs to their canonical ASCII-label hex (e.g., AplToken111...)
+    let pid_hex = if program_id == super::program_ids::APL_TOKEN_PROGRAM_BASE58 {
+        hex::encode(super::program_ids::APL_TOKEN_PROGRAM.as_bytes())
+    } else if program_id == super::program_ids::APL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM_BASE58 {
+        hex::encode(super::program_ids::APL_ASSOCIATED_TOKEN_ACCOUNT_PROGRAM.as_bytes())
+    } else if program_id.chars().all(|c| c.is_ascii_hexdigit()) && program_id.len() >= 2 {
         program_id.clone()
     } else {
         match bs58::decode(&program_id).into_vec() {
@@ -3178,7 +3249,68 @@ pub async fn get_program_details(
 
         Ok(Json(payload))
     } else {
-        Err(ApiError::NotFound)
+        // Fallback: derive from transactions if not present in programs table
+        let row = sqlx::query(
+            r#"
+            WITH acc_txs AS (
+                SELECT t.created_at,
+                       t.data->'message'->'account_keys' AS keys,
+                       ins
+                FROM transactions t,
+                LATERAL jsonb_array_elements(t.data->'message'->'instructions') ins
+            ),
+            progs AS (
+                SELECT 
+                    CASE 
+                        WHEN ins ? 'program_id' THEN normalize_program_id(ins->>'program_id')
+                        WHEN ins ? 'program_id_index' THEN normalize_program_id(
+                            CASE 
+                                WHEN jsonb_typeof(keys -> ((ins->>'program_id_index')::int)) = 'string' THEN trim(both '"' from (keys -> ((ins->>'program_id_index')::int))::text)
+                                ELSE (keys -> ((ins->>'program_id_index')::int))::text
+                            END
+                        )
+                        ELSE NULL 
+                    END AS program_id,
+                    created_at
+                FROM acc_txs
+            )
+            SELECT 
+                COUNT(*)::bigint AS tx_count,
+                MIN(created_at) AS first_seen,
+                MAX(created_at) AS last_seen
+            FROM progs
+            WHERE program_id IS NOT NULL AND program_id ILIKE $1
+            "#
+        )
+        .bind(&pid_hex)
+        .fetch_one(&*pool)
+        .await
+        .map_err(ApiError::Database)?;
+
+        let tx_count: i64 = row.get::<i64, _>("tx_count");
+        if tx_count == 0 {
+            return Err(ApiError::NotFound);
+        }
+
+        let first_seen: Option<DateTime<Utc>> = row.try_get::<Option<DateTime<Utc>>, _>("first_seen").ok().flatten();
+        let last_seen: Option<DateTime<Utc>> = row.try_get::<Option<DateTime<Utc>>, _>("last_seen").ok().flatten();
+        let b58 = try_hex_to_base58(&pid_hex);
+        let display_name = fallback_program_name_from_b58(&b58).or_else(|| fallback_program_name_from_hex(&pid_hex));
+
+        let empty_recent: Vec<serde_json::Value> = Vec::new();
+        let payload = json!({
+            "program": {
+                "program_id": pid_hex,
+                "program_id_hex": pid_hex,
+                "program_id_base58": if b58.is_empty() { serde_json::Value::Null } else { serde_json::Value::String(b58) },
+                "display_name": display_name,
+                "transaction_count": tx_count,
+                "first_seen_at": first_seen,
+                "last_seen_at": last_seen
+            },
+            "recent_transactions": empty_recent
+        });
+        Ok(Json(payload))
     }
 }
 

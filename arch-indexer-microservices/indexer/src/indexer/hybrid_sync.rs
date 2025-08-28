@@ -554,11 +554,21 @@ async fn process_block_via_rpc(pool: &PgPool, rpc: &Arc<ArchRpcClient>, height: 
             if let Some(instructions) = data.get("message").and_then(|m| m.get("instructions")).and_then(|v| v.as_array()) {
                 // Find token program id in either explicit field or by name
                 for inst in instructions {
-                    let pid_str_opt = inst.get("program_id").and_then(|v| v.as_str());
-                    let program_hex = if let Some(pid_str) = pid_str_opt {
+                    // Resolve program id either from explicit field or via program_id_index into account_keys
+                    let program_hex = if let Some(pid_str) = inst.get("program_id").and_then(|v| v.as_str()) {
                         if pid_str.chars().all(|c| c.is_ascii_hexdigit()) && pid_str.len() >= 2 {
                             pid_str.to_string()
                         } else if let Ok(bytes) = bs58::decode(pid_str).into_vec() { hex::encode(bytes) } else { continue }
+                    } else if let Some(idx) = inst.get("program_id_index").and_then(|v| v.as_u64()) {
+                        if let Some(keys) = data.get("message").and_then(|m| m.get("account_keys")).and_then(|v| v.as_array()) {
+                            if let Some(k) = keys.get(idx as usize) {
+                                if let Some(arr) = k.as_array() {
+                                    hex::encode(arr.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect::<Vec<u8>>())
+                                } else if let Some(s) = k.as_str() {
+                                    if s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() >= 2 { s.to_string() } else if let Ok(bytes) = bs58::decode(s).into_vec() { hex::encode(bytes) } else { continue }
+                                } else { continue }
+                            } else { continue }
+                        } else { continue }
                     } else { continue };
                     // If this looks like token program (either ours or SPL), process accounts
                     if program_hex.len() == 64 {
@@ -599,6 +609,169 @@ async fn process_block_via_rpc(pool: &PgPool, rpc: &Arc<ArchRpcClient>, height: 
                                             .bind(&program_hex)
                                             .execute(&mut *tx)
                                             .await.ok();
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Additionally handle Token instructions to ensure balances/decimals are maintained
+                            if let Some(data_bytes) = inst.get("data").and_then(|v| v.as_array()) {
+                                let tag = data_bytes.get(0).and_then(|v| v.as_u64()).unwrap_or(255) as u8;
+                                // InitializeMint / InitializeMint2 provide decimals (byte 1)
+                                if tag == 0 || tag == 18 {
+                                    if let Some(dec_u64) = data_bytes.get(1).and_then(|v| v.as_u64()) {
+                                        if let Some(keys) = data.get("message").and_then(|m| m.get("account_keys")).and_then(|v| v.as_array()) {
+                                            if let Some(mint_idx) = accs.get(0).and_then(|x| x.as_u64()).map(|n| n as usize) {
+                                                if let Some(k) = keys.get(mint_idx) {
+                                                    let mint_hex = if let Some(arr) = k.as_array() {
+                                                        hex::encode(arr.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect::<Vec<u8>>())
+                                                    } else if let Some(s) = k.as_str() {
+                                                        if s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() >= 2 { s.to_string() } else { bs58::decode(s).into_vec().ok().map(hex::encode).unwrap_or_default() }
+                                                    } else { String::new() };
+                                                    if !mint_hex.is_empty() {
+                                                        let _ = sqlx::query(
+                                                            r#"INSERT INTO token_mints (mint_address, program_id, decimals)
+                                                               VALUES ($1, $2, $3)
+                                                               ON CONFLICT (mint_address) DO UPDATE SET decimals = EXCLUDED.decimals, last_seen_at = CURRENT_TIMESTAMP"#
+                                                        )
+                                                        .bind(&mint_hex)
+                                                        .bind(&program_hex)
+                                                        .bind(dec_u64 as i32)
+                                                        .execute(&mut *tx)
+                                                        .await;
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                                if tag == 3 || tag == 12 { // Transfer or TransferChecked
+                                    println!("Transfer or TransferChecked");
+                                    if let Some(keys) = data.get("message").and_then(|m| m.get("account_keys")).and_then(|v| v.as_array()) {                                        
+                                        let idxs: Vec<usize> = accs.iter().filter_map(|x| x.as_u64().map(|n| n as usize)).collect();
+                                        let to_hex = |k: &serde_json::Value| -> Option<String> {
+                                            if let Some(arr) = k.as_array() {
+                                                Some(hex::encode(arr.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect::<Vec<u8>>()))
+                                            } else if let Some(s) = k.as_str() {
+                                                if s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() >= 2 { Some(s.to_string()) } else if let Ok(bytes) = bs58::decode(s).into_vec() { Some(hex::encode(bytes)) } else { None }
+                                            } else { None }
+                                        };
+                                        // Parse amount little-endian from instruction bytes [1..9]
+                                        let mut amount: i128 = 0;
+                                        if data_bytes.len() >= 9 {
+                                            let mut le: u64 = 0;
+                                            for i in 0..8 { le |= (data_bytes[i+1].as_u64().unwrap_or(0) as u64) << (8*i); }
+                                            amount = le as i128;
+                                        }
+                                        // TransferChecked includes decimals after amount (byte 9)
+                                        let mut inst_decimals: Option<i32> = None;
+                                        if tag == 12 && data_bytes.len() >= 10 {
+                                            inst_decimals = Some(data_bytes[9].as_u64().unwrap_or(0) as i32);
+                                        }
+                                        // Determine source/dest and mint
+                                        let (src_hex_opt, dst_hex_opt, mint_hex_opt) = if tag == 3 {
+                                            // Transfer: [source, destination, authority]
+                                            let src = idxs.get(0).and_then(|i| keys.get(*i)).and_then(to_hex);
+                                            let dst = idxs.get(1).and_then(|i| keys.get(*i)).and_then(to_hex);
+                                            // Try to resolve mint from token_accounts by source
+                                            let mint_from_db: Option<String> = if let Some(ref src_hex) = src {
+                                                sqlx::query_scalar("SELECT mint_address_hex FROM token_accounts WHERE token_account_hex = $1")
+                                                    .bind(src_hex)
+                                                    .fetch_optional(&mut *tx)
+                                                    .await
+                                                    .ok()
+                                                    .flatten()
+                                            } else { None };
+                                            (src, dst, mint_from_db)
+                                        } else { // 12 TransferChecked: commonly [source, mint, destination, ...]
+                                            let src = idxs.get(0).and_then(|i| keys.get(*i)).and_then(to_hex);
+                                            let mint = idxs.get(1).and_then(|i| keys.get(*i)).and_then(to_hex);
+                                            let dst = idxs.get(2).and_then(|i| keys.get(*i)).and_then(to_hex);
+                                            (src, dst, mint)
+                                        };
+                                        println!("src_hex_opt: {:?}", src_hex_opt);
+                                        println!("dst_hex_opt: {:?}", dst_hex_opt);
+                                        println!("mint_hex_opt: {:?}", mint_hex_opt);
+                                        println!("program_hex: {:?}", program_hex);
+                                        if let (Some(src_hex), Some(dst_hex), Some(mint_hex)) = (src_hex_opt, dst_hex_opt, mint_hex_opt) {
+                                            // Log when this is an APL Token transfer
+                                            if let Ok(apl_bytes) = bs58::decode("5QSvph6op2FQj23To5H2LpD5unF1KXmVz29gFMoJTEoJ").into_vec() {
+                                                let apl_hex = hex::encode(apl_bytes);
+                                                if apl_hex == program_hex {
+                                                    let mint_b58 = try_hex_to_base58(&mint_hex);
+                                                    let src_b58 = try_hex_to_base58(&src_hex);
+                                                    let dst_b58 = try_hex_to_base58(&dst_hex);
+                                                    tracing::info!(
+                                                        "💸 APL token transfer: tx {} amount {} mint {} src {} -> dst {}",
+                                                        txid, amount, if mint_b58.is_empty() { mint_hex.clone() } else { mint_b58 }, if src_b58.is_empty() { src_hex.clone() } else { src_b58 }, if dst_b58.is_empty() { dst_hex.clone() } else { dst_b58 }
+                                                    );
+                                                }
+                                            }
+                                            // Ensure token_accounts rows exist for src/dst (owner unknown here)
+                                            sqlx::query("SELECT upsert_token_account($1, $2, NULL, $3)")
+                                                .bind(&src_hex)
+                                                .bind(&mint_hex)
+                                                .bind(&program_hex)
+                                                .execute(&mut *tx)
+                                                .await.ok();
+                                            sqlx::query("SELECT upsert_token_account($1, $2, NULL, $3)")
+                                                .bind(&dst_hex)
+                                                .bind(&mint_hex)
+                                                .bind(&program_hex)
+                                                .execute(&mut *tx)
+                                                .await.ok();
+                                            // Seed balances rows for src and dst
+                                            for acct in [&src_hex, &dst_hex] {
+                                                sqlx::query(
+                                                    r#"INSERT INTO token_balances (account_address, mint_address, balance, decimals, owner_address, program_id)
+                                                       VALUES ($1, $2, 0, 0, NULL, $3)
+                                                       ON CONFLICT (account_address, mint_address) DO UPDATE SET last_updated = CURRENT_TIMESTAMP"#
+                                                )
+                                                .bind(acct)
+                                                .bind(&mint_hex)
+                                                .bind(&program_hex)
+                                                .execute(&mut *tx)
+                                                .await.ok();
+                                            }
+                                            // If decimals available, set on balances and mints
+                                            if let Some(d) = inst_decimals {
+                                                let _ = sqlx::query("UPDATE token_balances SET decimals = $3 WHERE (account_address = $1 AND mint_address = $2) OR (account_address = $4 AND mint_address = $2)")
+                                                    .bind(&src_hex)
+                                                    .bind(&mint_hex)
+                                                    .bind(d)
+                                                    .bind(&dst_hex)
+                                                    .execute(&mut *tx)
+                                                    .await;
+                                                let _ = sqlx::query(
+                                                    r#"INSERT INTO token_mints (mint_address, program_id, decimals)
+                                                       VALUES ($1, $2, $3)
+                                                       ON CONFLICT (mint_address) DO UPDATE SET decimals = EXCLUDED.decimals, last_seen_at = CURRENT_TIMESTAMP"#
+                                                )
+                                                .bind(&mint_hex)
+                                                .bind(&program_hex)
+                                                .bind(d)
+                                                .execute(&mut *tx)
+                                                .await;
+                                            }
+                                            // Apply balance deltas using NUMERIC arithmetic
+                                            if amount > 0 {
+                                                let _ = sqlx::query(
+                                                    "UPDATE token_balances SET balance = GREATEST(balance - ($3)::numeric, 0), last_updated = CURRENT_TIMESTAMP WHERE account_address = $1 AND mint_address = $2"
+                                                )
+                                                .bind(&src_hex)
+                                                .bind(&mint_hex)
+                                                .bind(amount.to_string())
+                                                .execute(&mut *tx)
+                                                .await;
+                                                let _ = sqlx::query(
+                                                    "UPDATE token_balances SET balance = balance + ($3)::numeric, last_updated = CURRENT_TIMESTAMP WHERE account_address = $1 AND mint_address = $2"
+                                                )
+                                                .bind(&dst_hex)
+                                                .bind(&mint_hex)
+                                                .bind(amount.to_string())
+                                                .execute(&mut *tx)
+                                                .await;
+                                            }
                                         }
                                     }
                                 }

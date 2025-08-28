@@ -77,7 +77,9 @@ export default function ProgramsPage() {
                   <tr key={p.program_id_hex || p.program_id}>
                     <td>{p.display_name || '—'}</td>
                     <td style={{ wordBreak: 'break-all' }}>
-                      <a className={styles.hashButton} href={`/programs/${p.program_id_hex || p.program_id}`}>{p.program_id_hex || p.program_id}</a>
+                      <a className={styles.hashButton} href={`/programs/${encodeURIComponent(p.program_id_base58 || p.program_id_hex || p.program_id)}`}>
+                        {p.program_id_hex || p.program_id}
+                      </a>
                     </td>
                     <td style={{ wordBreak: 'break-all' }}>{p.program_id_base58 || ''}</td>
                     <td>{p.transaction_count}</td>
