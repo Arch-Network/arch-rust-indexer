@@ -6,6 +6,8 @@ import BlockScroller from '../components/BlockScroller';
 import DonutProgress from '../components/DonutProgress';
 import Sparkline from '../components/Sparkline';
 import { middleEllipsis } from '../utils/format';
+import dynamic from 'next/dynamic';
+const ProgramHeatstrip = dynamic(() => import('../components/ProgramHeatstrip'), { ssr: false });
 
 interface NetworkStats {
   total_blocks: number;
@@ -433,8 +435,8 @@ export default function Home() {
         <link rel="icon" href="/favicon.ico" />
       </Head>
 
-      {/* Animated live block scroller */}
-      <BlockScroller apiUrl={apiUrl} />
+      {/* Program Activity Heatstrip */}
+      <ProgramHeatstrip apiUrl={apiUrl} height={80} />
 
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: 12, marginBottom: 18 }}>
           <div className={styles.statCard}>

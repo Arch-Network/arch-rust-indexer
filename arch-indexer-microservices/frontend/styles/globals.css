@@ -29,7 +29,8 @@ html, body, #__next {
 
 /* Horizontal scroller base styles */
 .hScroller { overflow: hidden; border: 1px solid rgba(255,255,255,0.06); background: #0a0c10; }
-.hScrollerRow { display: flex; gap: 12px; padding: 10px; will-change: transform; }
+.hScrollerRow { display: flex; gap: 12px; padding: 10px; will-change: transform; transition: transform .2s linear; }
+canvas { image-rendering: auto; text-rendering: optimizeSpeed; }
 .hBlockCard { min-width: 200px; background: #0a0c10; border: 1px solid rgba(255,255,255,0.06); padding: 10px; }
 .hBlockCard h4 { margin: 0 0 8px 0; color: var(--accent); font-size: 12px; text-transform: uppercase; letter-spacing: .06em; }
 .hBlockMeta { display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }

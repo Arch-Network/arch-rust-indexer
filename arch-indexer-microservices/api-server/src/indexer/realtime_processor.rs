@@ -1,23 +1,89 @@
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serde_json::Value;
+use serde_json::{Value, json};
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64};
+use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::time::{sleep, Duration, Instant};
-use tracing::{error, info, warn};
+use tracing::{error, info, warn, debug};
 
 use crate::arch_rpc::websocket::WebSocketEvent;
 use crate::arch_rpc::ArchRpcClient;
 use crate::utils::convert_arch_timestamp;
 use crate::api::websocket_server::WebSocketServer;
 
+#[derive(Debug, Clone)]
+struct BlockActivity {
+    txs: i64,
+    program_counts: HashMap<String, i64>,
+    last_emit: Instant,
+    finalized: bool,
+}
+
+impl Default for BlockActivity {
+    fn default() -> Self {
+        Self { txs: 0, program_counts: HashMap::new(), last_emit: Instant::now(), finalized: false }
+    }
+}
+
+#[derive(Debug)]
+struct ActivityAggregator {
+    pool: Arc<PgPool>,
+    // Keyed by block height; using a Mutex because contention is low
+    state: tokio::sync::Mutex<HashMap<i64, BlockActivity>>,
+}
+
+impl ActivityAggregator {
+    fn new(pool: Arc<PgPool>) -> Self { Self { pool, state: tokio::sync::Mutex::new(HashMap::new()) } }
+
+    async fn add_tx(&self, height: i64, programs: &[String]) {
+        let mut guard = self.state.lock().await;
+        let entry = guard.entry(height).or_insert_with(|| BlockActivity { txs: 0, program_counts: HashMap::new(), last_emit: Instant::now() - Duration::from_millis(1000), finalized: false });
+        entry.txs += 1;
+        for p in programs {
+            *entry.program_counts.entry(p.clone()).or_insert(0) += 1;
+        }
+    }
+
+    async fn snapshot(&self, height: i64, top_k: usize) -> Option<(i64, Vec<(String, i64)>, bool)> {
+        let guard = self.state.lock().await;
+        if let Some(entry) = guard.get(&height) {
+            let mut v: Vec<(String, i64)> = entry.program_counts.iter().map(|(k,v)| (k.clone(), *v)).collect();
+            v.sort_by(|a,b| b.1.cmp(&a.1));
+            v.truncate(top_k);
+            return Some((entry.txs, v, entry.finalized));
+        }
+        None
+    }
+
+    async fn mark_final(&self, height: i64) {
+        let mut guard = self.state.lock().await;
+        if let Some(entry) = guard.get_mut(&height) { entry.finalized = true; }
+    }
+
+    async fn clear(&self, height: i64) { let mut guard = self.state.lock().await; guard.remove(&height); }
+
+    async fn should_emit_and_touch(&self, height: i64, min_gap_ms: u64) -> bool {
+        let mut guard = self.state.lock().await;
+        if let Some(entry) = guard.get_mut(&height) {
+            let now = Instant::now();
+            if now.duration_since(entry.last_emit) >= Duration::from_millis(min_gap_ms) {
+                entry.last_emit = now;
+                return true;
+            }
+        }
+        false
+    }
+}
+
 #[derive(Debug)]
 pub struct RealtimeProcessor {
     pool: Arc<PgPool>,
     rpc_client: Arc<ArchRpcClient>,
     websocket_server: Option<Arc<WebSocketServer>>,
+    aggregator: Arc<ActivityAggregator>,
 }
 
 impl RealtimeProcessor {
@@ -26,7 +92,7 @@ impl RealtimeProcessor {
         rpc_client: Arc<ArchRpcClient>,
         websocket_server: Option<Arc<WebSocketServer>>,
     ) -> Self {
-        Self { pool, rpc_client, websocket_server }
+        Self { pool: Arc::clone(&pool), rpc_client, websocket_server, aggregator: Arc::new(ActivityAggregator::new(pool)) }
     }
 
     pub async fn start(&self, mut event_rx: mpsc::Receiver<WebSocketEvent>) -> Result<()> {
@@ -65,7 +131,42 @@ impl RealtimeProcessor {
     async fn process_event(&self, event: WebSocketEvent) -> Result<()> {
         match event.topic.as_str() {
             "block" => self.process_block_event(event).await?,
-            "transaction" => self.process_transaction_event(event).await?,
+            "transaction" => {
+                // Pre-aggregate live program activity for the heatstrip
+                let h = event.data.get("block_height").and_then(|v| v.as_i64());
+                let programs: Vec<String> = event
+                    .data
+                    .get("program_ids")
+                    .and_then(|p| p.as_array())
+                    .map(|arr| arr.iter().filter_map(|v| v.as_str()).map(|s| s.to_string()).collect())
+                    .unwrap_or_default();
+                if let Some(height) = h {
+                    self.aggregator.add_tx(height, &programs).await;
+                    // Debounced live emit so the UI updates immediately
+                    if self.aggregator.should_emit_and_touch(height, 250).await {
+                        if let Some(server) = &self.websocket_server {
+                            if let Some((txs, prog, finalized)) = self.aggregator.snapshot(height, 32).await {
+                                let mut obj = serde_json::Map::new();
+                                for (pid, cnt) in prog { obj.insert(pid, serde_json::Value::from(cnt)); }
+                                let live = crate::arch_rpc::websocket::WebSocketEvent {
+                                    topic: "block_activity".to_string(),
+                                    data: json!({
+                                        "height": height,
+                                        "transaction_count": txs,
+                                        "program_counts": serde_json::Value::Object(obj),
+                                        "finalized": finalized,
+                                        "timestamp": Utc::now().timestamp_millis(),
+                                    }),
+                                    timestamp: Utc::now(),
+                                };
+                                let _ = server.broadcast_event(live).await;
+                                debug!("block_activity live: height={}, txs={}", height, txs);
+                            }
+                        }
+                    }
+                }
+                self.process_transaction_event(event).await?
+            },
             "account_update" => self.process_account_update_event(event).await?,
             "rolledback_transactions" => self.process_rolledback_transactions_event(event).await?,
             "reapplied_transactions" => self.process_reapplied_transactions_event(event).await?,
@@ -76,6 +177,38 @@ impl RealtimeProcessor {
         }
 
         Ok(())
+    }
+
+    async fn load_block_activity(&self, height: i64) -> Result<(i64, Vec<(String, i64)>)> {
+        // Fetch tx count
+        use sqlx::Row;
+        let tx_row = sqlx::query("SELECT COUNT(*) as txs FROM transactions WHERE block_height = $1")
+            .bind(height)
+            .fetch_one(&*self.pool)
+            .await?;
+        let txs: i64 = tx_row.try_get::<i64, _>("txs").unwrap_or(0);
+
+        // Fetch per-program counts (top 64 for brevity)
+        let rows = sqlx::query(
+            r#"SELECT program_id, COUNT(*) as cnt
+               FROM transaction_programs
+               WHERE block_height = $1
+               GROUP BY program_id
+               ORDER BY cnt DESC
+               LIMIT 64"#,
+        )
+        .bind(height)
+        .fetch_all(&*self.pool)
+        .await?;
+
+        let mut counts: Vec<(String, i64)> = Vec::with_capacity(rows.len());
+        for r in rows {
+            let pid = r.try_get::<String, _>("program_id").unwrap_or_else(|_| "unknown".to_string());
+            let cnt = r.try_get::<i64, _>("cnt").unwrap_or(0);
+            counts.push((pid, cnt));
+        }
+
+        Ok((txs, counts))
     }
 
     async fn process_block_event(&self, event: WebSocketEvent) -> Result<()> {
@@ -97,6 +230,35 @@ impl RealtimeProcessor {
 
         info!("📦 Processing block event: hash={}, timestamp={}", hash, timestamp);
 
+        // Emit a debounced live snapshot if pre-aggregated txs exist
+        if let Ok(r) = sqlx::query("SELECT height FROM blocks WHERE hash = $1")
+            .bind(hash)
+            .fetch_optional(&*self.pool)
+            .await
+        {
+            if let Some(row) = r { use sqlx::Row; let height: i64 = row.try_get::<i64, _>("height").unwrap_or(0);
+                if height > 0 { if let Some(server) = &self.websocket_server {
+                    if let Some((txs, prog, finalized)) = self.aggregator.snapshot(height, 32).await {
+                        let mut obj = serde_json::Map::new();
+                        for (pid, cnt) in prog { obj.insert(pid, serde_json::Value::from(cnt)); }
+                        let live = crate::arch_rpc::websocket::WebSocketEvent {
+                            topic: "block_activity".to_string(),
+                            data: json!({
+                                "hash": hash,
+                                "height": height,
+                                "timestamp": timestamp.timestamp_millis(),
+                                "transaction_count": txs,
+                                "program_counts": serde_json::Value::Object(obj),
+                                "finalized": finalized,
+                            }),
+                            timestamp: Utc::now(),
+                        };
+                        let _ = server.broadcast_event(live).await;
+                    }
+                } }
+            }
+        }
+
         // Check if block already exists with connection timeout
         let existing_block = match tokio::time::timeout(
             tokio::time::Duration::from_secs(10),
@@ -113,8 +275,40 @@ impl RealtimeProcessor {
             }
         };
 
-        if existing_block.is_some() {
-            info!("Block {} already exists, skipping", hash);
+        if let Some(_row) = existing_block {
+            info!("Block {} already exists, will emit summary event", hash);
+            if let Ok(r) = sqlx::query("SELECT height FROM blocks WHERE hash = $1")
+                .bind(hash)
+                .fetch_one(&*self.pool)
+                .await
+            {
+                use sqlx::Row;
+                let height: i64 = r.try_get::<i64, _>("height").unwrap_or(0);
+                if height > 0 {
+                    if let Ok((txs, prog)) = self.load_block_activity(height).await {
+                        if let Some(server) = &self.websocket_server {
+                            let mut obj = serde_json::Map::new();
+                            for (pid, cnt) in prog {
+                                obj.insert(pid, serde_json::Value::from(cnt));
+                            }
+                            let enriched = crate::arch_rpc::websocket::WebSocketEvent {
+                                topic: "block".to_string(),
+                                data: serde_json::json!({
+                                    "hash": hash,
+                                    "height": height,
+                                    "block_height": height,
+                                    "timestamp": timestamp.timestamp_millis(),
+                                    "transaction_count": txs,
+                                    "program_counts": serde_json::Value::Object(obj),
+                                }),
+                                timestamp: Utc::now(),
+                            };
+                            let _ = server.broadcast_event(enriched).await;
+                            debug!("block summary: height={}, txs={}", height, txs);
+                        }
+                    }
+                }
+            }
             return Ok(());
         }
 
@@ -141,6 +335,27 @@ impl RealtimeProcessor {
                 }
                 
                 info!("✅ Block {} fully processed and stored", hash);
+
+                // After persistence, emit an enriched block event to UI clients with tx count and program counts
+                if let Some(server) = &self.websocket_server {
+                    let (txs, prog) = self.load_block_activity(block.height).await.unwrap_or((block.transaction_count as i64, Vec::new()));
+                    let mut obj = serde_json::Map::new();
+                    for (pid, cnt) in prog { obj.insert(pid, serde_json::Value::from(cnt)); }
+                    let enriched = crate::arch_rpc::websocket::WebSocketEvent {
+                        topic: "block".to_string(),
+                        data: serde_json::json!({
+                            "hash": block.hash,
+                            "height": block.height,
+                            "block_height": block.height,
+                            "timestamp": timestamp.timestamp_millis(),
+                            "transaction_count": txs,
+                            "program_counts": serde_json::Value::Object(obj),
+                        }),
+                        timestamp: Utc::now(),
+                    };
+                    let _ = server.broadcast_event(enriched).await;
+                    debug!("block summary post-store: height={}, txs={}", block.height, txs);
+                }
             }
             Err(e) => {
                 error!("❌ Failed to fetch block data for {}: {}", hash, e);
