@@ -1,6 +1,32 @@
 provider "aws" {
   region = var.region
 }
+# IAM roles for ECS
+data "aws_iam_policy_document" "ecs_task_assume" {
+  statement {
+    actions = ["sts:AssumeRole"]
+    principals {
+      type        = "Service"
+      identifiers = ["ecs-tasks.amazonaws.com"]
+    }
+  }
+}
+
+resource "aws_iam_role" "ecs_execution" {
+  name               = "arch-indexer-ecs-execution"
+  assume_role_policy = data.aws_iam_policy_document.ecs_task_assume.json
+}
+
+resource "aws_iam_role_policy_attachment" "ecs_execution_policy" {
+  role       = aws_iam_role.ecs_execution.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
+}
+
+resource "aws_iam_role" "ecs_task" {
+  name               = "arch-indexer-ecs-task"
+  assume_role_policy = data.aws_iam_policy_document.ecs_task_assume.json
+}
+
 
 # Enable required APIs/services
 resource "aws_vpc" "main" {
@@ -51,7 +77,8 @@ resource "aws_db_instance" "postgres" {
   vpc_security_group_ids = [aws_security_group.postgres.id]
   db_subnet_group_name   = aws_db_subnet_group.postgres.name
 
-  parameter_group_name = aws_db_parameter_group.postgres.name
+  # Use default parameter group for simplicity
+  # parameter_group_name = aws_db_parameter_group.postgres.name
 
   backup_retention_period = 7
   skip_final_snapshot    = true
@@ -61,9 +88,10 @@ resource "aws_db_instance" "postgres" {
 resource "aws_elasticache_cluster" "redis" {
   cluster_id           = "arch-indexer-cache"
   engine              = "redis"
+  engine_version      = "7.1"
   node_type           = "cache.t3.micro"
   num_cache_nodes     = 1
-  parameter_group_name = "default.redis6.x"
+  parameter_group_name = "default.redis7"
   port                = 6379
   security_group_ids  = [aws_security_group.redis.id]
   subnet_group_name   = aws_elasticache_subnet_group.redis.name
@@ -74,19 +102,35 @@ resource "aws_ecs_cluster" "main" {
   name = "arch-rust-indexer"
 }
 
-resource "aws_ecs_task_definition" "indexer" {
-  family                   = "arch-rust-indexer"
+# CloudWatch log groups for ECS tasks
+resource "aws_cloudwatch_log_group" "api" {
+  name              = "/ecs/arch-indexer-api"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "frontend" {
+  name              = "/ecs/arch-indexer-frontend"
+  retention_in_days = 14
+}
+
+resource "aws_cloudwatch_log_group" "indexer" {
+  name              = "/ecs/arch-indexer-indexer"
+  retention_in_days = 14
+}
+
+resource "aws_ecs_task_definition" "api" {
+  family                   = "arch-indexer-api"
   requires_compatibilities = ["FARGATE"]
   network_mode            = "awsvpc"
-  cpu                     = "2048"
-  memory                  = "4096"
+  cpu                     = "1024"
+  memory                  = "2048"
   execution_role_arn      = aws_iam_role.ecs_execution.arn
   task_role_arn           = aws_iam_role.ecs_task.arn
 
   container_definitions = jsonencode([
     {
-      name  = "arch-rust-indexer"
-      image = "public.ecr.aws/your-repo/arch-rust-indexer:latest"
+      name  = "api-server"
+      image = var.api_image
       
       environment = [
         {
@@ -111,11 +155,11 @@ resource "aws_ecs_task_definition" "indexer" {
         },
         {
           name  = "DATABASE__HOST"
-          value = aws_db_instance.postgres.endpoint
+          value = aws_db_instance.postgres.address
         },
         {
           name  = "DATABASE__PORT"
-          value = "5432"
+          value = tostring(aws_db_instance.postgres.port)
         },
         {
           name  = "DATABASE__DATABASE_NAME"
@@ -123,7 +167,7 @@ resource "aws_ecs_task_definition" "indexer" {
         },
         {
           name  = "DATABASE__MAX_CONNECTIONS"
-          value = "30"
+          value = "50"
         },
         {
           name  = "DATABASE__MIN_CONNECTIONS"
@@ -137,34 +181,24 @@ resource "aws_ecs_task_definition" "indexer" {
           name  = "APPLICATION__HOST"
           value = "0.0.0.0"
         },
-        {
-          name  = "ARCH_NODE__URL"
-          value = var.arch_node_url
-        },
-        {
-          name  = "REDIS__URL"
-          value = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:${aws_elasticache_cluster.redis.cache_nodes[0].port}"
-        },
-        {
-          name  = "INDEXER__BATCH_SIZE"
-          value = "2000"
-        },
-        {
-          name  = "INDEXER__CONCURRENT_BATCHES"
-          value = "40"
-        }
+        # Ensure nested config picks up arch_node.url
+        { name = "ARCH_NODE__URL", value = var.arch_node_url },
+        # Back-compat single-underscore env if referenced elsewhere
+        { name = "ARCH_NODE_URL", value = var.arch_node_url },
+        { name = "REDIS_URL", value = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:${aws_elasticache_cluster.redis.cache_nodes[0].port}" },
+        { name = "DATABASE_URL", value = "postgres://${var.db_username}:${var.db_password}@${aws_db_instance.postgres.address}:${aws_db_instance.postgres.port}/archindexer" },
       ]
 
       portMappings = [
         {
-          containerPort = 8080
-          hostPort      = 8080
+          containerPort = var.api_port
+          hostPort      = var.api_port
           protocol      = "tcp"
         }
       ]
 
       healthCheck = {
-        command     = ["CMD-SHELL", "curl -f http://localhost:8080/ || exit 1"]
+        command     = ["CMD-SHELL", "curl -f http://localhost:${var.api_port}/health || curl -f http://localhost:${var.api_port}/ || exit 1"]
         interval    = 30
         timeout     = 5
         retries     = 3
@@ -174,7 +208,7 @@ resource "aws_ecs_task_definition" "indexer" {
       logConfiguration = {
         logDriver = "awslogs"
         options = {
-          awslogs-group         = "/ecs/arch-rust-indexer"
+          awslogs-group         = "/ecs/arch-indexer-api"
           awslogs-region        = var.region
           awslogs-stream-prefix = "ecs"
         }
@@ -183,9 +217,75 @@ resource "aws_ecs_task_definition" "indexer" {
   ])
 }
 
-# Create ECS service
+# API service behind ALB
+resource "aws_ecs_service" "api" {
+  name            = "arch-indexer-api"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.api.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets         = aws_subnet.private[*].id
+    security_groups = [aws_security_group.ecs.id]
+  }
+
+  load_balancer {
+    target_group_arn = aws_lb_target_group.api.arn
+    container_name   = "api-server"
+    container_port   = var.api_port
+  }
+}
+
+# Indexer task (no ALB)
+resource "aws_ecs_task_definition" "indexer" {
+  family                   = "arch-indexer-indexer"
+  requires_compatibilities = ["FARGATE"]
+  network_mode            = "awsvpc"
+  cpu                     = "2048"
+  memory                  = "4096"
+  execution_role_arn      = aws_iam_role.ecs_execution.arn
+  task_role_arn           = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name  = "indexer"
+      image = var.indexer_image
+
+      environment = [
+        {
+          name  = "DATABASE__USERNAME"
+          value = var.db_username
+        },
+        {
+          name  = "DATABASE__PASSWORD"
+          value = var.db_password
+        },
+        {
+          name  = "DATABASE__HOST"
+          value = aws_db_instance.postgres.address
+        },
+        { name = "DATABASE__PORT", value = tostring(aws_db_instance.postgres.port) },
+        { name = "DATABASE__DATABASE_NAME", value = "archindexer" },
+        { name = "ARCH_NODE__URL", value = var.arch_node_url },
+        { name = "REDIS_URL", value = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:${aws_elasticache_cluster.redis.cache_nodes[0].port}" },
+        { name = "DATABASE_URL", value = "postgres://${var.db_username}:${var.db_password}@${aws_db_instance.postgres.address}:${aws_db_instance.postgres.port}/archindexer" }
+      ]
+
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = "/ecs/arch-indexer-indexer"
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+    }
+  ])
+}
+
 resource "aws_ecs_service" "indexer" {
-  name            = "arch-rust-indexer"
+  name            = "arch-indexer-indexer"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.indexer.arn
   desired_count   = 1
@@ -195,11 +295,57 @@ resource "aws_ecs_service" "indexer" {
     subnets         = aws_subnet.private[*].id
     security_groups = [aws_security_group.ecs.id]
   }
+}
+
+# Frontend behind ALB
+resource "aws_ecs_task_definition" "frontend" {
+  family                   = "arch-indexer-frontend"
+  requires_compatibilities = ["FARGATE"]
+  network_mode            = "awsvpc"
+  cpu                     = "512"
+  memory                  = "1024"
+  execution_role_arn      = aws_iam_role.ecs_execution.arn
+  task_role_arn           = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name  = "frontend"
+      image = var.frontend_image
+      portMappings = [
+        { containerPort = var.frontend_port, hostPort = var.frontend_port, protocol = "tcp" }
+      ]
+      environment = [
+        { name = "NEXT_PUBLIC_API_URL", value = "http://${aws_lb.main.dns_name}" }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = "/ecs/arch-indexer-frontend"
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+    }
+  ])
+}
+
+resource "aws_ecs_service" "frontend" {
+  name            = "arch-indexer-frontend"
+  cluster         = aws_ecs_cluster.main.id
+  task_definition = aws_ecs_task_definition.frontend.arn
+  desired_count   = 2
+  launch_type     = "FARGATE"
+
+  network_configuration {
+    subnets         = aws_subnet.public[*].id
+    security_groups = [aws_security_group.ecs.id]
+    assign_public_ip = true
+  }
 
   load_balancer {
-    target_group_arn = aws_lb_target_group.indexer.arn
-    container_name   = "arch-rust-indexer"
-    container_port   = 8080
+    target_group_arn = aws_lb_target_group.frontend.arn
+    container_name   = "frontend"
+    container_port   = var.frontend_port
   }
 }
 

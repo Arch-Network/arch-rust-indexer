@@ -1,0 +1,71 @@
+{
+  "family": "arch-indexer-indexer",
+  "taskRoleArn": "arn:aws:iam::590184001652:role/arch-indexer-ecs-task",
+  "executionRoleArn": "arn:aws:iam::590184001652:role/arch-indexer-ecs-execution",
+  "networkMode": "awsvpc",
+  "containerDefinitions": [
+    {
+      "name": "indexer",
+      "image": "590184001652.dkr.ecr.us-east-1.amazonaws.com/arch-indexer/indexer:latest",
+      "cpu": 0,
+      "portMappings": [],
+      "essential": true,
+      "environment": [
+        {
+          "name": "DATABASE__HOST",
+          "value": "arch-rust-indexer.c7iscsk6ubb2.us-east-1.rds.amazonaws.com"
+        },
+        {
+          "name": "DATABASE_URL",
+          "value": "postgres://arch:StrongPass_2025!@arch-rust-indexer.c7iscsk6ubb2.us-east-1.rds.amazonaws.com:5432/archindexer"
+        },
+        {
+          "name": "ARCH_NODE_URL",
+          "value": "http://44.196.173.35:8081"
+        },
+        {
+          "name": "DATABASE__USERNAME",
+          "value": "arch"
+        },
+        {
+          "name": "DATABASE__PORT",
+          "value": "5432"
+        },
+        {
+          "name": "ARCH_NODE__URL",
+          "value": "http://44.196.173.35:8081"
+        },
+        {
+          "name": "DATABASE__PASSWORD",
+          "value": "StrongPass_2025!"
+        },
+        {
+          "name": "DATABASE__DATABASE_NAME",
+          "value": "archindexer"
+        },
+        {
+          "name": "REDIS_URL",
+          "value": "redis://arch-indexer-cache.1h6zlq.0001.use1.cache.amazonaws.com:6379"
+        }
+      ],
+      "mountPoints": [],
+      "volumesFrom": [],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/arch-indexer-indexer",
+          "awslogs-region": "us-east-1",
+          "awslogs-stream-prefix": "ecs"
+        }
+      },
+      "systemControls": []
+    }
+  ],
+  "volumes": [],
+  "placementConstraints": [],
+  "requiresCompatibilities": [
+    "FARGATE"
+  ],
+  "cpu": "2048",
+  "memory": "4096"
+}
