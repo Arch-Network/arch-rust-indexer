@@ -179,7 +179,7 @@ impl RealtimeProcessor {
         Ok(())
     }
 
-    async fn load_block_activity(&self, height: i64) -> Result<(i64, Vec<(String, i64)>)> {
+    async fn load_block_activity(&self, height: i64) -> Result<(i64, Vec<(String, i64)>, bool)> {
         // Fetch tx count
         use sqlx::Row;
         let tx_row = sqlx::query("SELECT COUNT(*) as txs FROM transactions WHERE block_height = $1")
@@ -208,7 +208,14 @@ impl RealtimeProcessor {
             counts.push((pid, cnt));
         }
 
-        Ok((txs, counts))
+        // Fetch finalized status
+        let finalized_row = sqlx::query("SELECT finalized FROM blocks WHERE height = $1")
+            .bind(height)
+            .fetch_optional(&*self.pool)
+            .await?;
+        let finalized = finalized_row.map_or(false, |row| row.try_get::<bool, _>("finalized").unwrap_or(false));
+
+        Ok((txs, counts, finalized))
     }
 
     async fn process_block_event(&self, event: WebSocketEvent) -> Result<()> {
@@ -285,7 +292,7 @@ impl RealtimeProcessor {
                 use sqlx::Row;
                 let height: i64 = r.try_get::<i64, _>("height").unwrap_or(0);
                 if height > 0 {
-                    if let Ok((txs, prog)) = self.load_block_activity(height).await {
+                    if let Ok((txs, prog, finalized)) = self.load_block_activity(height).await {
                         if let Some(server) = &self.websocket_server {
                             let mut obj = serde_json::Map::new();
                             for (pid, cnt) in prog {
@@ -328,17 +335,17 @@ impl RealtimeProcessor {
                 // Store the block in the database
                 self.store_block(&block).await?;
                 
-                // Process transactions if any
+                // Previously we inserted placeholder tx rows here. Skip that to avoid polluting
+                // the transactions table; dedicated tx indexers should persist real txs.
                 if !block.transactions.is_empty() {
-                    info!("💳 Processing {} transactions for block {}", block.transactions.len(), hash);
-                    self.process_block_transactions(&block).await?;
+                    debug!("observed {} txs in block {} (skipping placeholder inserts)", block.transactions.len(), hash);
                 }
                 
                 info!("✅ Block {} fully processed and stored", hash);
 
                 // After persistence, emit an enriched block event to UI clients with tx count and program counts
                 if let Some(server) = &self.websocket_server {
-                    let (txs, prog) = self.load_block_activity(block.height).await.unwrap_or((block.transaction_count as i64, Vec::new()));
+                    let (txs, prog, finalized) = self.load_block_activity(block.height).await.unwrap_or((block.transaction_count as i64, Vec::new(), false));
                     let mut obj = serde_json::Map::new();
                     for (pid, cnt) in prog { obj.insert(pid, serde_json::Value::from(cnt)); }
                     let enriched = crate::arch_rpc::websocket::WebSocketEvent {
@@ -566,24 +573,8 @@ impl RealtimeProcessor {
     }
 
     /// Process all transactions for a block
-    async fn process_block_transactions(&self, block: &crate::arch_rpc::Block) -> Result<()> {
-        for tx_hash in &block.transactions {
-            // For now, store basic transaction info
-            // In a full implementation, you'd fetch complete transaction data
-            sqlx::query!(
-                "INSERT INTO transactions (txid, block_height, data, status, created_at) 
-                 VALUES ($1, $2, $3, $4, CURRENT_TIMESTAMP) 
-                 ON CONFLICT (txid) DO NOTHING",
-                tx_hash,
-                block.height,
-                serde_json::json!({"block_hash": block.hash, "timestamp": block.timestamp}),
-                serde_json::json!({"status": 0}) // Default status as JSON
-            )
-            .execute(&*self.pool)
-            .await?;
-        }
-
-        info!("✅ {} transactions processed for block {}", block.transactions.len(), block.hash);
+    async fn process_block_transactions(&self, _block: &crate::arch_rpc::Block) -> Result<()> {
+        // Intentionally disabled; a dedicated transaction indexer should handle persistence.
         Ok(())
     }
 }

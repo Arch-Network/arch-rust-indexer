@@ -1798,7 +1798,9 @@ pub async fn get_transactions(
         .and_then(|o| o.parse::<i64>().ok())
         .unwrap_or(0);
 
-    // Fetch paginated transactions newest-first (dynamic query to avoid sqlx offline cache issues)
+    // Fetch paginated transactions newest-first, excluding placeholder rows
+    // Placeholder rows are those with no runtime transaction payload (no data.message)
+    // and no status.type field (e.g., legacy {"status":0}).
     let rows = sqlx::query(
         r#"
         SELECT 
@@ -1809,6 +1811,7 @@ pub async fn get_transactions(
             bitcoin_txids,
             created_at
         FROM transactions 
+        WHERE (data ? 'message') OR (jsonb_typeof(status) = 'object' AND (status ? 'type') AND NULLIF(status->>'type','') IS NOT NULL)
         ORDER BY created_at DESC, block_height DESC
         LIMIT $1 OFFSET $2
         "#
@@ -1830,8 +1833,13 @@ pub async fn get_transactions(
         })
         .collect();
 
-    // Total transactions count for pagination
-    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM transactions")
+    // Total transactions count for pagination (apply the same placeholder filter)
+    let total_count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COUNT(*) FROM transactions
+        WHERE (data ? 'message') OR (jsonb_typeof(status) = 'object' AND (status ? 'type') AND NULLIF(status->>'type','') IS NOT NULL)
+        "#
+    )
         .fetch_one(&*pool)
         .await?;
 
