@@ -57,8 +57,8 @@ export default function Home() {
   const [programError, setProgramError] = useState<string | null>(null);
   const [timezone, setTimezone] = useState<string>('local');
 
-  // Get API URL from environment or fallback to localhost
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+  // Get API URL from environment or fallback to same-origin
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
 
   useEffect(() => {
     loadNetworkStats();

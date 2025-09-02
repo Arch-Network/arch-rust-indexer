@@ -9,7 +9,7 @@ import { middleEllipsis, formatDateTime } from '../../utils/format';
 type Tx = { txid: string; block_height: number; status?: any; created_at: string };
 
 export default function TransactionsPage() {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
   const [txs, setTxs] = useState<Tx[]>([]);
   const [page, setPage] = useState(1);
   const pageSize = 50;

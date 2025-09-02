@@ -9,7 +9,7 @@ import { middleEllipsis } from '../../utils/format';
 type Block = { height: number; hash: string; timestamp: string; transaction_count: number };
 
 export default function BlocksPage() {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
   const [blocks, setBlocks] = useState<Block[]>([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);

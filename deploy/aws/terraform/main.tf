@@ -315,7 +315,8 @@ resource "aws_ecs_task_definition" "frontend" {
         { containerPort = var.frontend_port, hostPort = var.frontend_port, protocol = "tcp" }
       ]
       environment = [
-        { name = "NEXT_PUBLIC_API_URL", value = "http://${aws_lb.main.dns_name}" }
+        { name = "NEXT_PUBLIC_API_URL", value = "http://${aws_lb.main.dns_name}" },
+        { name = "NEXT_PUBLIC_WS_URL",  value = "ws://${aws_lb.main.dns_name}/ws" }
       ]
       logConfiguration = {
         logDriver = "awslogs"

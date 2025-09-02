@@ -17,7 +17,7 @@ type Execution = { status: any; logs: string[]; bitcoin_txid?: string | null; ro
 export default function TxDetailPage() {
   const router = useRouter();
   const txid = router.query.txid as string | undefined;
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
   const [tx, setTx] = useState<Tx | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

@@ -4,7 +4,7 @@ import styles from '../../styles/Home.module.css';
 import Pagination from '../../components/Pagination';
 
 export default function ProgramsPage() {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
   const [term, setTerm] = useState('');
   const [programs, setPrograms] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);

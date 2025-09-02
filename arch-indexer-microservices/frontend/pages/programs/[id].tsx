@@ -27,7 +27,7 @@ const MAPPED: Record<string, string> = {
 export default function ProgramDetailPage() {
   const router = useRouter();
   const id = router.query.id as string | undefined;
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
   const [program, setProgram] = useState<Program | null>(null);
   const [recent, setRecent] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);

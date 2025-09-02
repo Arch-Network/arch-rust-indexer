@@ -86,8 +86,8 @@ resource "aws_lb_target_group" "api" {
   target_type = "ip"
   vpc_id      = aws_vpc.main.id
   health_check {
-    path                = "/"
-    matcher             = "200-399"
+    path                = "/health"
+    matcher             = "200-499"
     healthy_threshold   = 2
     unhealthy_threshold = 5
     interval            = 30

@@ -3,7 +3,7 @@ import Layout from '../../components/Layout';
 import styles from '../../styles/Home.module.css';
 
 export default function TokensPage() {
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
   const [items, setItems] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

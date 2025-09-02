@@ -6,7 +6,7 @@ export default function HeaderSearch() {
   const [term, setTerm] = useState('');
   const [loading, setLoading] = useState(false);
   const router = useRouter();
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+  const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
 
   const go = async () => {
     const q = term.trim();
