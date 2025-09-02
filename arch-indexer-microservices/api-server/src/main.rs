@@ -13,6 +13,7 @@ use api_server::{
     config::Settings,
     metrics
 };
+use api_server::arch_rpc::websocket::{WebSocketClient, WebSocketEvent};
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -103,8 +104,8 @@ async fn main() -> Result<()> {
                 .collect::<Vec<_>>()
         );
 
-    // Create the router
-    let app = create_router(Arc::new(pool))
+    // Create core API router
+    let api_router = create_router(Arc::new(pool.clone()))
         .route("/metrics", axum::routing::get(move || async move {
             let metrics = prometheus_handle.render();
             (
@@ -114,12 +115,40 @@ async fn main() -> Result<()> {
         }))
         .layer(cors);
 
-    // Start the server
+    // Initialize in-process websocket server state and expose /ws
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<api_server::arch_rpc::websocket::WebSocketEvent>(1000);
+    let ws_server = Arc::new(api_server::api::websocket_server::WebSocketServer::new(event_tx));
+    let ws_router = axum::Router::new()
+        .route("/ws", axum::routing::get(api_server::api::websocket_server::WebSocketServer::handle_websocket))
+        .with_state(Arc::clone(&ws_server));
+
+    // Start a lightweight real-time forwarder: connect to Arch node WS and broadcast events
+    if settings.websocket.enabled && settings.indexer.enable_realtime {
+        let ws_settings = settings.websocket.clone();
+        let node_ws_url = settings.arch_node.websocket_url.clone();
+        let server_for_events = Arc::clone(&ws_server);
+        tokio::spawn(async move {
+            let client = WebSocketClient::new(ws_settings, node_ws_url);
+            let (tx, mut rx) = tokio::sync::mpsc::channel::<WebSocketEvent>(1000);
+            // Connection task
+            tokio::spawn(async move {
+                let _ = client.start(tx).await;
+            });
+            // Forward only block events to UI clients
+            while let Some(event) = rx.recv().await {
+                if event.topic == "block" {
+                    let _ = server_for_events.broadcast_event(event).await;
+                }
+            }
+        });
+    }
+
+    // Start the server with both routers
     let addr = format!("{}:{}", settings.application.host, settings.application.port);
     info!("🌐 API Server listening on {}", addr);
 
     let listener = tokio::net::TcpListener::bind(&addr).await?;
-    
+    let app = api_router.merge(ws_router);
     axum::serve(listener, app).await?;
 
     Ok(())

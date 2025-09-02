@@ -10,6 +10,7 @@ use crate::arch_rpc::websocket::{WebSocketClient, WebSocketEvent};
 use crate::arch_rpc::ArchRpcClient;
 use crate::config::settings::Settings;
 use crate::indexer::realtime_processor::RealtimeProcessor;
+use crate::api::websocket_server::WebSocketServer;
 use crate::indexer::sync::ChainSync;
 use crate::indexer::block_processor::BlockProcessor;
 use sqlx::PgPool;
@@ -72,7 +73,9 @@ impl HybridSync {
 
         // Start real-time processor
         let rpc_client = Arc::new(ArchRpcClient::new(self.settings.arch_node.url.clone()));
-        let processor = RealtimeProcessor::new(Arc::clone(&self.pool), rpc_client);
+        // Attempt to get a global websocket server if one exists in application state later;
+        // for now pass None and allow main to wire a server-enabled instance when available.
+        let processor = RealtimeProcessor::new(Arc::clone(&self.pool), rpc_client, None);
         let processor_handle = tokio::spawn(async move {
             if let Err(e) = processor.start(event_rx).await {
                 error!("Real-time processor failed: {}", e);

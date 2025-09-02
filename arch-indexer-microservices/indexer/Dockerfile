@@ -30,8 +30,7 @@ WORKDIR /app
 # Copy the binary from builder stage
 COPY --from=builder /app/target/release/indexer /app/indexer
 
-# Copy configuration
-COPY config.yml /app/config.yml
+# Do not bake a static config; rely on environment variables provided by ECS
 
 # Create non-root user
 RUN useradd -r -s /bin/false app && chown -R app:app /app

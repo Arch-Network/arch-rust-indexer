@@ -11,16 +11,22 @@ use tracing::{error, info, warn};
 use crate::arch_rpc::websocket::WebSocketEvent;
 use crate::arch_rpc::ArchRpcClient;
 use crate::utils::convert_arch_timestamp;
+use crate::api::websocket_server::WebSocketServer;
 
 #[derive(Debug)]
 pub struct RealtimeProcessor {
     pool: Arc<PgPool>,
     rpc_client: Arc<ArchRpcClient>,
+    websocket_server: Option<Arc<WebSocketServer>>,
 }
 
 impl RealtimeProcessor {
-    pub fn new(pool: Arc<PgPool>, rpc_client: Arc<ArchRpcClient>) -> Self {
-        Self { pool, rpc_client }
+    pub fn new(
+        pool: Arc<PgPool>,
+        rpc_client: Arc<ArchRpcClient>,
+        websocket_server: Option<Arc<WebSocketServer>>,
+    ) -> Self {
+        Self { pool, rpc_client, websocket_server }
     }
 
     pub async fn start(&self, mut event_rx: mpsc::Receiver<WebSocketEvent>) -> Result<()> {
@@ -36,6 +42,12 @@ impl RealtimeProcessor {
             event_count += 1;
             last_event_time = tokio::time::Instant::now();
             
+            // Broadcast raw event to any connected websocket UI clients
+            if let Some(server) = &self.websocket_server {
+                // Ignore broadcast errors; continue processing
+                let _ = server.broadcast_event(event.clone()).await;
+            }
+
             match self.process_event(event).await {
                 Ok(_) => {
                     info!("✅ Event #{} processed successfully", event_count);

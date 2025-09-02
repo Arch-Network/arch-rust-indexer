@@ -13,6 +13,7 @@ type Props = {
 
 export default function BlockScroller({ apiUrl }: Props) {
   const [items, setItems] = useState<BlockCard[]>([]);
+  const seenRef = useRef<Set<number>>(new Set());
   const queueRef = useRef<BlockCard[]>([]);
   const rowRef = useRef<HTMLDivElement | null>(null);
   const animRef = useRef<number | null>(null);
@@ -22,8 +23,23 @@ export default function BlockScroller({ apiUrl }: Props) {
   useEffect(() => {
     let ws: WebSocket | null = null;
     try {
-      const url = (process.env.NEXT_PUBLIC_WS_URL as string) || 'ws://localhost:8081';
-      ws = new WebSocket(url);
+      const envUrl = process.env.NEXT_PUBLIC_WS_URL as string | undefined;
+      const deriveWsFromApi = (api: string): string => {
+        try {
+          const u = new URL(api);
+          u.protocol = u.protocol === 'https:' ? 'wss:' : 'ws:';
+          // Always mount WS at /ws regardless of API path (e.g. /api)
+          u.pathname = '/ws';
+          u.search = '';
+          u.hash = '';
+          return u.toString();
+        } catch {
+          return '';
+        }
+      };
+      const wsUrl = envUrl && envUrl.length > 0 ? envUrl : deriveWsFromApi(apiUrl || '');
+      if (!wsUrl) return;
+      ws = new WebSocket(wsUrl);
       ws.onopen = () => {
         const sub = JSON.stringify({ method: 'subscribe', params: { topic: 'block', filter: {} }, request_id: 'ui_block_scroller' });
         ws?.send(sub);
@@ -38,8 +54,10 @@ export default function BlockScroller({ apiUrl }: Props) {
             const txs = data.transaction_count ?? data.txs?.length ?? 0;
             const timestamp = data.timestamp ?? data.time ?? null;
             const card: BlockCard = { height, txs, timestamp: timestamp || undefined };
-            // enqueue and kick animation loop
-            queueRef.current.push(card);
+            if (!seenRef.current.has(height)) {
+              seenRef.current.add(height);
+              queueRef.current.push(card);
+            }
           }
         } catch {}
       };
@@ -54,10 +72,11 @@ export default function BlockScroller({ apiUrl }: Props) {
         const res = await fetch(`${apiUrl}/api/blocks?limit=10&offset=0`);
         const json = await res.json();
         const blocks = Array.isArray(json?.blocks) ? json.blocks : [];
-        const seeded = blocks.map((b: any) => ({ height: b.height, txs: b.transaction_count, timestamp: b.timestamp }));
+        const seeded = blocks.map((b: any) => ({ height: b.height, txs: b.transaction_count, timestamp: b.timestamp })) as BlockCard[];
+        seeded.forEach(b => seenRef.current.add(b.height));
         setItems(seeded);
         // play initial sweep once by scheduling them in the queue; we won't loop endlessly
-        queueRef.current.push(...seeded);
+        // Do not enqueue initial seeds; we only animate on NEW blocks from WS
       } catch {}
     })();
   }, [apiUrl]);
@@ -69,7 +88,17 @@ export default function BlockScroller({ apiUrl }: Props) {
     if (!next) return; // nothing to animate
     // prepend the card and animate a left shift equal to card width + gap
     const cardWidth = 212; // min-width 200 + gap
-    setItems((prev) => [next, ...prev].slice(0, 20));
+    setItems((prev) => {
+      const updated = [next, ...prev];
+      // maintain uniqueness by height
+      const uniq: BlockCard[] = [];
+      const seen = new Set<number>();
+      for (const b of updated) {
+        if (!seen.has(b.height)) { seen.add(b.height); uniq.push(b); }
+        if (uniq.length >= 20) break;
+      }
+      return uniq;
+    });
     const start = offsetRef.current;
     const end = start - cardWidth;
     const el = rowRef.current;
@@ -103,6 +132,17 @@ export default function BlockScroller({ apiUrl }: Props) {
     };
     const id = requestAnimationFrame(loop);
     return () => { cancelAnimationFrame(id); if (animRef.current) cancelAnimationFrame(animRef.current); };
+  }, []);
+
+  // Handle incoming WS messages → only enqueue unseen heights
+  useEffect(() => {
+    const id = setInterval(() => {
+      // Drain queue if animation somehow got stuck
+      if (!animRef.current && queueRef.current.length > 0) {
+        playNextBatch();
+      }
+    }, 2000);
+    return () => clearInterval(id);
   }, []);
 
   return (

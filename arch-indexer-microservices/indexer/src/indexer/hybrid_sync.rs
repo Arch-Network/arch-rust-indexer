@@ -14,6 +14,15 @@ use serde_json::Value as JsonValue;
 use bs58;
 use hex;
 
+fn try_hex_to_base58(hex_str: &str) -> String {
+    if hex_str.is_empty() { return String::new(); }
+    if let Ok(bytes) = hex::decode(hex_str) {
+        bs58::encode(bytes).into_string()
+    } else {
+        String::new()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct HybridSync {
     settings: Arc<Settings>,

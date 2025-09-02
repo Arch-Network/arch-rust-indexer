@@ -6,9 +6,12 @@ use std::env;
 pub struct Settings {
     pub database: DatabaseSettings,
     pub application: ApplicationSettings,
+    #[serde(default)]
     pub arch_node: ArchNodeSettings,
+    #[serde(default)]
     pub redis: RedisSettings,
     pub indexer: IndexerSettings,
+    #[serde(default)]
     pub websocket: WebSocketSettings,
 }
 
@@ -62,6 +65,28 @@ fn default_websocket_url() -> String {
 #[derive(Debug, Deserialize, Clone)]
 pub struct RedisSettings {
     pub url: String,
+}
+
+// Provide robust defaults so config loading never fails if env mapping is missing
+impl Default for ArchNodeSettings {
+    fn default() -> Self {
+        let url = env::var("ARCH_NODE__URL")
+            .or_else(|_| env::var("ARCH_NODE_URL"))
+            .unwrap_or_else(|_| "http://localhost:8081".to_string());
+        Self {
+            url,
+            websocket_url: default_websocket_url(),
+        }
+    }
+}
+
+impl Default for RedisSettings {
+    fn default() -> Self {
+        let url = env::var("REDIS__URL")
+            .or_else(|_| env::var("REDIS_URL"))
+            .unwrap_or_else(|_| "redis://localhost:6379".to_string());
+        Self { url }
+    }
 }
 
 #[derive(Debug, Deserialize, Clone)]
@@ -120,6 +145,9 @@ impl Settings {
             .set_default("application.port", 8080)?
             .set_default("indexer.batch_size", 100)?
             .set_default("indexer.concurrent_batches", 5)?
+            // Safe fallback defaults to avoid missing field errors
+            .set_default("arch_node.url", env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string()))?
+            .set_default("redis.url", env::var("REDIS_URL").unwrap_or_else(|_| "redis://localhost:6379".to_string()))?
             .build()?;
 
         config.try_deserialize()
