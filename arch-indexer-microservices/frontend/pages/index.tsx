@@ -5,7 +5,7 @@ import Layout from '../components/Layout';
 import BlockScroller from '../components/BlockScroller';
 import DonutProgress from '../components/DonutProgress';
 import Sparkline from '../components/Sparkline';
-import { middleEllipsis } from '../utils/format';
+import { middleEllipsis, formatDateTime } from '../utils/format';
 import dynamic from 'next/dynamic';
 const ProgramHeatstrip = dynamic(() => import('../components/ProgramHeatstrip'), { ssr: false });
 
@@ -350,43 +350,8 @@ export default function Home() {
     }
   };
 
-  const formatTimestamp = (timestamp: string) => {
-    if (!timestamp) return 'UNKNOWN';
-    try {
-      let date;
-      if (typeof timestamp === 'string') {
-        // Handle PostgreSQL overflow timestamps
-        if (timestamp.includes('+') && timestamp.includes('-')) {
-          const match = timestamp.match(/\+(\d+)-(\d+)-(\d+)T(\d+):(\d+):(\d+)Z/);
-          if (match) {
-            const [, year] = match;
-            if (parseInt(year) > 9999) {
-              return 'INVALID DATE (OVERFLOW)';
-            }
-          }
-        }
-        date = new Date(timestamp);
-      }
-      
-      if (isNaN(date.getTime())) {
-        return 'INVALID DATE';
-      }
-      
-      const tz = timezone && timezone !== 'local' ? timezone : undefined;
-      return date.toLocaleDateString('en-US', {
-        month: 'short',
-        day: 'numeric',
-        year: 'numeric',
-        hour: '2-digit',
-        minute: '2-digit',
-        hour12: true,
-        timeZone: tz,
-        timeZoneName: 'short'
-      }).toUpperCase();
-    } catch (error) {
-      return 'FORMAT ERROR';
-    }
-  };
+  const formatTimestamp = (timestamp: string) =>
+    formatDateTime(timestamp, { timeZone: timezone, includeZone: true });
 
   const formatTransactionStatus = (status: any) => {
     try {

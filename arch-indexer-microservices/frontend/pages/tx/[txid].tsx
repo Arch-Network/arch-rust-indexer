@@ -3,6 +3,7 @@ import { useRouter } from 'next/router';
 import Link from 'next/link';
 import Layout from '../../components/Layout';
 import styles from '../../styles/Home.module.css';
+import { formatDateTime } from '../../utils/format';
 import dynamic from 'next/dynamic';
 import Button from '../../components/Button';
 import AccountChips from '../../components/AccountChips';
@@ -93,7 +94,7 @@ export default function TxDetailPage() {
             <div className={styles.detailRow}><strong>TxID</strong> <span className={styles.hashValue}>{tx.txid}</span></div>
             <div className={styles.detailRow}><strong>Block</strong> <Link href={`/blocks/${tx.block_height}`} className={styles.hashButton}>{tx.block_height}</Link></div>
             <div className={styles.detailRow}><strong>Status</strong> {formatStatus(tx.status)}</div>
-            <div className={styles.detailRow}><strong>Created</strong> {tx.created_at ? new Date(tx.created_at).toLocaleString() : '—'}</div>
+            <div className={styles.detailRow}><strong>Created</strong> {tx.created_at ? formatDateTime(tx.created_at, { timeZone: 'local', includeZone: true }) : '—'}</div>
             <div className={styles.detailRow}><strong>Actions</strong> <button className={styles.searchButton} onClick={() => setShowRaw(v => !v)}>{showRaw ? 'Hide JSON' : 'Show JSON'}</button></div>
           </div>
         )}
