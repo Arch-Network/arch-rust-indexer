@@ -19,7 +19,7 @@ async fn main() -> Result<()> {
         CREATE TABLE IF NOT EXISTS blocks (
             height BIGINT PRIMARY KEY,
             hash TEXT NOT NULL,
-            timestamp TIMESTAMP NOT NULL,
+            timestamp TIMESTAMPTZ NOT NULL,
             bitcoin_block_height BIGINT NOT NULL
         )
     "#)
@@ -33,7 +33,7 @@ async fn main() -> Result<()> {
             data JSONB NOT NULL,
             status INTEGER NOT NULL,
             bitcoin_txids TEXT[] NOT NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+            created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
     "#)
     .execute(&pool)

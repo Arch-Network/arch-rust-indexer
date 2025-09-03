@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS blocks (
     height bigint PRIMARY KEY,
     hash text NOT NULL,
-    timestamp timestamp NOT NULL,
+    timestamp TIMESTAMPTZ NOT NULL,
     bitcoin_block_height bigint
 );
 
@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS transactions (
     data jsonb NOT NULL,
     status jsonb NOT NULL, -- Change this line
     bitcoin_txids text[],
-    created_at timestamp NOT NULL DEFAULT CURRENT_TIMESTAMP
+    created_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 -- Create indexes for better query performance

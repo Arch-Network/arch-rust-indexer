@@ -48,3 +48,8 @@ variable "frontend_port" {
   type        = number
   default     = 3000
 }
+
+variable "db_init_image" {
+  description = "ECR image for db-init runner"
+  type        = string
+}

@@ -1,5 +1,5 @@
 use anyhow::Result;
-use chrono::{NaiveDateTime, Utc, DateTime, TimeZone};
+use chrono::{Utc, DateTime};
 use dashmap::DashMap;
 use futures::stream;
 use futures::StreamExt;
@@ -80,7 +80,7 @@ impl BlockProcessor {
             .expect("Failed to serialize transaction data");
         
         let bitcoin_txids: Option<&[String]> = transaction.bitcoin_txids.as_deref();
-        let created_at_utc: DateTime<Utc> = Utc.from_utc_datetime(&transaction.created_at);
+        let created_at_utc: DateTime<Utc> = transaction.created_at;
         
         // Insert the transaction
         tracing::debug!("Inserting transaction into database: {}", transaction.txid);
@@ -389,7 +389,7 @@ impl BlockProcessor {
                                 data: tx.runtime_transaction,
                                 status: tx.status,
                                 bitcoin_txids: tx.bitcoin_txids,
-                                created_at: chrono::Utc::now().naive_utc(),
+                                created_at: chrono::Utc::now(),
                             })
                         },
                         Err(e) => {

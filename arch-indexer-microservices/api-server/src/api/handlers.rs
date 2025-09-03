@@ -7,7 +7,7 @@ use std::{collections::HashMap, sync::Arc};
 use sqlx::{PgPool, Row};
 use axum::response::IntoResponse;
 use std::time::{SystemTime, UNIX_EPOCH};
-use chrono::{DateTime, NaiveDateTime, Utc};
+use chrono::{DateTime, Utc};
 use hex;
 use bs58;
 use tracing::{info, debug, error};
@@ -1487,7 +1487,7 @@ pub async fn get_blocks(
         SELECT 
             b.height,
             b.hash,
-            b.timestamp,
+            b.timestamp::timestamptz as timestamp,
             b.bitcoin_block_height,
             COALESCE(COUNT(t.txid), 0) as transaction_count,
             NULL::bigint as block_size_bytes
@@ -1506,8 +1506,7 @@ pub async fn get_blocks(
     let blocks: Vec<Block> = rows
         .into_iter()
         .map(|r| {
-            let ts_naive = r.get::<chrono::NaiveDateTime, _>("timestamp");
-            let ts_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(ts_naive, Utc);
+            let ts_utc = r.get::<chrono::DateTime<Utc>, _>("timestamp");
             Block {
                 height: r.get::<i64, _>("height"),
                 hash: r.get::<String, _>("hash"),
@@ -1599,7 +1598,7 @@ struct TransactionRecord {
     data: serde_json::Value,  // Assuming this is also JSONB
     status: serde_json::Value, // Changed from String to serde_json::Value
     bitcoin_txids: Option<Vec<String>>,
-    created_at: NaiveDateTime,
+    created_at: chrono::DateTime<chrono::Utc>,
 }
 
 pub async fn get_block_by_hash(
@@ -1627,8 +1626,7 @@ pub async fn get_block_by_hash(
     .await?
     .ok_or(ApiError::NotFound)?;
 
-    let ts_naive = row.get::<chrono::NaiveDateTime, _>("timestamp");
-    let ts_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(ts_naive, Utc);
+    let ts_utc = row.get::<chrono::DateTime<Utc>, _>("timestamp");
     let mut block = Block {
         height: row.get::<i64, _>("height"),
         hash: row.get::<String, _>("hash"),
@@ -1649,7 +1647,7 @@ pub async fn get_block_by_hash(
             data,
             status,
             bitcoin_txids,
-            created_at as "created_at!: NaiveDateTime"
+            created_at::timestamptz as "created_at!: chrono::DateTime<chrono::Utc>"
         FROM transactions
         WHERE block_height = $1
         ORDER BY txid
@@ -1722,8 +1720,7 @@ pub async fn get_block_by_height(
     .await?
     .ok_or(ApiError::NotFound)?;
 
-    let ts_naive = row.get::<chrono::NaiveDateTime, _>("timestamp");
-    let ts_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(ts_naive, Utc);
+    let ts_utc = row.get::<chrono::DateTime<Utc>, _>("timestamp");
     let mut block = Block {
         height: row.get::<i64, _>("height"),
         hash: row.get::<String, _>("hash"),
@@ -1829,7 +1826,7 @@ pub async fn get_transactions(
             data: r.get("data"),
             status: r.get("status"),
             bitcoin_txids: r.try_get::<Option<Vec<String>>, _>("bitcoin_txids").ok().flatten(),
-            created_at: r.get::<NaiveDateTime, _>("created_at"),
+            created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
         })
         .collect();
 
@@ -1866,7 +1863,7 @@ pub async fn get_transaction(
             data, 
             status, 
             bitcoin_txids,
-            created_at as "created_at!: NaiveDateTime"
+            created_at::timestamptz as "created_at!: chrono::DateTime<chrono::Utc>"
         FROM transactions 
         WHERE txid = $1
         "#,
@@ -1908,7 +1905,7 @@ pub async fn get_transaction(
                         data: rpc_tx.runtime_transaction,
                         status: serde_json::to_value(&rpc_tx.status).unwrap_or(serde_json::json!({"type":"processed"})),
                         bitcoin_txids: rpc_tx.bitcoin_txids.clone(),
-                        created_at: now.naive_utc(),
+                        created_at: now,
                     };
                     Ok(Json(synthesized))
                 }
@@ -2788,7 +2785,7 @@ pub async fn search_handler(
                 data,
                 status,
                 bitcoin_txids, 
-                created_at as "created_at!: NaiveDateTime"
+                created_at::timestamptz as "created_at!: chrono::DateTime<chrono::Utc>"
             FROM transactions 
             WHERE txid = $1
             "#,
@@ -2821,8 +2818,7 @@ pub async fn search_handler(
         .fetch_optional(&*pool)
         .await
         {
-            let ts_naive = r.get::<chrono::NaiveDateTime, _>("timestamp");
-            let ts_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(ts_naive, Utc);
+            let ts_utc = r.get::<chrono::DateTime<Utc>, _>("timestamp");
             let mut block = Block {
                     height: r.get::<i64, _>("height"),
                     hash: r.get::<String, _>("hash"),
@@ -2851,7 +2847,7 @@ pub async fn search_handler(
                     data,
                     status,
                     bitcoin_txids,
-                    created_at
+                    created_at::timestamptz as created_at
                 FROM transactions
                 WHERE block_height = $1
                 ORDER BY txid
@@ -2871,7 +2867,7 @@ pub async fn search_handler(
                     data: row.get::<sqlx::types::JsonValue, _>("data"),
                     status: row.get::<serde_json::Value, _>("status"),
                     bitcoin_txids: row.try_get::<Option<Vec<String>>, _>("bitcoin_txids").unwrap_or(None),
-                    created_at: row.get::<chrono::NaiveDateTime, _>("created_at"),
+                    created_at: row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
                 })
                 .collect();
 
@@ -2918,8 +2914,7 @@ pub async fn search_handler(
             .await
             {
                 let r = row;
-                let ts_naive = r.get::<chrono::NaiveDateTime, _>("timestamp");
-                let ts_utc = chrono::DateTime::<Utc>::from_naive_utc_and_offset(ts_naive, Utc);
+                let ts_utc = r.get::<chrono::DateTime<Utc>, _>("timestamp");
                 let mut block = Block {
                     height: r.get::<i64, _>("height"),
                     hash: r.get::<String, _>("hash"),
@@ -2959,7 +2954,7 @@ pub async fn search_handler(
                         data: row.get::<sqlx::types::JsonValue, _>("data"),
                         status: row.get::<serde_json::Value, _>("status"),
                         bitcoin_txids: row.try_get::<Option<Vec<String>>, _>("bitcoin_txids").unwrap_or(None),
-                        created_at: row.get::<chrono::NaiveDateTime, _>("created_at"),
+                        created_at: row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
                     })
                     .collect();
 
@@ -3048,7 +3043,7 @@ pub async fn get_transactions_by_program(
             t.data,
             t.status,
             t.bitcoin_txids,
-            t.created_at as "created_at!: NaiveDateTime"
+            t.created_at::timestamptz as "created_at!: chrono::DateTime<chrono::Utc>"
         FROM transactions t
         JOIN transaction_programs tp ON t.txid = tp.txid
         WHERE tp.program_id = $1
@@ -3249,7 +3244,7 @@ pub struct TransactionMetricsResponse {
     pub fee_priority: Option<i32>,
     pub size_bytes: Option<i32>,
     pub in_mempool: bool,
-    pub created_at: Option<NaiveDateTime>,
+    pub created_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 pub async fn get_transaction_metrics(
@@ -3290,7 +3285,7 @@ pub async fn get_transaction_metrics(
         fee_priority: mem.as_ref().and_then(|m| m.try_get::<Option<i32>, _>("fee_priority").ok()).flatten(),
         size_bytes: mem.as_ref().and_then(|m| m.try_get::<Option<i32>, _>("size_bytes").ok()).flatten(),
         in_mempool: mem.is_some(),
-        created_at: base.and_then(|r| r.try_get::<Option<NaiveDateTime>, _>("created_at").ok()).flatten(),
+        created_at: base.and_then(|r| r.try_get::<Option<chrono::DateTime<chrono::Utc>>, _>("created_at").ok()).flatten(),
     };
 
     Ok(Json(response))
@@ -3417,7 +3412,7 @@ pub async fn get_program_details(
                 json!({
                     "txid": r.get::<String, _>("txid"),
                     "block_height": r.get::<i64, _>("block_height"),
-                    "created_at": r.get::<chrono::NaiveDateTime, _>("created_at"),
+                    "created_at": r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
                 })
             })
             .collect();

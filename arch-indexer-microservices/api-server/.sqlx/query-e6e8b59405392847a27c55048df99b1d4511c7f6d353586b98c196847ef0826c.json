@@ -1,6 +1,6 @@
 {
   "db_name": "PostgreSQL",
-  "query": "\n            SELECT \n                txid,\n                block_height,\n                data,\n                status,\n                bitcoin_txids, \n                created_at as \"created_at!: NaiveDateTime\"\n            FROM transactions \n            WHERE txid = $1\n            ",
+  "query": "\n        SELECT \n            txid, \n            block_height, \n            data, \n            status, \n            bitcoin_txids,\n            created_at::timestamptz as \"created_at!: chrono::DateTime<chrono::Utc>\"\n        FROM transactions \n        WHERE txid = $1\n        ",
   "describe": {
     "columns": [
       {
@@ -30,7 +30,7 @@
       },
       {
         "ordinal": 5,
-        "name": "created_at!: NaiveDateTime",
+        "name": "created_at!: chrono::DateTime<chrono::Utc>",
         "type_info": "Timestamptz"
       }
     ],
@@ -48,5 +48,5 @@
       false
     ]
   },
-  "hash": "c0a26b5dcb7beccc02f0dd9eac2aaab827840afad2709e1ec012cb1d81ba1881"
+  "hash": "e6e8b59405392847a27c55048df99b1d4511c7f6d353586b98c196847ef0826c"
 }

@@ -86,6 +86,66 @@ async fn main() -> Result<()> {
         }
     }
 
+    // Optional, idempotent timestamp type fix for AWS rollout
+    // Guarded by env var so local is untouched. Safe to run repeatedly.
+    if std::env::var("APPLY_TS_TZ_FIX").ok().as_deref() == Some("1") {
+        info!("Applying TIMESTAMPTZ fix (guarded) on startup...");
+        const TS_FIX_SQL: &str = r#"
+DO $$
+BEGIN
+    -- blocks.timestamp
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'blocks'
+          AND column_name = 'timestamp' AND data_type = 'timestamp without time zone'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.blocks ALTER COLUMN "timestamp" TYPE timestamptz USING "timestamp" AT TIME ZONE ''UTC'';';
+    END IF;
+
+    -- transactions.created_at
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'transactions'
+          AND column_name = 'created_at' AND data_type = 'timestamp without time zone'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.transactions ALTER COLUMN "created_at" TYPE timestamptz USING "created_at" AT TIME ZONE ''UTC'';';
+    END IF;
+
+    -- programs.first_seen_at
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'programs'
+          AND column_name = 'first_seen_at' AND data_type = 'timestamp without time zone'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.programs ALTER COLUMN "first_seen_at" TYPE timestamptz USING "first_seen_at" AT TIME ZONE ''UTC'';';
+    END IF;
+
+    -- programs.last_seen_at
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'programs'
+          AND column_name = 'last_seen_at' AND data_type = 'timestamp without time zone'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.programs ALTER COLUMN "last_seen_at" TYPE timestamptz USING "last_seen_at" AT TIME ZONE ''UTC'';';
+    END IF;
+
+    -- mempool_transactions.added_at
+    IF EXISTS (
+        SELECT 1 FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = 'mempool_transactions'
+          AND column_name = 'added_at' AND data_type = 'timestamp without time zone'
+    ) THEN
+        EXECUTE 'ALTER TABLE public.mempool_transactions ALTER COLUMN "added_at" TYPE timestamptz USING "added_at" AT TIME ZONE ''UTC'';';
+    END IF;
+END
+$$;
+"#;
+        match sqlx::query(TS_FIX_SQL).execute(&pool).await {
+            Ok(_) => info!("TIMESTAMPTZ fix applied (or already in place)"),
+            Err(e) => error!("Failed to apply TIMESTAMPTZ fix: {:?}", e),
+        }
+    }
+
     let cors = CorsLayer::new()
         .allow_origin(settings.application.cors_allow_origin.parse::<HeaderValue>().unwrap_or_else(|_| {
             HeaderValue::from_static("*")

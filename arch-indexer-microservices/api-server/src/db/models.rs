@@ -36,7 +36,7 @@ pub struct Transaction {
     pub data: JsonValue,
     pub status: Value,
     pub bitcoin_txids: Option<Vec<String>>,
-    pub created_at: chrono::NaiveDateTime,
+    pub created_at: chrono::DateTime<chrono::Utc>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]

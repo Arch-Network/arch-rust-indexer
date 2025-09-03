@@ -118,6 +118,11 @@ resource "aws_cloudwatch_log_group" "indexer" {
   retention_in_days = 14
 }
 
+resource "aws_cloudwatch_log_group" "dbinit" {
+  name              = "/ecs/arch-indexer-dbinit"
+  retention_in_days = 3
+}
+
 resource "aws_ecs_task_definition" "api" {
   family                   = "arch-indexer-api"
   requires_compatibilities = ["FARGATE"]
@@ -185,6 +190,8 @@ resource "aws_ecs_task_definition" "api" {
         { name = "ARCH_NODE__URL", value = var.arch_node_url },
         # Back-compat single-underscore env if referenced elsewhere
         { name = "ARCH_NODE_URL", value = var.arch_node_url },
+        # Apply DB TIMESTAMPTZ fix on startup (idempotent). AWS-only, does not affect local.
+        { name = "APPLY_TS_TZ_FIX", value = "1" },
         { name = "REDIS_URL", value = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:${aws_elasticache_cluster.redis.cache_nodes[0].port}" },
         { name = "DATABASE_URL", value = "postgres://${var.db_username}:${var.db_password}@${aws_db_instance.postgres.address}:${aws_db_instance.postgres.port}/archindexer" },
       ]
@@ -209,6 +216,37 @@ resource "aws_ecs_task_definition" "api" {
         logDriver = "awslogs"
         options = {
           awslogs-group         = "/ecs/arch-indexer-api"
+          awslogs-region        = var.region
+          awslogs-stream-prefix = "ecs"
+        }
+      }
+    }
+  ])
+}
+
+resource "aws_ecs_task_definition" "dbinit" {
+  family                   = "arch-indexer-dbinit"
+  requires_compatibilities = ["FARGATE"]
+  network_mode            = "awsvpc"
+  cpu                     = "256"
+  memory                  = "512"
+  execution_role_arn      = aws_iam_role.ecs_execution.arn
+  task_role_arn           = aws_iam_role.ecs_task.arn
+
+  container_definitions = jsonencode([
+    {
+      name  = "dbinit"
+      image = var.db_init_image
+      environment = [
+        { name = "PGHOST",     value = aws_db_instance.postgres.address },
+        { name = "PGUSER",     value = var.db_username },
+        { name = "PGPASSWORD", value = var.db_password },
+        { name = "PGDATABASE", value = "archindexer" }
+      ]
+      logConfiguration = {
+        logDriver = "awslogs"
+        options = {
+          awslogs-group         = "/ecs/arch-indexer-dbinit"
           awslogs-region        = var.region
           awslogs-stream-prefix = "ecs"
         }
@@ -269,7 +307,10 @@ resource "aws_ecs_task_definition" "indexer" {
         { name = "DATABASE__DATABASE_NAME", value = "archindexer" },
         { name = "ARCH_NODE__URL", value = var.arch_node_url },
         { name = "REDIS_URL", value = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:${aws_elasticache_cluster.redis.cache_nodes[0].port}" },
-        { name = "DATABASE_URL", value = "postgres://${var.db_username}:${var.db_password}@${aws_db_instance.postgres.address}:${aws_db_instance.postgres.port}/archindexer" }
+        { name = "DATABASE_URL", value = "postgres://${var.db_username}:${var.db_password}@${aws_db_instance.postgres.address}:${aws_db_instance.postgres.port}/archindexer" },
+        # Align seeding behavior with docker-compose
+        { name = "ARCH_BUILTIN_PROGRAMS", value = "0000000000000000000000000000000000000000000000000000000000000001,ComputeBudget111111111111111111111111111111,VoteProgram111111111111111111111,StakeProgram11111111111111111111,BpfLoader11111111111111111111111,NativeLoader11111111111111111111,AplToken111111111111111111111111" },
+        { name = "ARCH_FAST_FORWARD_WINDOW", value = "0" }
       ]
 
       logConfiguration = {

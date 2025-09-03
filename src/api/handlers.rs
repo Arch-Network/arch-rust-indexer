@@ -13,7 +13,6 @@ use tracing::{info, debug, error};
 
 use super::types::{ApiError, NetworkStats, SyncStatus, ProgramStats};
 use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::BlockProcessor};
-use axum::http::StatusCode;
 
 pub async fn get_blocks(
     State(pool): State<Arc<PgPool>>,
@@ -38,7 +37,7 @@ pub async fn get_blocks(
         SELECT 
             b.height,
             b.hash,
-            b.timestamp as "timestamp!: DateTime<Utc>",
+            b.timestamp::timestamptz as "timestamp!: DateTime<Utc>",
             b.bitcoin_block_height,
             COUNT(t.txid) as "transaction_count!: i64"
         FROM blocks b 
@@ -153,7 +152,7 @@ struct TransactionRecord {
     data: serde_json::Value,  // Assuming this is also JSONB
     status: serde_json::Value, // Changed from String to serde_json::Value
     bitcoin_txids: Option<Vec<String>>,
-    created_at: NaiveDateTime,
+    created_at: DateTime<Utc>,
 }
 
 pub async fn get_block_by_hash(
@@ -166,7 +165,7 @@ pub async fn get_block_by_hash(
         SELECT 
             b.height,
             b.hash,
-            b.timestamp as "timestamp!: DateTime<Utc>",
+            b.timestamp::timestamptz as "timestamp!: DateTime<Utc>",
             b.bitcoin_block_height,
             COUNT(t.txid) as "transaction_count!: i64"
         FROM blocks b
@@ -190,7 +189,7 @@ pub async fn get_block_by_hash(
             data,
             status,
             bitcoin_txids,
-            created_at as "created_at!: NaiveDateTime"
+            created_at::timestamptz as "created_at!: DateTime<Utc>"
         FROM transactions
         WHERE block_height = $1
         ORDER BY txid
@@ -251,7 +250,7 @@ pub async fn get_transactions(
             data, 
             status, 
             bitcoin_txids,
-            created_at as "created_at!: NaiveDateTime"
+            created_at::timestamptz as "created_at!: DateTime<Utc>"
         FROM transactions 
         ORDER BY block_height DESC
         LIMIT 100
@@ -276,7 +275,7 @@ pub async fn get_transaction(
             data, 
             status, 
             bitcoin_txids,
-            created_at as "created_at!: NaiveDateTime"
+            created_at::timestamptz as "created_at!: DateTime<Utc>"
         FROM transactions 
         WHERE txid = $1
         "#,
@@ -417,7 +416,7 @@ pub async fn search_handler(
                 data,
                 status,
                 bitcoin_txids, 
-                created_at as "created_at!: NaiveDateTime"
+                created_at::timestamptz as "created_at!: DateTime<Utc>"
             FROM transactions 
             WHERE txid = $1
             "#,
@@ -460,7 +459,7 @@ pub async fn search_handler(
                 SELECT 
                     b.height,
                     b.hash,
-                    b.timestamp as "timestamp!: DateTime<Utc>",
+                    b.timestamp::timestamptz as "timestamp!: DateTime<Utc>",
                     b.bitcoin_block_height,
                     COUNT(t.txid) as "transaction_count!: i64"
                 FROM blocks b
@@ -508,7 +507,7 @@ pub async fn get_transactions_by_program(
             t.data,
             t.status,
             t.bitcoin_txids,
-            t.created_at as "created_at!: NaiveDateTime"
+            t.created_at::timestamptz as "created_at!: DateTime<Utc>"
         FROM transactions t
         JOIN transaction_programs tp ON t.txid = tp.txid
         WHERE tp.program_id = $1
@@ -547,14 +546,13 @@ pub async fn get_transactions_by_program(
 pub async fn get_program_leaderboard(
     State(pool): State<Arc<PgPool>>,
 ) -> Result<Json<Vec<ProgramStats>>, ApiError> {
-    let programs = sqlx::query_as!(
-        ProgramStats,
+    let rows = sqlx::query!(
         r#"
         SELECT 
             program_id,
-            transaction_count,
-            first_seen_at as "first_seen_at!: DateTime<Utc>",
-            last_seen_at as "last_seen_at!: DateTime<Utc>"
+            COALESCE(transaction_count, 0)::BIGINT AS "transaction_count!: i64",
+            first_seen_at::timestamptz AS "first_seen_at!: DateTime<Utc>",
+            last_seen_at::timestamptz AS "last_seen_at!: DateTime<Utc>"
         FROM programs
         ORDER BY transaction_count DESC
         LIMIT 10
@@ -562,6 +560,16 @@ pub async fn get_program_leaderboard(
     )
     .fetch_all(&*pool)
     .await?;
+
+    let programs: Vec<ProgramStats> = rows
+        .into_iter()
+        .map(|r| ProgramStats {
+            program_id: r.program_id,
+            transaction_count: r.transaction_count,
+            first_seen_at: r.first_seen_at,
+            last_seen_at: r.last_seen_at,
+        })
+        .collect();
 
     Ok(Json(programs))
 }
