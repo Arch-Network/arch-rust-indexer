@@ -3472,10 +3472,9 @@ pub async fn get_program_details(
         .map_err(ApiError::Database)?;
 
         let tx_count: i64 = row.get::<i64, _>("tx_count");
-        if tx_count == 0 {
-            return Err(ApiError::NotFound);
-        }
 
+        // For program IDs that are known/canonical but have no transactions yet,
+        // return a zero-count payload instead of a 404 so the UI can render.
         let first_seen: Option<DateTime<Utc>> = row.try_get::<Option<DateTime<Utc>>, _>("first_seen").ok().flatten();
         let last_seen: Option<DateTime<Utc>> = row.try_get::<Option<DateTime<Utc>>, _>("last_seen").ok().flatten();
         let b58 = try_hex_to_base58(&pid_hex);
