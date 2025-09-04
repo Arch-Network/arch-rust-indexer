@@ -123,6 +123,12 @@ resource "aws_cloudwatch_log_group" "dbinit" {
   retention_in_days = 3
 }
 
+# Fetch DB password from SSM Parameter Store (SecureString)
+data "aws_ssm_parameter" "db_password" {
+  name            = var.ssm_db_password_name
+  with_decryption = true
+}
+
 resource "aws_ecs_task_definition" "api" {
   family                   = "arch-indexer-api"
   requires_compatibilities = ["FARGATE"]
@@ -154,10 +160,7 @@ resource "aws_ecs_task_definition" "api" {
           name  = "DATABASE__USERNAME"
           value = var.db_username
         },
-        {
-          name  = "DATABASE__PASSWORD"
-          value = var.db_password
-        },
+        # DATABASE__PASSWORD comes from SSM via secrets below
         {
           name  = "DATABASE__HOST"
           value = aws_db_instance.postgres.address
@@ -193,7 +196,14 @@ resource "aws_ecs_task_definition" "api" {
         # Apply DB TIMESTAMPTZ fix on startup (idempotent). AWS-only, does not affect local.
         { name = "APPLY_TS_TZ_FIX", value = "1" },
         { name = "REDIS_URL", value = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:${aws_elasticache_cluster.redis.cache_nodes[0].port}" },
-        { name = "DATABASE_URL", value = "postgres://${var.db_username}:${var.db_password}@${aws_db_instance.postgres.address}:${aws_db_instance.postgres.port}/archindexer" },
+        # Avoid embedding password in env
+      ]
+
+      secrets = [
+        {
+          name      = "DATABASE__PASSWORD"
+          valueFrom = data.aws_ssm_parameter.db_password.arn
+        }
       ]
 
       portMappings = [
@@ -240,8 +250,13 @@ resource "aws_ecs_task_definition" "dbinit" {
       environment = [
         { name = "PGHOST",     value = aws_db_instance.postgres.address },
         { name = "PGUSER",     value = var.db_username },
-        { name = "PGPASSWORD", value = var.db_password },
         { name = "PGDATABASE", value = "archindexer" }
+      ]
+      secrets = [
+        {
+          name      = "PGPASSWORD"
+          valueFrom = data.aws_ssm_parameter.db_password.arn
+        }
       ]
       logConfiguration = {
         logDriver = "awslogs"

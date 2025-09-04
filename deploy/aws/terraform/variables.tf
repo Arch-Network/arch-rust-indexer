@@ -53,3 +53,9 @@ variable "db_init_image" {
   description = "ECR image for db-init runner"
   type        = string
 }
+
+variable "ssm_db_password_name" {
+  description = "SSM Parameter name (SecureString) holding the DB password"
+  type        = string
+  default     = "/arch-indexer/db/password"
+}
