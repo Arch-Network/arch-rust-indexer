@@ -3327,7 +3327,8 @@ pub async fn get_program_details(
         hex::encode(super::program_ids::SOL_SPL_TOKEN.as_bytes())
     } else if program_id == super::program_ids::SOL_ASSOCIATED_TOKEN_ACCOUNT {
         hex::encode(super::program_ids::SOL_ASSOCIATED_TOKEN_ACCOUNT.as_bytes())
-    } else if program_id.chars().all(|c| c.is_ascii_hexdigit()) && program_id.len() >= 2 {
+    } else if program_id.len() == 64 && program_id.chars().all(|c| c.is_ascii_hexdigit()) {
+        // Treat as hex only for exact 32-byte (64-char) hex strings
         program_id.clone()
     } else {
         match bs58::decode(&program_id).into_vec() {
