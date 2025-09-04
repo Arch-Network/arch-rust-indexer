@@ -45,7 +45,7 @@ export default function Home() {
   const [selectedBlock, setSelectedBlock] = useState<Block | null>(null);
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
   const [isLoading, setIsLoading] = useState(true);
-  const [memeMode, setMemeMode] = useState(false);
+  // meme mode is now managed on the Settings page
   const [mempoolStats, setMempoolStats] = useState<any | null>(null);
   const [recentMempool, setRecentMempool] = useState<any[]>([]);
   const [isTxDrawerOpen, setIsTxDrawerOpen] = useState(false);
@@ -87,23 +87,7 @@ export default function Home() {
     return () => clearInterval(id);
   }, []);
 
-  useEffect(() => {
-    // Apply class and persist toggle
-    const html = document.querySelector('html');
-    if (!html) return;
-    if (memeMode) {
-      html.classList.add('meme-mode');
-    } else {
-      html.classList.remove('meme-mode');
-    }
-    try {
-      if (typeof window !== 'undefined') {
-        window.localStorage.setItem('memeMode', memeMode ? '1' : '0');
-      }
-    } catch {
-      // ignore storage errors
-    }
-  }, [memeMode]);
+  // meme mode is now managed on the Settings page
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -385,14 +369,7 @@ export default function Home() {
 
   return (
     <Layout
-      rightActions={(
-        <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-          <a className={styles.refreshButton} href="/settings">Settings</a>
-          <button className={styles.refreshButton} onClick={() => setMemeMode(v => !v)}>
-            {memeMode ? 'Meme Mode: ON' : 'Meme Mode: OFF'}
-          </button>
-        </div>
-      )}
+      rightActions={null}
     >
       <Head>
         <title>Arch Explorer • Cypherpunk Mode</title>
@@ -403,16 +380,22 @@ export default function Home() {
       {/* Program Activity Heatstrip */}
       <ProgramHeatstrip apiUrl={apiUrl} height={80} />
 
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, minmax(0,1fr))', gap: 12, marginBottom: 18 }}>
+        <div className={styles.statsGrid}>
           <div className={styles.statCard}>
             <h3>Current TPS</h3>
             <div className={styles.value}>{(stats?.current_tps ?? 0).toFixed(2)}</div>
             <div className={styles.label}>Avg: {(stats?.average_tps ?? 0).toFixed(2)} | Peak: {(stats?.peak_tps ?? 0).toFixed(2)}</div>
+            <div style={{ marginTop: 8 }}>
+              <Sparkline data={[stats?.average_tps ?? 0, stats?.current_tps ?? 0, (stats?.current_tps ?? 0) * 1.1, (stats?.current_tps ?? 0) * 0.9, stats?.current_tps ?? 0]} />
+            </div>
           </div>
           <div className={styles.statCard}>
             <h3>Mempool Size</h3>
             <div className={styles.value}>{mempoolStats?.total_transactions ?? 0}</div>
             <div className={styles.label}>Pending: {mempoolStats?.pending_count ?? 0}</div>
+            <div style={{ marginTop: 8 }}>
+              <Sparkline data={[mempoolStats?.pending_count ?? 0, (mempoolStats?.pending_count ?? 0) * 0.8 + 1, (mempoolStats?.pending_count ?? 0) * 1.2 + 2, mempoolStats?.pending_count ?? 0]} color="var(--accent-2)" />
+            </div>
           </div>
           <div className={styles.statCard}>
             <h3>Avg Fee Priority</h3>
@@ -456,7 +439,7 @@ export default function Home() {
           </div>
           <div className={styles.statCard}>
             <h3>Synchronization</h3>
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', alignItems: 'center', gap: 16 }}>
               <DonutProgress percent={syncProgress.percentage} label="Synced" sublabel={syncProgress.percentage >= 100 ? 'Fully synchronized' : `${syncProgress.synced.toLocaleString()} / ${syncProgress.total.toLocaleString()} blocks`} />
               <div className={styles.progressStats}>
                 <div>Head: {stats?.latest_block_height?.toLocaleString?.() ?? '—'}</div>
@@ -475,7 +458,7 @@ export default function Home() {
             {isLoading ? (
               <div className={styles.loading}>Loading block data…</div>
             ) : (
-              <div className={styles.blocksContent}>
+              <div className={styles.blocksContent} style={{ overflowX: 'auto' }}>
                 <table className={styles.blocksTable}>
                   <thead>
                     <tr>
@@ -501,7 +484,7 @@ export default function Home() {
           </div>
           <div className={styles.transactionsSection}>
             <h2>Recent Transactions</h2>
-            <div className={styles.transactionsContent}>
+            <div className={styles.transactionsContent} style={{ overflowX: 'auto' }}>
               <table className={styles.transactionsTable}>
                 <thead>
                   <tr>

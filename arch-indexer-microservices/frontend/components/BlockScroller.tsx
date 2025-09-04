@@ -122,7 +122,16 @@ export default function BlockScroller({ apiUrl }: Props) {
       return; // nothing to animate
     }
     // prepend the card and animate a left shift equal to card width + gap
-    const cardWidth = 212; // min-width 200 + gap
+    let cardWidth = 212; // fallback
+    try {
+      const row = rowRef.current as HTMLDivElement;
+      const first = row.firstElementChild as HTMLElement | null;
+      const styles = row ? getComputedStyle(row) : (null as any);
+      const gapStr = styles?.gap || styles?.columnGap || '12px';
+      const gap = parseInt(gapStr, 10) || 12;
+      const firstWidth = first?.offsetWidth || 200;
+      cardWidth = firstWidth + gap;
+    } catch {}
     setItems((prev) => {
       const updated = [next, ...prev];
       // maintain uniqueness by height

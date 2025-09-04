@@ -39,7 +39,7 @@ export default function HeaderSearch() {
   };
 
   return (
-    <div style={{ display: 'flex', gap: 8, minWidth: 420 }}>
+    <div style={{ display: 'flex', gap: 8, width: '100%', flexWrap: 'wrap' }}>
       <input
         type="text"
         className={styles.searchInput}

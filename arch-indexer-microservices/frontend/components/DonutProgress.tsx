@@ -16,8 +16,9 @@ export default function DonutProgress({ size = 160, thickness = 12, percent, lab
   const rest = c - dash;
 
   return (
-    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 16 }}>
-      <svg width={size} height={size} viewBox={`0 0 ${size} ${size}`}>
+    <div style={{ display: 'inline-flex', alignItems: 'center', gap: 16, flexWrap: 'wrap' }}>
+      <div style={{ width: size, maxWidth: '100%' }}>
+      <svg width="100%" height="auto" viewBox={`0 0 ${size} ${size}`} preserveAspectRatio="xMidYMid meet">
         <g transform={`rotate(-90 ${size/2} ${size/2})`}>
           <circle cx={size/2} cy={size/2} r={r} fill="none" stroke="#0a0c10" strokeWidth={thickness} />
           <circle
@@ -40,6 +41,7 @@ export default function DonutProgress({ size = 160, thickness = 12, percent, lab
         <text x="50%" y="46%" dominantBaseline="middle" textAnchor="middle" fill="var(--text)" fontWeight={700} fontSize={size * 0.22}> {Math.round(clamped)}% </text>
         <text x="50%" y="62%" dominantBaseline="middle" textAnchor="middle" fill="var(--muted)" fontSize={size * 0.12}> {label} </text>
       </svg>
+      </div>
       {sublabel && (
         <div style={{ display: 'flex', flexDirection: 'column' }}>
           <div style={{ color: 'var(--muted)', fontSize: 12, textTransform: 'uppercase', letterSpacing: '.08em' }}>Status</div>

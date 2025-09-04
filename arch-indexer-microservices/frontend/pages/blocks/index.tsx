@@ -35,6 +35,7 @@ export default function BlocksPage() {
         <h2>Blocks</h2>
         {loading ? <div className={styles.loading}>Loading…</div> : (
           <>
+            <div style={{ overflowX: 'auto' }}>
             <table className={styles.blocksTable}>
               <thead>
                 <tr>
@@ -55,6 +56,7 @@ export default function BlocksPage() {
                 ))}
               </tbody>
             </table>
+            </div>
             <Pagination page={page} pageSize={pageSize} total={total} onPageChange={setPage} />
           </>
         )}

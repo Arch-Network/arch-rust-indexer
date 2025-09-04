@@ -23,7 +23,7 @@ html, body, #__next {
 .meme-mode body { filter: hue-rotate(25deg) saturate(1.1); }
 
 /* Simple nav */
-.siteNav { display: flex; gap: 14px; align-items: center; }
+.siteNav { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
 .siteNav a { color: var(--muted); text-decoration: none; font-weight: 600; font-size: 13px; text-transform: uppercase; letter-spacing: .06em; padding: 6px 10px; border: 1px solid transparent; }
 .siteNav a:hover { color: var(--text); border-color: rgba(255,255,255,0.08); }
 
@@ -200,3 +200,17 @@ body {
 .data-table th, .data-table td { border-bottom: 1px solid rgba(255,255,255,0.06); padding: 10px; text-align: left; font-family: 'JetBrains Mono', monospace; }
 .data-table th { color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .08em; font-size: 12px; }
 .data-table td { color: var(--text); font-size: 13px; }
+
+/* Utilities */
+.hideOnMobile { display: inline; }
+
+/* Responsive adjustments */
+@media (max-width: 768px) {
+  .siteNav { justify-content: center; gap: 10px; }
+}
+
+@media (max-width: 600px) {
+  .hideOnMobile { display: none !important; }
+  .hScrollerRow { gap: 8px; }
+  .hBlockCard { min-width: 160px; padding: 8px; }
+}

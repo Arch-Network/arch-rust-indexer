@@ -4,6 +4,7 @@ import styles from '../styles/Home.module.css';
 
 export default function SettingsPage() {
   const [timezone, setTimezone] = useState<string>('local');
+  const [meme, setMeme] = useState<boolean>(false);
 
   useEffect(() => {
     try {
@@ -11,11 +12,29 @@ export default function SettingsPage() {
       if (saved) setTimezone(saved);
       else setTimezone(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC');
     } catch {}
+    try {
+      const mm = typeof window !== 'undefined' ? window.localStorage.getItem('memeMode') : null;
+      setMeme(mm === '1' || mm === 'true');
+    } catch {}
   }, []);
 
   const save = () => {
     try { window.localStorage.setItem('tz', timezone); } catch {}
     alert('Saved');
+  };
+
+  const toggleMeme = () => {
+    const next = !meme;
+    setMeme(next);
+    try {
+      if (typeof document !== 'undefined') {
+        const html = document.documentElement;
+        if (next) html.classList.add('meme-mode'); else html.classList.remove('meme-mode');
+      }
+      if (typeof window !== 'undefined') {
+        window.localStorage.setItem('memeMode', next ? '1' : '0');
+      }
+    } catch {}
   };
 
   return (
@@ -40,6 +59,18 @@ export default function SettingsPage() {
               <option value="Asia/Tokyo">Asia/Tokyo</option>
             </select>
             <button className={styles.refreshButton} onClick={save}>Save</button>
+          </div>
+          <div className={styles.detailRow}>
+            <strong>Meme Mode</strong>
+            <button
+              role="switch"
+              aria-checked={meme}
+              className={`${styles.refreshButton} ${styles.pillToggle}`}
+              onClick={toggleMeme}
+            >
+              <span role="img" aria-label="meme">😎</span>
+              <span>{meme ? 'On' : 'Off'}</span>
+            </button>
           </div>
           <div className={styles.detailRow}>
             <strong>Note</strong>

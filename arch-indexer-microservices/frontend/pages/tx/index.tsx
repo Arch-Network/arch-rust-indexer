@@ -51,6 +51,7 @@ export default function TransactionsPage() {
     <Layout>
       <section className={styles.transactionsSection}>
         <h2>Transactions</h2>
+        <div style={{ overflowX: 'auto' }}>
         <table className={styles.transactionsTable}>
           <thead>
             <tr>
@@ -71,6 +72,7 @@ export default function TransactionsPage() {
             ))}
           </tbody>
         </table>
+        </div>
         <Pagination page={page} pageSize={pageSize} total={total} onPageChange={setPage} />
       </section>
     </Layout>

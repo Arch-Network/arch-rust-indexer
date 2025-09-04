@@ -27,7 +27,7 @@ export default function Pagination({ page, pageSize, total, onPageChange }: Prop
   for (let i = start; i <= end; i++) pages.push(i);
 
   return (
-    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12 }}>
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 12, flexWrap: 'wrap' }}>
       <Button size="sm" variant="secondary" disabled={!canPrev} onClick={() => goto(1)}>« First</Button>
       <Button size="sm" variant="secondary" disabled={!canPrev} onClick={() => goto(clampedPage - 1)}>‹ Prev</Button>
       <div style={{ display: 'flex', gap: 6 }}>
@@ -45,7 +45,7 @@ export default function Pagination({ page, pageSize, total, onPageChange }: Prop
       </div>
       <Button size="sm" variant="secondary" disabled={!canNext} onClick={() => goto(clampedPage + 1)}>Next ›</Button>
       <Button size="sm" variant="secondary" disabled={!canNext} onClick={() => goto(totalPages)}>Last »</Button>
-      <span style={{ marginLeft: 8, color: 'var(--muted)', fontSize: 12 }}>
+      <span className="hideOnMobile" style={{ marginLeft: 8, color: 'var(--muted)', fontSize: 12 }}>
         Page {clampedPage} / {totalPages} · {total.toLocaleString()} items
       </span>
     </div>
