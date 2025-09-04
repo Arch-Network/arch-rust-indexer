@@ -14,7 +14,8 @@ type Program = {
 };
 
 function isHex(str: string): boolean {
-  return /^[0-9a-fA-F]+$/.test(str) && str.length >= 2;
+  // Treat as hex only for exact 64-character (32-byte) hex strings
+  return str.length === 64 && /^[0-9a-fA-F]+$/.test(str);
 }
 
 // Known mapped IDs we care about on the client for canonicalizing
@@ -47,7 +48,7 @@ export default function ProgramDetailPage() {
           const base58 = p.program_id_base58 || '';
           const mapped = p.display_name && typeof p.display_name === 'string' ? p.display_name : undefined;
           const canonical = mapped && MAPPED[mapped] ? MAPPED[mapped] : (base58 || undefined);
-          if (canonical) {
+          if (canonical && canonical !== id) {
             router.replace(`/programs/${encodeURIComponent(canonical)}`);
           } else {
             // If we cannot canonicalize, show 404
