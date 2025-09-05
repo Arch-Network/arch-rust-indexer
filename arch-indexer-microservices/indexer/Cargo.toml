@@ -34,6 +34,11 @@ tokio-retry = "0.3"
 http-body-util = "0.1"
 clap = { version = "4.5.45", features = ["derive"] }
 
+# Optional dependencies for Atlas ingestion mode (local path)
+async-trait = { version = "0.1", optional = true }
+tokio-util = { version = "0.7", optional = true }
+atlas-core = { path = "/Users/brianhoffman/Projects/temporary/atlas/core", optional = true }
+
 [lib]
 name = "indexer"
 path = "src/lib.rs"
@@ -41,3 +46,12 @@ path = "src/lib.rs"
 [[bin]]
 name = "indexer"
 path = "src/main.rs"
+
+[features]
+default = []
+# Enable Atlas-based ingestion path. Keeps deps optional unless this feature is selected.
+atlas_ingestion = [
+    "dep:async-trait",
+    "dep:tokio-util",
+    "dep:atlas-core",
+]

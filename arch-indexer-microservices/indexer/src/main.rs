@@ -6,6 +6,9 @@ use std::env;
 
 use indexer::{config::Settings, indexer::HybridSync};
 
+#[cfg(feature = "atlas_ingestion")]
+use indexer::pipeline_atlas;
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing - respect RUST_LOG, default to this crate
@@ -47,18 +50,31 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    // Create and start hybrid sync
-    info!("🔧 Creating hybrid sync...");
-    let hybrid_sync = HybridSync::new(
-        std::sync::Arc::new(settings),
-        std::sync::Arc::new(pool),
-    );
+    // Choose runtime path
+    #[cfg(feature = "atlas_ingestion")]
+    {
+        info!("🧪 Atlas ingestion mode enabled; starting minimal pipeline (no-op)");
+        if let Err(e) = pipeline_atlas::run_minimal_pipeline().await {
+            error!("Atlas pipeline failed: {}", e);
+            std::process::exit(1);
+        }
+    }
 
-    // Start the indexer
-    info!("🚀 Starting indexer...");
-    if let Err(e) = hybrid_sync.start().await {
-        error!("❌ Indexer failed to start: {}", e);
-        std::process::exit(1);
+    #[cfg(not(feature = "atlas_ingestion"))]
+    {
+        // Create and start hybrid sync
+        info!("🔧 Creating hybrid sync...");
+        let hybrid_sync = HybridSync::new(
+            std::sync::Arc::new(settings),
+            std::sync::Arc::new(pool),
+        );
+
+        // Start the indexer
+        info!("🚀 Starting indexer...");
+        if let Err(e) = hybrid_sync.start().await {
+            error!("❌ Indexer failed to start: {}", e);
+            std::process::exit(1);
+        }
     }
 
     // Keep the main thread alive
