@@ -1,0 +1,11 @@
+services:
+  frontend:
+    command: sh -lc "npm install --no-audit --no-fund && npm run dev -- -p 3000 -H 0.0.0.0"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3001
+      NEXT_PUBLIC_WS_URL: ws://localhost:3001
+      CHOKIDAR_USEPOLLING: "1"
+      WATCHPACK_POLLING: "true"
