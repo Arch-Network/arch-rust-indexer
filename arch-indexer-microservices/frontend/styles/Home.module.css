@@ -107,11 +107,11 @@
 
 .searchSection { background: var(--panel); border: 1px solid rgba(255,255,255,0.06); padding: 25px; margin: 25px 0; box-shadow: var(--shadow); }
 .searchSection h2 { margin: 0 0 16px 0; color: var(--text); font-size: 18px; }
-.searchContainer { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; }
-.searchInput { flex: 1 1 260px; padding: 14px; border: 1px solid rgba(255,255,255,0.08); background: #0a0c10; color: var(--text); font-size: 14px; transition: border-color .15s ease, box-shadow .15s ease; min-width: 0; }
+.searchContainer { display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+.searchInput { flex: 1 1 260px; padding: 6px 10px; border: 1px solid rgba(255,255,255,0.08); background: #0a0c10; color: var(--text); font-size: 14px; transition: border-color .15s ease, box-shadow .15s ease; min-width: 0; max-width: 640px; line-height: 1.2; height: 32px; max-height: 32px; -webkit-appearance: none; appearance: none; }
 .searchInput:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px rgba(25,227,255,0.12); }
 .searchInput::placeholder { color: var(--muted); }
-.searchButton { background: var(--panel); color: var(--text); border: 1px solid var(--accent); padding: 14px 24px; font-size: 13px; font-weight: 600; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; box-shadow: 0 4px 16px rgba(0,0,0,0.35); transition: transform .08s ease, background .2s ease, color .2s ease; }
+.searchButton { background: var(--panel); color: var(--text); border: 1px solid var(--accent); padding: 12px 18px; font-size: 13px; font-weight: 600; cursor: pointer; text-transform: uppercase; letter-spacing: 1px; box-shadow: 0 4px 16px rgba(0,0,0,0.35); transition: transform .08s ease, background .2s ease, color .2s ease; }
 .searchButton:hover { background: linear-gradient(90deg, var(--accent), var(--accent-2)); color: #000; }
 .searchButton:active { transform: translateY(1px); }
 .searchButtonSm { padding: 8px 14px; font-size: 12px; }
@@ -133,7 +133,9 @@
 .blocksSection h2, .transactionsSection h2 { margin: 0 0 16px 0; color: var(--text); font-size: 18px; }
 .loading { text-align: center; padding: 30px; color: var(--muted); font-size: 14px; }
 
+.tableScroll { width: 100%; overflow-x: auto; }
 .blocksTable, .transactionsTable { width: 100%; border-collapse: collapse; margin-top: 12px; table-layout: fixed; border: 1px solid rgba(255,255,255,0.06); }
+.programsTable { min-width: 720px; }
 .blocksTable th, .blocksTable td, .transactionsTable th, .transactionsTable td { padding: 12px; text-align: left; border-bottom: 1px solid rgba(255,255,255,0.06); word-wrap: break-word; overflow-wrap: break-word; font-size: 13px; }
 .blocksTable th, .transactionsTable th { background: #0a0c10; font-weight: 600; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; font-size: 12px; }
 .blocksTable td, .transactionsTable td { color: var(--text); }
@@ -166,15 +168,19 @@
   .menuGroup { display: none; }
   .header h1 { font-size: 1.6rem; }
   .statsGrid { grid-template-columns: 1fr; }
-  .searchContainer { flex-direction: column; }
+  .searchContainer { flex-direction: column; align-items: stretch; }
   .blocksTable, .transactionsTable { font-size: 12px; }
   .blocksTable th, .blocksTable td, .transactionsTable th, .transactionsTable td { padding: 8px; }
+  .searchInput { font-size: 15px; padding: 6px 10px; height: 30px; max-height: 30px; }
+  .programsTable th:nth-child(2),
+  .programsTable td:nth-child(2) { display: none; }
 }
 
 @media (max-width: 480px) {
   .container { padding: 12px; }
   .header { padding: 14px; }
   .searchButton { width: 100%; text-align: center; }
+  .programsTable { min-width: 0; }
 }
 
 @keyframes ticker {
