@@ -15,6 +15,9 @@ use core::sync::{CheckpointStore, SyncConfig, SyncingDatasource, TipSource, Back
 use atlas_arch_rpc_datasource::{ArchBackfillDatasource, ArchDatasourceConfig, ArchLiveDatasource};
 use atlas_rocksdb_checkpoint_store::RocksCheckpointStore;
 use sqlx::PgPool;
+use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::{Duration, Instant};
+use tracing::info;
 
 struct NoopMetrics;
 
@@ -172,9 +175,28 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
     let tx_processor = TransactionDbProcessor { pool: db_pool.clone() };
     pipeline_builder = pipeline_builder.transaction::<EmptyCollection, ()>(tx_processor, None);
 
+    // Set up a live tip-height poller for accurate rate/ETA reporting
+    let tip_height: Arc<AtomicI64> = Arc::new(AtomicI64::new(0));
+    {
+        let rpc = crate::arch_rpc::ArchRpcClient::new(rpc_url.to_string());
+        let tip_clone = tip_height.clone();
+        tokio::spawn(async move {
+            loop {
+                if let Ok(best) = rpc.get_block_count().await {
+                    tip_clone.store(best as i64, Ordering::Relaxed);
+                }
+                tokio::time::sleep(Duration::from_secs(10)).await;
+            }
+        });
+    }
+
     // BlockDetails processor → blocks table
     struct BlockDetailsDbProcessor {
         pool: Arc<PgPool>,
+        tip_height: Arc<AtomicI64>,
+        last_report_instant: Instant,
+        last_report_height: i64,
+        ema_rate_hps: f64,
     }
 
     #[async_trait::async_trait]
@@ -188,6 +210,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
             metrics: Arc<core::metrics::MetricsCollection>,
         ) -> core::error::IndexerResult<Self::OutputType> {
             let mut tx = self.pool.begin().await.map_err(|e| core::error::Error::Custom(format!("db begin: {}", e)))?;
+            let mut max_height_in_batch: i64 = -1;
             for b in data.into_iter() {
                 // Atlas block_time appears to be in microseconds; convert to seconds for to_timestamp
                 let micros: i64 = b.block_time.unwrap_or(0);
@@ -207,13 +230,54 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
                 } else {
                     let _ = metrics.increment_counter("block_write_success", 1).await;
                 }
+
+                if (b.height as i64) > max_height_in_batch {
+                    max_height_in_batch = b.height as i64;
+                }
             }
             tx.commit().await.map_err(|e| core::error::Error::Custom(format!("db commit: {}", e)))?;
+
+            // Accurate rate/ETA reporting using EMA over a sliding window
+            if max_height_in_batch >= 0 {
+                let now = Instant::now();
+                let elapsed = now.duration_since(self.last_report_instant);
+                if elapsed >= Duration::from_secs(5) {
+                    let delta_h = (max_height_in_batch - self.last_report_height).max(0) as f64;
+                    let delta_s = elapsed.as_secs_f64().max(1e-6);
+                    let inst_rate = delta_h / delta_s; // heights per second
+                    // Exponential moving average for stability
+                    let alpha = 0.3;
+                    self.ema_rate_hps = if self.ema_rate_hps <= 0.0 { inst_rate } else { alpha * inst_rate + (1.0 - alpha) * self.ema_rate_hps };
+
+                    let tip = self.tip_height.load(Ordering::Relaxed);
+                    let remaining = (tip - max_height_in_batch).max(0) as f64;
+                    let eta_secs = if self.ema_rate_hps > 0.0 { remaining / self.ema_rate_hps } else { f64::INFINITY };
+
+                    info!(
+                        target: "atlas_progress",
+                        height = max_height_in_batch,
+                        tip = tip,
+                        rate_hps = self.ema_rate_hps,
+                        remaining = remaining,
+                        eta_secs = eta_secs,
+                        "backfill progress"
+                    );
+
+                    self.last_report_instant = now;
+                    self.last_report_height = max_height_in_batch;
+                }
+            }
             Ok(())
         }
     }
 
-    let block_proc = BlockDetailsDbProcessor { pool: db_pool };
+    let block_proc = BlockDetailsDbProcessor {
+        pool: db_pool,
+        tip_height: tip_height.clone(),
+        last_report_instant: Instant::now(),
+        last_report_height: -1,
+        ema_rate_hps: 0.0,
+    };
     pipeline_builder = pipeline_builder.block_details(block_proc);
 
     let mut pipeline: Pipeline = pipeline_builder.build()?;
