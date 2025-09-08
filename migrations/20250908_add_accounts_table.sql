@@ -10,4 +10,3 @@ CREATE TABLE IF NOT EXISTS accounts (
 
 CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner);
 CREATE INDEX IF NOT EXISTS idx_accounts_height ON accounts(height);
-
