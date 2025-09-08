@@ -7,3 +7,6 @@ pub mod utils;
 pub use config::Settings;
 pub use indexer::HybridSync;
 pub use db::models::{Block, Transaction};
+
+#[cfg(feature = "atlas_ingestion")]
+pub mod pipeline_atlas;
