@@ -147,8 +147,49 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         .shutdown_strategy(ShutdownStrategy::Immediate);
 
     // Register transaction bridge
-    let tx_processor = TransactionDbProcessor { pool: db_pool };
+    let tx_processor = TransactionDbProcessor { pool: db_pool.clone() };
     pipeline_builder = pipeline_builder.transaction::<EmptyCollection, ()>(tx_processor, None);
+
+    // BlockDetails processor → blocks table
+    struct BlockDetailsDbProcessor {
+        pool: Arc<PgPool>,
+    }
+
+    #[async_trait::async_trait]
+    impl core::processor::Processor for BlockDetailsDbProcessor {
+        type InputType = core::datasource::BlockDetails;
+        type OutputType = ();
+
+        async fn process(
+            &mut self,
+            data: Vec<Self::InputType>,
+            metrics: Arc<core::metrics::MetricsCollection>,
+        ) -> core::error::IndexerResult<Self::OutputType> {
+            let mut tx = self.pool.begin().await.map_err(|e| core::error::Error::Custom(format!("db begin: {}", e)))?;
+            for b in data.into_iter() {
+                let query = "INSERT INTO blocks (height, hash, timestamp) VALUES ($1, $2, to_timestamp($3)) ON CONFLICT (height) DO UPDATE SET hash = EXCLUDED.hash, timestamp = EXCLUDED.timestamp";
+                let hash = b.block_hash.map(|h| format!("{:?}", h)).unwrap_or_default();
+                let ts = b.block_time.unwrap_or(0) as i64;
+                if let Err(e) = sqlx::query(query)
+                    .bind(b.height as i64)
+                    .bind(&hash)
+                    .bind(ts)
+                    .execute(&mut *tx)
+                    .await
+                {
+                    let _ = metrics.increment_counter("block_write_failed", 1).await;
+                    return Err(core::error::Error::Custom(format!("block upsert failed: {}", e)));
+                } else {
+                    let _ = metrics.increment_counter("block_write_success", 1).await;
+                }
+            }
+            tx.commit().await.map_err(|e| core::error::Error::Custom(format!("db commit: {}", e)))?;
+            Ok(())
+        }
+    }
+
+    let block_proc = BlockDetailsDbProcessor { pool: db_pool };
+    pipeline_builder = pipeline_builder.block_details(block_proc);
 
     let mut pipeline: Pipeline = pipeline_builder.build()?;
 
