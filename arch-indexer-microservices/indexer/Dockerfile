@@ -14,8 +14,14 @@ COPY Cargo.toml Cargo.lock ./
 # Copy source code
 COPY src ./src
 
-# Build the application
-RUN cargo build --release
+# Build the application (support optional features via build arg)
+ARG CARGO_FEATURES=""
+RUN if [ -n "$CARGO_FEATURES" ]; then \
+      echo "Building with features: $CARGO_FEATURES" && \
+      cargo build --release --features "$CARGO_FEATURES" ; \
+    else \
+      cargo build --release ; \
+    fi
 
 # Runtime stage
 FROM debian:bookworm-slim

@@ -22,11 +22,15 @@ services:
     build:
       context: ./indexer
       dockerfile: Dockerfile
+      args:
+        CARGO_FEATURES: atlas_ingestion
     environment:
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/archindexer
       REDIS_URL: redis://redis:6379
       ARCH_NODE_URL: http://44.196.173.35:8081
       ARCH_NODE_WEBSOCKET_URL: ws://44.196.173.35:10081
+      ATLAS_CHECKPOINT_PATH: /data/.atlas_checkpoints
+      RUST_LOG: indexer=info,atlas_core=info
       ENABLE_REALTIME: true
       WEBSOCKET_ENABLED: true
       ARCH_FAST_FORWARD_WINDOW: "0"
@@ -38,6 +42,7 @@ services:
       - redis
     volumes:
       - ./config.yml:/app/config.yml:ro
+      - ./data/indexer:/data
     restart: unless-stopped
 
   api-server:
