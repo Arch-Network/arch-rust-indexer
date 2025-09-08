@@ -3,6 +3,9 @@ use tracing::{info, error};
 use tracing_subscriber::{self, EnvFilter};
 use sqlx::PgPool;
 use std::env;
+use axum::{routing::get, Router};
+use axum::http::StatusCode;
+use std::net::SocketAddr;
 
 use indexer::{config::Settings, indexer::HybridSync};
 
@@ -17,6 +20,33 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(env_filter))
         .init();
+
+    // Metrics exporter (Prometheus)
+    let metrics_addr: SocketAddr = env::var("METRICS_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:9090".to_string())
+        .parse()
+        .unwrap_or_else(|_| "0.0.0.0:9090".parse().unwrap());
+    // metrics-exporter-prometheus 0.12: use PrometheusHandle and serve via axum
+    let handle = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .install_recorder()
+        .map_err(|e| anyhow::anyhow!("failed to install metrics recorder: {}", e))?;
+    let metrics_app = Router::new().route(
+        "/metrics",
+        get({
+            let handle = handle.clone();
+            move || {
+                let handle = handle.clone();
+                async move { (StatusCode::OK, handle.render()) }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind(metrics_addr).await?;
+    tokio::spawn(async move {
+        if let Err(e) = axum::serve(listener, metrics_app).await {
+            error!("metrics server failed: {}", e);
+        }
+    });
+    info!("📈 Prometheus metrics exporter listening on {}", metrics_addr);
 
     info!("🚀 Starting Arch Indexer Service...");
 
