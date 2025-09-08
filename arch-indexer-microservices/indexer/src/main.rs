@@ -57,7 +57,7 @@ async fn main() -> Result<()> {
         let ws_url = &settings.arch_node.websocket_url;
         let rocks_path = std::env::var("ATLAS_CHECKPOINT_PATH").unwrap_or_else(|_| "./.atlas_checkpoints".to_string());
         info!("🧪 Atlas ingestion mode enabled; starting syncing pipeline (rpc={}, ws={})", rpc_url, ws_url);
-        if let Err(e) = pipeline_atlas::run_syncing_pipeline(rpc_url, ws_url, &rocks_path).await {
+        if let Err(e) = pipeline_atlas::run_syncing_pipeline(rpc_url, ws_url, &rocks_path, std::sync::Arc::new(pool)).await {
             error!("Atlas syncing pipeline failed: {}", e);
             std::process::exit(1);
         }
