@@ -14,6 +14,7 @@ use core::sync::{CheckpointStore, SyncConfig, SyncingDatasource, TipSource, Back
 
 use atlas_arch_rpc_datasource::{ArchBackfillDatasource, ArchDatasourceConfig, ArchLiveDatasource};
 use atlas_rocksdb_checkpoint_store::RocksCheckpointStore;
+use sqlx::PgPool;
 
 struct NoopMetrics;
 
@@ -57,7 +58,7 @@ pub async fn run_minimal_pipeline() -> Result<()> {
 }
 
 /// Run full syncing pipeline using Atlas SyncingDatasource wired to Arch RPC + WS and RocksDB checkpoint.
-pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str) -> Result<()> {
+pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str, db_pool: Arc<PgPool>) -> Result<()> {
     let checkpoint = RocksCheckpointStore::open(rocks_path)
         .map_err(|e| anyhow::anyhow!("open rocks checkpoint: {:?}", e))?;
 
@@ -91,14 +92,66 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str)
         sync_cfg,
     );
 
-    let mut pipeline: Pipeline = Pipeline::builder()
+    // Transaction bridge processor wiring
+    // Define a minimal instruction decoder collection (no-op)
+    #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
+    struct EmptyCollection;
+    impl core::collection::InstructionDecoderCollection for EmptyCollection {
+        type InstructionType = ();
+        fn parse_instruction(_instruction: &arch_program_atlas::instruction::Instruction) -> Option<core::instruction::DecodedInstruction<Self>> { None }
+        fn get_type(&self) -> Self::InstructionType { () }
+    }
+
+    // Processor that writes transactions into the existing DB
+    struct TransactionDbProcessor {
+        pool: Arc<PgPool>,
+    }
+
+    #[async_trait::async_trait]
+    impl core::processor::Processor for TransactionDbProcessor {
+        type InputType = core::transaction::TransactionProcessorInputType<EmptyCollection, ()>;
+        type OutputType = ();
+
+        async fn process(
+            &mut self,
+            data: Vec<Self::InputType>,
+            metrics: Arc<core::metrics::MetricsCollection>,
+        ) -> core::error::IndexerResult<Self::OutputType> {
+            let mut tx = self.pool.begin().await.map_err(|e| core::error::Error::Custom(format!("db begin: {}", e)))?;
+
+            for (meta, _parsed, _matched) in data.into_iter() {
+                let status_str = format!("{:?}", meta.status);
+                let query = "INSERT INTO transactions (hash, block_height, status) VALUES ($1, $2, $3) ON CONFLICT (hash) DO UPDATE SET block_height = EXCLUDED.block_height, status = EXCLUDED.status";
+                if let Err(e) = sqlx::query(query)
+                    .bind(&meta.id)
+                    .bind(meta.block_height as i64)
+                    .bind(&status_str)
+                    .execute(&mut *tx)
+                    .await
+                {
+                    let _ = metrics.increment_counter("tx_write_failed", 1).await;
+                    return Err(core::error::Error::Custom(format!("tx upsert failed: {}", e)));
+                } else {
+                    let _ = metrics.increment_counter("tx_write_success", 1).await;
+                }
+            }
+
+            tx.commit().await.map_err(|e| core::error::Error::Custom(format!("db commit: {}", e)))?;
+            Ok(())
+        }
+    }
+
+    let mut pipeline_builder = Pipeline::builder()
         .datasource(syncing_ds)
         .metrics(Arc::new(NoopMetrics))
-        .shutdown_strategy(ShutdownStrategy::Immediate)
-        .build()?;
+        .shutdown_strategy(ShutdownStrategy::Immediate);
+
+    // Register transaction bridge
+    let tx_processor = TransactionDbProcessor { pool: db_pool };
+    pipeline_builder = pipeline_builder.transaction::<EmptyCollection, ()>(tx_processor, None);
+
+    let mut pipeline: Pipeline = pipeline_builder.build()?;
 
     pipeline.run().await?;
     Ok(())
 }
-
-

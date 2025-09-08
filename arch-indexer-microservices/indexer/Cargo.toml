@@ -39,6 +39,8 @@ tokio-util = { version = "0.7", optional = true }
 atlas-core = { git = "https://github.com/Arch-Network/atlas", package = "atlas-core", branch = "master", optional = true }
 atlas-arch-rpc-datasource = { git = "https://github.com/Arch-Network/atlas", package = "atlas-arch-rpc-datasource", branch = "master", optional = true }
 atlas-rocksdb-checkpoint-store = { git = "https://github.com/Arch-Network/atlas", package = "atlas-rocksdb-checkpoint-store", branch = "master", optional = true }
+arch_program = { version = "0.5.8", optional = true }
+arch_program_atlas = { git = "https://github.com/Arch-Network/atlas", package = "arch_program", branch = "master", optional = true }
 
 [lib]
 name = "indexer"
@@ -57,6 +59,7 @@ atlas_ingestion = [
     "dep:atlas-core",
     "dep:atlas-arch-rpc-datasource",
     "dep:atlas-rocksdb-checkpoint-store",
+    "dep:arch_program_atlas",
 ]
 
 # Pull atlas-core only when the feature is enabled to avoid git fetch in default builds
