@@ -38,6 +38,7 @@ services:
       ARCH_MAX_CONCURRENCY: "192"
       ARCH_FETCH_WINDOW_SIZE: "16384"
       ARCH_INITIAL_BACKOFF_MS: "10"
+      METRICS_ADDR: 0.0.0.0:9090
       ATLAS_USE_COPY_BULK: "1"
       # Arch built-ins: System(hex), ComputeBudget, Vote, Stake, BPF Loader, Native Loader
       ARCH_BUILTIN_PROGRAMS: "0000000000000000000000000000000000000000000000000000000000000001,ComputeBudget111111111111111111111111111111,VoteProgram111111111111111111111,StakeProgram11111111111111111111,BpfLoader11111111111111111111111,NativeLoader11111111111111111111,AplToken111111111111111111111111"
@@ -47,6 +48,8 @@ services:
     volumes:
       - ./config.yml:/app/config.yml:ro
       - ./data/indexer:/data
+    ports:
+      - "9090:9090"
     restart: unless-stopped
 
   api-server:

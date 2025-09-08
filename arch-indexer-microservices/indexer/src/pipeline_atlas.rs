@@ -21,16 +21,25 @@ use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::info;
 
-struct NoopMetrics;
+struct PromMetrics;
 
 #[async_trait]
-impl Metrics for NoopMetrics {
+impl Metrics for PromMetrics {
     async fn initialize(&self) -> core::error::IndexerResult<()> { Ok(()) }
     async fn flush(&self) -> core::error::IndexerResult<()> { Ok(()) }
     async fn shutdown(&self) -> core::error::IndexerResult<()> { Ok(()) }
-    async fn update_gauge(&self, _key: &str, _value: f64) -> core::error::IndexerResult<()> { Ok(()) }
-    async fn increment_counter(&self, _key: &str, _n: u64) -> core::error::IndexerResult<()> { Ok(()) }
-    async fn record_histogram(&self, _key: &str, _value: f64) -> core::error::IndexerResult<()> { Ok(()) }
+    async fn update_gauge(&self, key: &str, value: f64) -> core::error::IndexerResult<()> {
+        metrics::gauge!(key).set(value);
+        Ok(())
+    }
+    async fn increment_counter(&self, key: &str, n: u64) -> core::error::IndexerResult<()> {
+        metrics::counter!(key).increment(n);
+        Ok(())
+    }
+    async fn record_histogram(&self, key: &str, value: f64) -> core::error::IndexerResult<()> {
+        metrics::histogram!(key).record(value);
+        Ok(())
+    }
 }
 
 struct NoopDatasource;
@@ -233,7 +242,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
 
     let mut pipeline_builder = Pipeline::builder()
         .datasource(syncing_ds)
-        .metrics(Arc::new(NoopMetrics))
+        .metrics(Arc::new(PromMetrics))
         .shutdown_strategy(ShutdownStrategy::Immediate);
 
     // Register transaction bridge

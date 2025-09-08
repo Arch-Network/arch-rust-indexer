@@ -3,6 +3,7 @@ use tracing::{info, error};
 use tracing_subscriber::{self, EnvFilter};
 use sqlx::PgPool;
 use std::env;
+use std::net::SocketAddr;
 
 use indexer::{config::Settings, indexer::HybridSync};
 
@@ -17,6 +18,18 @@ async fn main() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::new(env_filter))
         .init();
+
+    // Metrics exporter (Prometheus)
+    let metrics_addr: SocketAddr = env::var("METRICS_ADDR")
+        .unwrap_or_else(|_| "0.0.0.0:9090".to_string())
+        .parse()
+        .unwrap_or_else(|_| "0.0.0.0:9090".parse().unwrap());
+    if let Ok(_recorder) = metrics_exporter_prometheus::PrometheusBuilder::new()
+        .with_http_listener(metrics_addr)
+        .install()
+    {
+        info!("📈 Prometheus metrics exporter listening on {}", metrics_addr);
+    }
 
     info!("🚀 Starting Arch Indexer Service...");
 
