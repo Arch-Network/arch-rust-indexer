@@ -197,6 +197,8 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         last_report_instant: Instant,
         last_report_height: i64,
         ema_rate_hps: f64,
+        start_height: Option<i64>,
+        initial_tip_height: Option<i64>,
     }
 
     #[async_trait::async_trait]
@@ -211,6 +213,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         ) -> core::error::IndexerResult<Self::OutputType> {
             let mut tx = self.pool.begin().await.map_err(|e| core::error::Error::Custom(format!("db begin: {}", e)))?;
             let mut max_height_in_batch: i64 = -1;
+            let mut min_height_in_batch: i64 = i64::MAX;
             for b in data.into_iter() {
                 // Atlas block_time appears to be in microseconds; convert to seconds for to_timestamp
                 let micros: i64 = b.block_time.unwrap_or(0);
@@ -231,14 +234,17 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
                     let _ = metrics.increment_counter("block_write_success", 1).await;
                 }
 
-                if (b.height as i64) > max_height_in_batch {
-                    max_height_in_batch = b.height as i64;
-                }
+                let h_i64 = b.height as i64;
+                if h_i64 > max_height_in_batch { max_height_in_batch = h_i64; }
+                if h_i64 < min_height_in_batch { min_height_in_batch = h_i64; }
             }
             tx.commit().await.map_err(|e| core::error::Error::Custom(format!("db commit: {}", e)))?;
 
             // Accurate rate/ETA reporting using EMA over a sliding window
             if max_height_in_batch >= 0 {
+                if self.start_height.is_none() { self.start_height = Some(min_height_in_batch); }
+                let current_tip = self.tip_height.load(Ordering::Relaxed);
+                if self.initial_tip_height.is_none() && current_tip > 0 { self.initial_tip_height = Some(current_tip); }
                 let now = Instant::now();
                 let elapsed = now.duration_since(self.last_report_instant);
                 if elapsed >= Duration::from_secs(5) {
@@ -249,8 +255,12 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
                     let alpha = 0.3;
                     self.ema_rate_hps = if self.ema_rate_hps <= 0.0 { inst_rate } else { alpha * inst_rate + (1.0 - alpha) * self.ema_rate_hps };
 
-                    let tip = self.tip_height.load(Ordering::Relaxed);
+                    let tip = current_tip;
                     let remaining = (tip - max_height_in_batch).max(0) as f64;
+                    let percent = if let (Some(start_h), Some(init_tip)) = (self.start_height, self.initial_tip_height) {
+                        let denom = (init_tip - start_h) as f64;
+                        if denom > 0.0 { (((max_height_in_batch - start_h) as f64) / denom * 100.0).clamp(0.0, 100.0) } else { 0.0 }
+                    } else { 0.0 };
                     let eta_secs = if self.ema_rate_hps > 0.0 { remaining / self.ema_rate_hps } else { f64::INFINITY };
 
                     info!(
@@ -259,6 +269,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
                         tip = tip,
                         rate_hps = self.ema_rate_hps,
                         remaining = remaining,
+                        percent = percent,
                         eta_secs = eta_secs,
                         "backfill progress"
                     );
@@ -277,6 +288,8 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         last_report_instant: Instant::now(),
         last_report_height: -1,
         ema_rate_hps: 0.0,
+        start_height: None,
+        initial_tip_height: None,
     };
     pipeline_builder = pipeline_builder.block_details(block_proc);
 
