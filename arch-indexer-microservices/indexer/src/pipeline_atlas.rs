@@ -14,7 +14,7 @@ use core::sync::{CheckpointStore, SyncConfig, SyncingDatasource, TipSource, Back
 
 use atlas_arch_rpc_datasource::{ArchBackfillDatasource, ArchDatasourceConfig, ArchLiveDatasource};
 use atlas_rocksdb_checkpoint_store::RocksCheckpointStore;
-use sqlx::PgPool;
+use sqlx::{PgPool, QueryBuilder};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
@@ -67,7 +67,35 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         .map_err(|e| anyhow::anyhow!("open rocks checkpoint: {:?}", e))?;
 
     // Datasource implementations
-    let ds_cfg = ArchDatasourceConfig::default();
+    // Read tuning knobs from env with sensible defaults
+    let max_concurrency = std::env::var("ARCH_MAX_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(64);
+    let batch_emit_size = std::env::var("ARCH_BULK_BATCH_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(1000);
+    let fetch_window_size = std::env::var("ARCH_FETCH_WINDOW_SIZE")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(4096);
+    let initial_backoff_ms = std::env::var("ARCH_INITIAL_BACKOFF_MS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(50);
+    let max_retries = std::env::var("ARCH_MAX_RETRIES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .unwrap_or(5);
+
+    let ds_cfg = ArchDatasourceConfig {
+        max_concurrency,
+        batch_emit_size,
+        fetch_window_size,
+        initial_backoff_ms,
+        max_retries,
+    };
     let backfill = ArchBackfillDatasource::new(rpc_url, ds_cfg.clone());
     let live_id = core::datasource::DatasourceId::new_named("arch_live");
     let live = ArchLiveDatasource::new(ws_url, rpc_url, live_id);
@@ -123,42 +151,37 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         ) -> core::error::IndexerResult<Self::OutputType> {
             let mut tx = self.pool.begin().await.map_err(|e| core::error::Error::Custom(format!("db begin: {}", e)))?;
 
-            for (meta, _parsed, _matched) in data.into_iter() {
-                // Map to our schema columns
-                let txid = &meta.id; // stored as text primary key
-                let block_height = meta.block_height as i64;
-                let status_json = serde_json::to_value(&meta.status)
-                    .unwrap_or(serde_json::json!(null));
-
-                let query = "INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (txid) DO UPDATE SET block_height = EXCLUDED.block_height, data = EXCLUDED.data, status = EXCLUDED.status, bitcoin_txids = EXCLUDED.bitcoin_txids";
-
-                // Minimal data payload until full mapping is implemented
-                let data_json = serde_json::json!({
-                    "id": meta.id,
-                    "block_height": meta.block_height,
-                    "message": meta.message,
-                    "rollback_status": meta.rollback_status,
+            // Batch upsert transactions with one statement
+            if !data.is_empty() {
+                let mut qb = QueryBuilder::<sqlx::Postgres>::new(
+                    "INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids) VALUES ",
+                );
+                qb.push_values(data.iter(), |mut b, (meta, _parsed, _matched)| {
+                    let status_json = serde_json::to_value(&meta.status)
+                        .unwrap_or(serde_json::json!(null));
+                    let data_json = serde_json::json!({
+                        "id": meta.id,
+                        "block_height": meta.block_height,
+                        "message": meta.message,
+                        "rollback_status": meta.rollback_status,
+                    });
+                    let bitcoin_txids: Vec<String> = meta
+                        .bitcoin_txid
+                        .as_ref()
+                        .map(|s| vec![s.to_string()])
+                        .unwrap_or_default();
+                    b.push_bind(&meta.id)
+                        .push_bind(meta.block_height as i64)
+                        .push_bind(data_json)
+                        .push_bind(status_json)
+                        .push_bind(&bitcoin_txids[..]);
                 });
-
-                let bitcoin_txids: Vec<String> = meta
-                    .bitcoin_txid
-                    .as_ref()
-                    .map(|s| vec![s.to_string()])
-                    .unwrap_or_default();
-
-                if let Err(e) = sqlx::query(query)
-                    .bind(txid)
-                    .bind(block_height)
-                    .bind(data_json)
-                    .bind(status_json)
-                    .bind(&bitcoin_txids[..])
-                    .execute(&mut *tx)
-                    .await
-                {
+                qb.push(" ON CONFLICT (txid) DO UPDATE SET block_height = EXCLUDED.block_height, data = EXCLUDED.data, status = EXCLUDED.status, bitcoin_txids = EXCLUDED.bitcoin_txids");
+                if let Err(e) = qb.build().execute(&mut *tx).await {
                     let _ = metrics.increment_counter("tx_write_failed", 1).await;
                     return Err(core::error::Error::Custom(format!("tx upsert failed: {}", e)));
                 } else {
-                    let _ = metrics.increment_counter("tx_write_success", 1).await;
+                    let _ = metrics.increment_counter("tx_write_success", data.len() as u64).await;
                 }
             }
 
@@ -217,29 +240,34 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
             let mut tx = self.pool.begin().await.map_err(|e| core::error::Error::Custom(format!("db begin: {}", e)))?;
             let mut max_height_in_batch: i64 = -1;
             let mut min_height_in_batch: i64 = i64::MAX;
-            for b in data.into_iter() {
-                // Atlas block_time appears to be in microseconds; convert to seconds for to_timestamp
-                let micros: i64 = b.block_time.unwrap_or(0);
-                let secs_f64: f64 = (micros as f64) / 1_000_000_f64;
-
-                let query = "INSERT INTO blocks (height, hash, timestamp) VALUES ($1, $2, to_timestamp($3)) ON CONFLICT (height) DO UPDATE SET hash = EXCLUDED.hash, timestamp = EXCLUDED.timestamp";
-                let hash = b.block_hash.map(|h| format!("{:?}", h)).unwrap_or_default();
-                if let Err(e) = sqlx::query(query)
-                    .bind(b.height as i64)
-                    .bind(&hash)
-                    .bind(secs_f64)
-                    .execute(&mut *tx)
-                    .await
-                {
+            if !data.is_empty() {
+                // Batch upsert blocks with one statement
+                let mut qb = QueryBuilder::<sqlx::Postgres>::new(
+                    "INSERT INTO blocks (height, hash, timestamp) VALUES ",
+                );
+                for b in &data {
+                    let micros: i64 = b.block_time.unwrap_or(0);
+                    let secs_f64: f64 = (micros as f64) / 1_000_000_f64;
+                    let hash = b.block_hash.map(|h| format!("{:?}", h)).unwrap_or_default();
+                    qb.push("(")
+                        .push_bind(b.height as i64)
+                        .push(", ")
+                        .push_bind(hash)
+                        .push(", to_timestamp(")
+                        .push_bind(secs_f64)
+                        .push(") )");
+                    qb.separated(',');
+                    let h_i64 = b.height as i64;
+                    if h_i64 > max_height_in_batch { max_height_in_batch = h_i64; }
+                    if h_i64 < min_height_in_batch { min_height_in_batch = h_i64; }
+                }
+                qb.push(" ON CONFLICT (height) DO UPDATE SET hash = EXCLUDED.hash, timestamp = EXCLUDED.timestamp");
+                if let Err(e) = qb.build().execute(&mut *tx).await {
                     let _ = metrics.increment_counter("block_write_failed", 1).await;
                     return Err(core::error::Error::Custom(format!("block upsert failed: {}", e)));
                 } else {
-                    let _ = metrics.increment_counter("block_write_success", 1).await;
+                    let _ = metrics.increment_counter("block_write_success", data.len() as u64).await;
                 }
-
-                let h_i64 = b.height as i64;
-                if h_i64 > max_height_in_batch { max_height_in_batch = h_i64; }
-                if h_i64 < min_height_in_batch { min_height_in_batch = h_i64; }
             }
             tx.commit().await.map_err(|e| core::error::Error::Custom(format!("db commit: {}", e)))?;
 
