@@ -6,6 +6,11 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y \
     pkg-config \
     libssl-dev \
+    clang \
+    libclang-dev \
+    llvm-dev \
+    cmake \
+    build-essential \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy manifests
