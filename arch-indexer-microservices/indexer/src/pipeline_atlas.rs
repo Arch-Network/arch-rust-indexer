@@ -413,6 +413,77 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
     };
     pipeline_builder = pipeline_builder.block_details(block_proc);
 
+    // Accounts processor: upsert into accounts table
+    struct RawAccountDecoder;
+    impl<'a> core::account::AccountDecoder<'a> for RawAccountDecoder {
+        type AccountType = Vec<u8>;
+        fn decode_account(&self, account: &'a arch_sdk::AccountInfo) -> Option<core::account::DecodedAccount<Self::AccountType>> {
+            Some(core::account::DecodedAccount {
+                lamports: account.lamports,
+                owner: account.owner,
+                data: account.data.clone(),
+                utxo: String::new(),
+                executable: false,
+            })
+        }
+    }
+
+    struct AccountDbProcessor {
+        pool: Arc<PgPool>,
+    }
+
+    #[async_trait::async_trait]
+    impl core::processor::Processor for AccountDbProcessor {
+        type InputType = core::account::AccountProcessorInputType<Vec<u8>>;
+        type OutputType = ();
+
+        async fn process(
+            &mut self,
+            data: Vec<Self::InputType>,
+            _metrics: Arc<core::metrics::MetricsCollection>,
+        ) -> core::error::IndexerResult<Self::OutputType> {
+            if data.is_empty() { return Ok(()); }
+            let mut qb = QueryBuilder::<sqlx::Postgres>::new(
+                "INSERT INTO accounts (pubkey, lamports, owner, data, height) VALUES ",
+            );
+            qb.push_values(data.iter(), |mut b, (meta, decoded, _raw)| {
+                b.push_bind(hex::encode(meta.pubkey))
+                    .push_bind(decoded.lamports as i64)
+                    .push_bind(format!("{:?}", decoded.owner))
+                    .push_bind(&decoded.data)
+                    .push_bind(meta.height as i64);
+            });
+            qb.push(" ON CONFLICT (pubkey) DO UPDATE SET lamports = EXCLUDED.lamports, owner = EXCLUDED.owner, data = EXCLUDED.data, height = EXCLUDED.height, updated_at = CURRENT_TIMESTAMP");
+            qb.build().execute(&*self.pool).await.map_err(|e| core::error::Error::Custom(format!("accounts upsert: {}", e)))?;
+            Ok(())
+        }
+    }
+
+    struct AccountDeletionDbProcessor { pool: Arc<PgPool> }
+    #[async_trait::async_trait]
+    impl core::processor::Processor for AccountDeletionDbProcessor {
+        type InputType = core::datasource::AccountDeletion;
+        type OutputType = ();
+        async fn process(
+            &mut self,
+            data: Vec<Self::InputType>,
+            _metrics: Arc<core::metrics::MetricsCollection>,
+        ) -> core::error::IndexerResult<Self::OutputType> {
+            if data.is_empty() { return Ok(()); }
+            let pubkeys: Vec<String> = data.into_iter().map(|d| hex::encode(d.pubkey)).collect();
+            let query = "DELETE FROM accounts WHERE pubkey = ANY($1)";
+            sqlx::query(query).bind(&pubkeys[..]).execute(&*self.pool).await.map_err(|e| core::error::Error::Custom(format!("accounts delete: {}", e)))?;
+            Ok(())
+        }
+    }
+
+    // Wire accounts
+    let acct_decoder = RawAccountDecoder;
+    let acct_proc = AccountDbProcessor { pool: db_pool.clone() };
+    pipeline_builder = pipeline_builder.account(acct_decoder, acct_proc);
+    let acct_del_proc = AccountDeletionDbProcessor { pool: db_pool.clone() };
+    pipeline_builder = pipeline_builder.account_deletions(acct_del_proc);
+
     let mut pipeline: Pipeline = pipeline_builder.build()?;
 
     pipeline.run().await?;

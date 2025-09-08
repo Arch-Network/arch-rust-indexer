@@ -123,6 +123,15 @@ async fn bootstrap_schema_if_missing(pool: &PgPool) -> Result<()> {
             FOREIGN KEY (block_height) REFERENCES blocks(height)
         );
 
+        CREATE TABLE IF NOT EXISTS accounts (
+            pubkey TEXT PRIMARY KEY,
+            lamports BIGINT NOT NULL,
+            owner TEXT NOT NULL,
+            data BYTEA NOT NULL,
+            height BIGINT NOT NULL,
+            updated_at TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
+
         CREATE INDEX IF NOT EXISTS idx_transactions_block_height ON transactions(block_height);
         CREATE INDEX IF NOT EXISTS idx_blocks_bitcoin_block_height ON blocks(bitcoin_block_height);
         CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp);
@@ -142,6 +151,8 @@ async fn bootstrap_schema_if_missing(pool: &PgPool) -> Result<()> {
         );
 
         CREATE INDEX IF NOT EXISTS idx_transaction_programs_program_id ON transaction_programs(program_id);
+        CREATE INDEX IF NOT EXISTS idx_accounts_owner ON accounts(owner);
+        CREATE INDEX IF NOT EXISTS idx_accounts_height ON accounts(height);
     "#;
 
     // Execute inside a transaction for safety, splitting into separate statements
