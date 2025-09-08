@@ -15,6 +15,7 @@ use core::sync::{CheckpointStore, SyncConfig, SyncingDatasource, TipSource, Back
 use atlas_arch_rpc_datasource::{ArchBackfillDatasource, ArchDatasourceConfig, ArchLiveDatasource};
 use atlas_rocksdb_checkpoint_store::RocksCheckpointStore;
 use sqlx::PgPool;
+use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::info;
@@ -200,6 +201,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         start_height: Option<i64>,
         initial_tip_height: Option<i64>,
         start_instant: Instant,
+        growth_samples: VecDeque<(Instant, i64)>,
     }
 
     #[async_trait::async_trait]
@@ -252,8 +254,8 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
                     let delta_h = (max_height_in_batch - self.last_report_height).max(0) as f64;
                     let delta_s = elapsed.as_secs_f64().max(1e-6);
                     let inst_rate = delta_h / delta_s; // heights per second
-                    // Exponential moving average for stability
-                    let alpha = 0.3;
+                    // Time-based EMA ~60s window: alpha = 1 - exp(-dt/60)
+                    let alpha = 1.0 - (-delta_s / 60.0).exp();
                     self.ema_rate_hps = if self.ema_rate_hps <= 0.0 { inst_rate } else { alpha * inst_rate + (1.0 - alpha) * self.ema_rate_hps };
 
                     let tip = current_tip;
@@ -264,15 +266,28 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
                         let denom = (init_tip - start_h) as f64;
                         if denom > 0.0 { (((max_height_in_batch - start_h) as f64) / denom * 100.0).clamp(0.0, 100.0) } else { 0.0 }
                     } else { 0.0 };
-                    // Estimate live tip growth rate (blocks/sec) since overall start
-                    let elapsed_since_start = now.duration_since(self.start_instant).as_secs_f64().max(1e-6);
-                    let growth_rate_hps = if let Some(init_tip) = self.initial_tip_height {
-                        let grown = (tip - init_tip).max(0) as f64;
-                        (grown / elapsed_since_start).max(0.0)
+                    // Estimate live tip growth rate using a 5-minute sliding window
+                    self.growth_samples.push_back((now, tip));
+                    while let Some(&(t_old, _)) = self.growth_samples.front() {
+                        if now.duration_since(t_old) > Duration::from_secs(300) { self.growth_samples.pop_front(); } else { break; }
+                    }
+                    let growth_rate_hps = if let (Some(&(t0, tip0)), Some(&(t1, tip1))) = (self.growth_samples.front(), self.growth_samples.back()) {
+                        let dt = t1.duration_since(t0).as_secs_f64().max(1e-6);
+                        ((tip1 - tip0) as f64 / dt).max(0.0)
                     } else { 0.0 };
                     // Effective processing rate toward fixed goal subtracts tip growth
                     let effective_rate = (self.ema_rate_hps - growth_rate_hps).max(0.001);
                     let eta_secs = remaining_to_initial / effective_rate;
+
+                    fn fmt_hms(mut s: f64) -> String {
+                        if !s.is_finite() { return "inf".to_string(); }
+                        if s < 0.0 { s = 0.0; }
+                        let total = s.round() as i64;
+                        let h = total / 3600;
+                        let m = (total % 3600) / 60;
+                        let ss = total % 60;
+                        format!("{:02}:{:02}:{:02}", h, m, ss)
+                    }
 
                     info!(
                         target: "atlas_progress",
@@ -284,9 +299,9 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
                         remaining_fixed = remaining_to_initial,
                         percent = percent,
                         eta_secs = eta_secs,
-                        "backfill progress: {:.2}% complete (eta ~ {}s)",
+                        "backfill progress: {:.2}% complete (eta ~ {})",
                         percent,
-                        eta_secs as i64
+                        fmt_hms(eta_secs)
                     );
 
                     self.last_report_instant = now;
