@@ -120,12 +120,34 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
             let mut tx = self.pool.begin().await.map_err(|e| core::error::Error::Custom(format!("db begin: {}", e)))?;
 
             for (meta, _parsed, _matched) in data.into_iter() {
-                let status_str = format!("{:?}", meta.status);
-                let query = "INSERT INTO transactions (hash, block_height, status) VALUES ($1, $2, $3) ON CONFLICT (hash) DO UPDATE SET block_height = EXCLUDED.block_height, status = EXCLUDED.status";
+                // Map to our schema columns
+                let txid = &meta.id; // stored as text primary key
+                let block_height = meta.block_height as i64;
+                let status_json = serde_json::to_value(&meta.status)
+                    .unwrap_or(serde_json::json!(null));
+
+                let query = "INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids) VALUES ($1, $2, $3, $4, $5) ON CONFLICT (txid) DO UPDATE SET block_height = EXCLUDED.block_height, data = EXCLUDED.data, status = EXCLUDED.status, bitcoin_txids = EXCLUDED.bitcoin_txids";
+
+                // Minimal data payload until full mapping is implemented
+                let data_json = serde_json::json!({
+                    "id": meta.id,
+                    "block_height": meta.block_height,
+                    "message": meta.message,
+                    "rollback_status": meta.rollback_status,
+                });
+
+                let bitcoin_txids: Vec<String> = meta
+                    .bitcoin_txid
+                    .as_ref()
+                    .map(|s| vec![s.to_string()])
+                    .unwrap_or_default();
+
                 if let Err(e) = sqlx::query(query)
-                    .bind(&meta.id)
-                    .bind(meta.block_height as i64)
-                    .bind(&status_str)
+                    .bind(txid)
+                    .bind(block_height)
+                    .bind(data_json)
+                    .bind(status_json)
+                    .bind(&bitcoin_txids[..])
                     .execute(&mut *tx)
                     .await
                 {
@@ -167,13 +189,16 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         ) -> core::error::IndexerResult<Self::OutputType> {
             let mut tx = self.pool.begin().await.map_err(|e| core::error::Error::Custom(format!("db begin: {}", e)))?;
             for b in data.into_iter() {
+                // Atlas block_time appears to be in microseconds; convert to seconds for to_timestamp
+                let micros: i64 = b.block_time.unwrap_or(0);
+                let secs_f64: f64 = (micros as f64) / 1_000_000_f64;
+
                 let query = "INSERT INTO blocks (height, hash, timestamp) VALUES ($1, $2, to_timestamp($3)) ON CONFLICT (height) DO UPDATE SET hash = EXCLUDED.hash, timestamp = EXCLUDED.timestamp";
                 let hash = b.block_hash.map(|h| format!("{:?}", h)).unwrap_or_default();
-                let ts = b.block_time.unwrap_or(0) as i64;
                 if let Err(e) = sqlx::query(query)
                     .bind(b.height as i64)
                     .bind(&hash)
-                    .bind(ts)
+                    .bind(secs_f64)
                     .execute(&mut *tx)
                     .await
                 {
