@@ -199,6 +199,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         ema_rate_hps: f64,
         start_height: Option<i64>,
         initial_tip_height: Option<i64>,
+        start_instant: Instant,
     }
 
     #[async_trait::async_trait]
@@ -256,22 +257,36 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
                     self.ema_rate_hps = if self.ema_rate_hps <= 0.0 { inst_rate } else { alpha * inst_rate + (1.0 - alpha) * self.ema_rate_hps };
 
                     let tip = current_tip;
-                    let remaining = (tip - max_height_in_batch).max(0) as f64;
+                    // Remaining to a fixed goal: the initial safe tip captured at start
+                    let remaining_to_initial = if let Some(init_tip) = self.initial_tip_height { (init_tip - max_height_in_batch).max(0) as f64 } else { 0.0 };
+                    // Percent complete relative to fixed goal (avoids wobble as live tip advances)
                     let percent = if let (Some(start_h), Some(init_tip)) = (self.start_height, self.initial_tip_height) {
                         let denom = (init_tip - start_h) as f64;
                         if denom > 0.0 { (((max_height_in_batch - start_h) as f64) / denom * 100.0).clamp(0.0, 100.0) } else { 0.0 }
                     } else { 0.0 };
-                    let eta_secs = if self.ema_rate_hps > 0.0 { remaining / self.ema_rate_hps } else { f64::INFINITY };
+                    // Estimate live tip growth rate (blocks/sec) since overall start
+                    let elapsed_since_start = now.duration_since(self.start_instant).as_secs_f64().max(1e-6);
+                    let growth_rate_hps = if let Some(init_tip) = self.initial_tip_height {
+                        let grown = (tip - init_tip).max(0) as f64;
+                        (grown / elapsed_since_start).max(0.0)
+                    } else { 0.0 };
+                    // Effective processing rate toward fixed goal subtracts tip growth
+                    let effective_rate = (self.ema_rate_hps - growth_rate_hps).max(0.001);
+                    let eta_secs = remaining_to_initial / effective_rate;
 
                     info!(
                         target: "atlas_progress",
                         height = max_height_in_batch,
                         tip = tip,
                         rate_hps = self.ema_rate_hps,
-                        remaining = remaining,
+                        growth_hps = growth_rate_hps,
+                        effective_rate_hps = effective_rate,
+                        remaining_fixed = remaining_to_initial,
                         percent = percent,
                         eta_secs = eta_secs,
-                        "backfill progress"
+                        "backfill progress: {:.2}% complete (eta ~ {}s)",
+                        percent,
+                        eta_secs as i64
                     );
 
                     self.last_report_instant = now;
@@ -290,6 +305,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         ema_rate_hps: 0.0,
         start_height: None,
         initial_tip_height: None,
+        start_instant: Instant::now(),
     };
     pipeline_builder = pipeline_builder.block_details(block_proc);
 
