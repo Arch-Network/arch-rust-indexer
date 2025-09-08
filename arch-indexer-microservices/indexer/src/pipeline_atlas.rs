@@ -29,15 +29,15 @@ impl Metrics for PromMetrics {
     async fn flush(&self) -> core::error::IndexerResult<()> { Ok(()) }
     async fn shutdown(&self) -> core::error::IndexerResult<()> { Ok(()) }
     async fn update_gauge(&self, key: &str, value: f64) -> core::error::IndexerResult<()> {
-        metrics::gauge!("atlas_gauge", "name" => key.to_string()).set(value);
+        metrics::gauge!("atlas_gauge", value, "name" => key);
         Ok(())
     }
     async fn increment_counter(&self, key: &str, n: u64) -> core::error::IndexerResult<()> {
-        metrics::counter!("atlas_counter", "name" => key.to_string()).increment(n);
+        metrics::counter!("atlas_counter", n as u64, "name" => key);
         Ok(())
     }
     async fn record_histogram(&self, key: &str, value: f64) -> core::error::IndexerResult<()> {
-        metrics::histogram!("atlas_histogram", "name" => key.to_string()).record(value);
+        metrics::histogram!("atlas_histogram", value, "name" => key);
         Ok(())
     }
 }
@@ -63,7 +63,7 @@ impl Datasource for NoopDatasource {
 pub async fn run_minimal_pipeline() -> Result<()> {
     let mut pipeline: Pipeline = Pipeline::builder()
         .datasource(NoopDatasource)
-        .metrics(Arc::new(NoopMetrics))
+        .metrics(Arc::new(PromMetrics))
         .shutdown_strategy(ShutdownStrategy::Immediate)
         .build()?;
 
@@ -208,7 +208,8 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
                 let client = open_copy_conn().await.map_err(|e| core::error::Error::Custom(format!("copy conn: {}", e)))?;
                 client.batch_execute("CREATE TEMP TABLE IF NOT EXISTS tmp_transactions (txid text, block_height bigint, data jsonb, status jsonb, bitcoin_txids text[]) ON COMMIT DROP;").await.map_err(|e| core::error::Error::Custom(format!("tmp table: {}", e)))?;
                 let sink = client.copy_in("COPY tmp_transactions (txid, block_height, data, status, bitcoin_txids) FROM STDIN BINARY").await.map_err(|e| core::error::Error::Custom(format!("copy in: {}", e)))?;
-                let mut writer = tokio_postgres::binary_copy::BinaryCopyInWriter::new(sink, &[tokio_postgres::types::Type::TEXT, tokio_postgres::types::Type::INT8, tokio_postgres::types::Type::JSONB, tokio_postgres::types::Type::JSONB, tokio_postgres::types::Type::TEXT_ARRAY]);
+                let writer = tokio_postgres::binary_copy::BinaryCopyInWriter::new(sink, &[tokio_postgres::types::Type::TEXT, tokio_postgres::types::Type::INT8, tokio_postgres::types::Type::JSONB, tokio_postgres::types::Type::JSONB, tokio_postgres::types::Type::TEXT_ARRAY]);
+                let mut writer = std::pin::pin!(writer);
                 for (meta, _parsed, _matched) in &data {
                     let status_json: serde_json::Value = serde_json::to_value(&meta.status).unwrap_or(serde_json::json!(null));
                     let data_json: serde_json::Value = serde_json::json!({
@@ -228,9 +229,9 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
                     let json_data: &serde_json::Value = &data_json;
                     let json_status: &serde_json::Value = &status_json;
                     let txids_arr: &Vec<String> = &bitcoin_txids;
-                    writer.write(&[&txid as &dyn ToSql, &height_i64, json_data, json_status, txids_arr]).await.map_err(|e| core::error::Error::Custom(format!("copy write: {}", e)))?;
+                    writer.as_mut().write(&[&txid as &dyn ToSql, &height_i64, json_data, json_status, txids_arr]).await.map_err(|e| core::error::Error::Custom(format!("copy write: {}", e)))?;
                 }
-                writer.finish().await.map_err(|e| core::error::Error::Custom(format!("copy finish: {}", e)))?;
+                writer.as_mut().finish().await.map_err(|e| core::error::Error::Custom(format!("copy finish: {}", e)))?;
                 client.batch_execute("INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids) SELECT txid, block_height, data, status, bitcoin_txids FROM tmp_transactions ON CONFLICT (txid) DO UPDATE SET block_height = EXCLUDED.block_height, data = EXCLUDED.data, status = EXCLUDED.status, bitcoin_txids = EXCLUDED.bitcoin_txids;").await.map_err(|e| core::error::Error::Custom(format!("copy upsert: {}", e)))?;
                 let _ = metrics.increment_counter("tx_write_success", data.len() as u64).await;
             }
@@ -275,6 +276,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         initial_tip_height: Option<i64>,
         start_instant: Instant,
         growth_samples: VecDeque<(Instant, i64)>,
+        use_copy_bulk: bool,
     }
 
     #[async_trait::async_trait]
@@ -290,7 +292,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
             let mut tx = self.pool.begin().await.map_err(|e| core::error::Error::Custom(format!("db begin: {}", e)))?;
             let mut max_height_in_batch: i64 = -1;
             let mut min_height_in_batch: i64 = i64::MAX;
-            if !data.is_empty() && !use_copy_bulk {
+            if !data.is_empty() && !self.use_copy_bulk {
                 // Batch upsert blocks with one statement
                 let mut qb = QueryBuilder::<sqlx::Postgres>::new(
                     "INSERT INTO blocks (height, hash, timestamp) VALUES ",
@@ -323,19 +325,20 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
                 let client = open_copy_conn().await.map_err(|e| core::error::Error::Custom(format!("copy conn: {}", e)))?;
                 client.batch_execute("CREATE TEMP TABLE IF NOT EXISTS tmp_blocks (height bigint, hash text, ts_seconds double precision) ON COMMIT DROP;").await.map_err(|e| core::error::Error::Custom(format!("tmp table: {}", e)))?;
                 let sink = client.copy_in("COPY tmp_blocks (height, hash, ts_seconds) FROM STDIN BINARY").await.map_err(|e| core::error::Error::Custom(format!("copy in: {}", e)))?;
-                let mut writer = tokio_postgres::binary_copy::BinaryCopyInWriter::new(sink, &[tokio_postgres::types::Type::INT8, tokio_postgres::types::Type::TEXT, tokio_postgres::types::Type::FLOAT8]);
+                let writer = tokio_postgres::binary_copy::BinaryCopyInWriter::new(sink, &[tokio_postgres::types::Type::INT8, tokio_postgres::types::Type::TEXT, tokio_postgres::types::Type::FLOAT8]);
+                let mut writer = std::pin::pin!(writer);
                 for b in &data {
                     let micros: i64 = b.block_time.unwrap_or(0);
                     let secs_f64: f64 = (micros as f64) / 1_000_000_f64;
                     let hash = b.block_hash.map(|h| format!("{:?}", h)).unwrap_or_default();
                     use tokio_postgres::types::ToSql;
                     let height_i64: i64 = b.height as i64;
-                    writer.write(&[&height_i64 as &dyn ToSql, &hash, &secs_f64]).await.map_err(|e| core::error::Error::Custom(format!("copy write: {}", e)))?;
+                    writer.as_mut().write(&[&height_i64 as &dyn ToSql, &hash, &secs_f64]).await.map_err(|e| core::error::Error::Custom(format!("copy write: {}", e)))?;
                     let h_i64 = b.height as i64;
                     if h_i64 > max_height_in_batch { max_height_in_batch = h_i64; }
                     if h_i64 < min_height_in_batch { min_height_in_batch = h_i64; }
                 }
-                writer.finish().await.map_err(|e| core::error::Error::Custom(format!("copy finish: {}", e)))?;
+                writer.as_mut().finish().await.map_err(|e| core::error::Error::Custom(format!("copy finish: {}", e)))?;
                 client.batch_execute("INSERT INTO blocks (height, hash, timestamp) SELECT height, hash, to_timestamp(ts_seconds) FROM tmp_blocks ON CONFLICT (height) DO UPDATE SET hash = EXCLUDED.hash, timestamp = EXCLUDED.timestamp;").await.map_err(|e| core::error::Error::Custom(format!("copy upsert: {}", e)))?;
                 let _ = metrics.increment_counter("block_write_success", data.len() as u64).await;
             }
@@ -411,7 +414,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
     }
 
     let block_proc = BlockDetailsDbProcessor {
-        pool: db_pool,
+        pool: db_pool.clone(),
         tip_height: tip_height.clone(),
         last_report_instant: Instant::now(),
         last_report_height: -1,
@@ -420,6 +423,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         initial_tip_height: None,
         start_instant: Instant::now(),
         growth_samples: VecDeque::new(),
+        use_copy_bulk,
     };
     pipeline_builder = pipeline_builder.block_details(block_proc);
 

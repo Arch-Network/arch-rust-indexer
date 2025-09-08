@@ -24,11 +24,21 @@ async fn main() -> Result<()> {
         .unwrap_or_else(|_| "0.0.0.0:9090".to_string())
         .parse()
         .unwrap_or_else(|_| "0.0.0.0:9090".parse().unwrap());
-    if let Ok(_recorder) = metrics_exporter_prometheus::PrometheusBuilder::new()
-        .with_http_listener(metrics_addr)
-        .install()
-    {
-        info!("📈 Prometheus metrics exporter listening on {}", metrics_addr);
+    // metrics-exporter-prometheus 0.12 API: builder.build()? + spawn exporter
+    match metrics_exporter_prometheus::PrometheusBuilder::new().build() {
+        Ok((recorder, exporter)) => {
+            if let Err(e) = metrics::set_boxed_recorder(Box::new(recorder)) {
+                error!("failed to set metrics recorder: {}", e);
+            } else {
+                tokio::spawn(async move {
+                    if let Err(e) = exporter.listen(metrics_addr).await {
+                        error!("metrics exporter failed: {}", e);
+                    }
+                });
+                info!("📈 Prometheus metrics exporter listening on {}", metrics_addr);
+            }
+        }
+        Err(e) => error!("failed to build prometheus exporter: {}", e),
     }
 
     info!("🚀 Starting Arch Indexer Service...");
