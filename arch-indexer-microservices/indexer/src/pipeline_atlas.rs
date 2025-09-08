@@ -29,15 +29,15 @@ impl Metrics for PromMetrics {
     async fn flush(&self) -> core::error::IndexerResult<()> { Ok(()) }
     async fn shutdown(&self) -> core::error::IndexerResult<()> { Ok(()) }
     async fn update_gauge(&self, key: &str, value: f64) -> core::error::IndexerResult<()> {
-        metrics::gauge!(key).set(value);
+        metrics::gauge!("atlas_gauge", "name" => key.to_string()).set(value);
         Ok(())
     }
     async fn increment_counter(&self, key: &str, n: u64) -> core::error::IndexerResult<()> {
-        metrics::counter!(key).increment(n);
+        metrics::counter!("atlas_counter", "name" => key.to_string()).increment(n);
         Ok(())
     }
     async fn record_histogram(&self, key: &str, value: f64) -> core::error::IndexerResult<()> {
-        metrics::histogram!(key).record(value);
+        metrics::histogram!("atlas_histogram", "name" => key.to_string()).record(value);
         Ok(())
     }
 }
@@ -419,6 +419,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         start_height: None,
         initial_tip_height: None,
         start_instant: Instant::now(),
+        growth_samples: VecDeque::new(),
     };
     pipeline_builder = pipeline_builder.block_details(block_proc);
 
