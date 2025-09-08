@@ -28,12 +28,13 @@ RUN if [ -n "$CARGO_FEATURES" ]; then \
       cargo build --release ; \
     fi
 
-# Runtime stage
-FROM debian:bookworm-slim
+# Runtime stage (match builder's GLIBC/CXXABI; use testing)
+FROM debian:testing-slim
 
 RUN apt-get update && apt-get install -y \
     ca-certificates \
     curl \
+    libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
