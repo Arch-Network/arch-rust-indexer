@@ -15,6 +15,7 @@ use core::sync::{CheckpointStore, SyncConfig, SyncingDatasource, TipSource, Back
 use atlas_arch_rpc_datasource::{ArchBackfillDatasource, ArchDatasourceConfig, ArchLiveDatasource};
 use atlas_rocksdb_checkpoint_store::RocksCheckpointStore;
 use sqlx::{PgPool, QueryBuilder};
+use tokio_postgres::{NoTls};
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
@@ -134,6 +135,16 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         fn get_type(&self) -> Self::InstructionType { () }
     }
 
+    // Helper: open a raw tokio-postgres connection (COPY support)
+    async fn open_copy_conn() -> anyhow::Result<tokio_postgres::Client> {
+        let db_url = std::env::var("DATABASE_URL")?;
+        let (client, connection) = tokio_postgres::connect(&db_url, NoTls).await?;
+        tokio::spawn(async move { let _ = connection.await; });
+        Ok(client)
+    }
+
+    let use_copy_bulk = std::env::var("ATLAS_USE_COPY_BULK").ok().as_deref() == Some("1");
+
     // Processor that writes transactions into the existing DB
     struct TransactionDbProcessor {
         pool: Arc<PgPool>,
@@ -151,8 +162,8 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         ) -> core::error::IndexerResult<Self::OutputType> {
             let mut tx = self.pool.begin().await.map_err(|e| core::error::Error::Custom(format!("db begin: {}", e)))?;
 
-            // Batch upsert transactions with one statement
-            if !data.is_empty() {
+            // Batch upsert transactions with one statement or COPY bulk path
+            if !data.is_empty() && !std::env::var("ATLAS_USE_COPY_BULK").ok().as_deref().eq(&Some("1")) {
                 let mut qb = QueryBuilder::<sqlx::Postgres>::new(
                     "INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids) VALUES ",
                 );
@@ -183,6 +194,31 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
                 } else {
                     let _ = metrics.increment_counter("tx_write_success", data.len() as u64).await;
                 }
+            } else if !data.is_empty() {
+                // COPY into temp staging and upsert
+                let client = open_copy_conn().await.map_err(|e| core::error::Error::Custom(format!("copy conn: {}", e)))?;
+                client.batch_execute("CREATE TEMP TABLE IF NOT EXISTS tmp_transactions (txid text, block_height bigint, data jsonb, status jsonb, bitcoin_txids text[]) ON COMMIT DROP;").await.map_err(|e| core::error::Error::Custom(format!("tmp table: {}", e)))?;
+                let sink = client.copy_in("COPY tmp_transactions (txid, block_height, data, status, bitcoin_txids) FROM STDIN BINARY").await.map_err(|e| core::error::Error::Custom(format!("copy in: {}", e)))?;
+                use bytes::{BytesMut, BufMut};
+                let mut writer = tokio_postgres::binary_copy::BinaryCopyInWriter::new(sink, &[tokio_postgres::types::Type::TEXT, tokio_postgres::types::Type::INT8, tokio_postgres::types::Type::JSONB, tokio_postgres::types::Type::JSONB, tokio_postgres::types::Type::TEXT_ARRAY]);
+                for (meta, _parsed, _matched) in &data {
+                    let status_json = serde_json::to_value(&meta.status).unwrap_or(serde_json::json!(null));
+                    let data_json = serde_json::json!({
+                        "id": meta.id,
+                        "block_height": meta.block_height,
+                        "message": meta.message,
+                        "rollback_status": meta.rollback_status,
+                    });
+                    let bitcoin_txids: Vec<String> = meta
+                        .bitcoin_txid
+                        .as_ref()
+                        .map(|s| vec![s.to_string()])
+                        .unwrap_or_default();
+                    writer.write(&[&meta.id, &(meta.block_height as i64).to_string(), &data_json.to_string(), &status_json.to_string(), &serde_json::json!(bitcoin_txids).to_string()]).await.map_err(|e| core::error::Error::Custom(format!("copy write: {}", e)))?;
+                }
+                writer.finish().await.map_err(|e| core::error::Error::Custom(format!("copy finish: {}", e)))?;
+                client.batch_execute("INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids) SELECT txid, block_height, data, status, bitcoin_txids FROM tmp_transactions ON CONFLICT (txid) DO UPDATE SET block_height = EXCLUDED.block_height, data = EXCLUDED.data, status = EXCLUDED.status, bitcoin_txids = EXCLUDED.bitcoin_txids;").await.map_err(|e| core::error::Error::Custom(format!("copy upsert: {}", e)))?;
+                let _ = metrics.increment_counter("tx_write_success", data.len() as u64).await;
             }
 
             tx.commit().await.map_err(|e| core::error::Error::Custom(format!("db commit: {}", e)))?;
@@ -240,7 +276,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
             let mut tx = self.pool.begin().await.map_err(|e| core::error::Error::Custom(format!("db begin: {}", e)))?;
             let mut max_height_in_batch: i64 = -1;
             let mut min_height_in_batch: i64 = i64::MAX;
-            if !data.is_empty() {
+            if !data.is_empty() && !use_copy_bulk {
                 // Batch upsert blocks with one statement
                 let mut qb = QueryBuilder::<sqlx::Postgres>::new(
                     "INSERT INTO blocks (height, hash, timestamp) VALUES ",
@@ -268,6 +304,27 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
                 } else {
                     let _ = metrics.increment_counter("block_write_success", data.len() as u64).await;
                 }
+            } else if !data.is_empty() {
+                // COPY bulk for blocks
+                let client = open_copy_conn().await.map_err(|e| core::error::Error::Custom(format!("copy conn: {}", e)))?;
+                client.batch_execute("CREATE TEMP TABLE IF NOT EXISTS tmp_blocks (height bigint, hash text, timestamp timestamptz) ON COMMIT DROP;").await.map_err(|e| core::error::Error::Custom(format!("tmp table: {}", e)))?;
+                let sink = client.copy_in("COPY tmp_blocks (height, hash, timestamp) FROM STDIN BINARY").await.map_err(|e| core::error::Error::Custom(format!("copy in: {}", e)))?;
+                let mut writer = tokio_postgres::binary_copy::BinaryCopyInWriter::new(sink, &[tokio_postgres::types::Type::INT8, tokio_postgres::types::Type::TEXT, tokio_postgres::types::Type::TIMESTAMPTZ]);
+                for b in &data {
+                    let micros: i64 = b.block_time.unwrap_or(0);
+                    let secs_f64: f64 = (micros as f64) / 1_000_000_f64;
+                    let hash = b.block_hash.map(|h| format!("{:?}", h)).unwrap_or_default();
+                    // TIMESTAMPTZ via to_timestamp(secs)
+                    let ts = chrono::NaiveDateTime::from_timestamp_opt(secs_f64 as i64, ((secs_f64.fract() * 1_000_000_000.0) as u32)).unwrap_or_else(|| chrono::NaiveDateTime::from_timestamp_opt(0,0).unwrap());
+                    let ts_tz: chrono::DateTime<chrono::Utc> = chrono::DateTime::from_naive_utc_and_offset(ts, chrono::Utc);
+                    writer.write(&[&(b.height as i64).to_string(), &hash, &ts_tz.to_rfc3339()]).await.map_err(|e| core::error::Error::Custom(format!("copy write: {}", e)))?;
+                    let h_i64 = b.height as i64;
+                    if h_i64 > max_height_in_batch { max_height_in_batch = h_i64; }
+                    if h_i64 < min_height_in_batch { min_height_in_batch = h_i64; }
+                }
+                writer.finish().await.map_err(|e| core::error::Error::Custom(format!("copy finish: {}", e)))?;
+                client.batch_execute("INSERT INTO blocks (height, hash, timestamp) SELECT height, hash, timestamp FROM tmp_blocks ON CONFLICT (height) DO UPDATE SET hash = EXCLUDED.hash, timestamp = EXCLUDED.timestamp;").await.map_err(|e| core::error::Error::Custom(format!("copy upsert: {}", e)))?;
+                let _ = metrics.increment_counter("block_write_success", data.len() as u64).await;
             }
             tx.commit().await.map_err(|e| core::error::Error::Custom(format!("db commit: {}", e)))?;
 
