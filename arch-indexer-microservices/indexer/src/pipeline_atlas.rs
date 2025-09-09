@@ -157,6 +157,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         sync_cfg,
     );
 
+
     // Transaction bridge processor wiring
     // Define a minimal instruction decoder collection (no-op)
     #[derive(Clone, Debug, PartialEq, Eq, Hash, serde::Serialize)]
@@ -473,7 +474,67 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
     pipeline_builder = pipeline_builder.block_details(block_proc);
 
     // Rollback/Reapplied processors: update transactions + request account refresh
-    struct RolledbackTxProcessor { pool: Arc<PgPool> }
+    // Helpers to resolve affected pubkeys from tx data
+    fn json_value_to_pubkey(value: &serde_json::Value) -> Option<arch_program::pubkey::Pubkey> {
+        if let Some(arr) = value.as_array() {
+            let bytes: Vec<u8> = arr.iter().filter_map(|x| x.as_u64().map(|n| n as u8)).collect();
+            if bytes.len() == 32 { return Some(arch_program::pubkey::Pubkey::from_slice(&bytes)); }
+            return None;
+        }
+        if let Some(s) = value.as_str() {
+            if s.chars().all(|c| c.is_ascii_hexdigit()) && s.len() >= 2 {
+                if let Ok(bytes) = hex::decode(s) { if bytes.len() == 32 { return Some(arch_program::pubkey::Pubkey::from_slice(&bytes)); } }
+            } else if let Ok(bytes) = bs58::decode(s).into_vec() {
+                if bytes.len() == 32 { return Some(arch_program::pubkey::Pubkey::from_slice(&bytes)); }
+            }
+        }
+        None
+    }
+
+    fn extract_pubkeys_from_tx_json(data: &serde_json::Value) -> Vec<arch_program::pubkey::Pubkey> {
+        let mut out: Vec<arch_program::pubkey::Pubkey> = Vec::new();
+        if let Some(keys) = data
+            .get("message")
+            .and_then(|m| m.get("account_keys"))
+            .and_then(|v| v.as_array())
+        {
+            for k in keys { if let Some(pk) = json_value_to_pubkey(k) { out.push(pk); } }
+        }
+        out.sort();
+        out.dedup();
+        out
+    }
+
+    async fn resolve_pubkeys_for_txids(
+        pool: &PgPool,
+        rpc: &crate::arch_rpc::ArchRpcClient,
+        txids: &[String],
+    ) -> anyhow::Result<HashSet<arch_program::pubkey::Pubkey>> {
+        use std::collections::HashSet as StdHashSet;
+        let mut result: StdHashSet<arch_program::pubkey::Pubkey> = StdHashSet::new();
+        if txids.is_empty() { return Ok(result); }
+        let rows: Vec<(String, serde_json::Value)> = sqlx::query_as(
+            "SELECT txid, data FROM transactions WHERE txid = ANY($1)"
+        )
+        .bind(txids)
+        .fetch_all(pool)
+        .await
+        .unwrap_or_default();
+
+        let present: StdHashSet<String> = rows.iter().map(|(id, _)| id.clone()).collect();
+        for (_, data_json) in &rows { for pk in extract_pubkeys_from_tx_json(data_json) { result.insert(pk); } }
+
+        for txid in txids {
+            if present.contains(txid) { continue; }
+            if let Ok(processed) = rpc.get_processed_transaction(txid).await {
+                let data = processed.runtime_transaction;
+                for pk in extract_pubkeys_from_tx_json(&data) { result.insert(pk); }
+            }
+        }
+        Ok(result)
+    }
+
+    struct RolledbackTxProcessor { pool: Arc<PgPool>, rpc: Arc<crate::arch_rpc::ArchRpcClient> }
     #[async_trait::async_trait]
     impl core::processor::Processor for RolledbackTxProcessor {
         type InputType = core::datasource::RolledbackTransactionsEvent;
@@ -481,22 +542,24 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         async fn process(
             &mut self,
             data: Vec<Self::InputType>,
-            _metrics: Arc<core::metrics::MetricsCollection>,
+            metrics: Arc<core::metrics::MetricsCollection>,
         ) -> core::error::IndexerResult<Self::OutputType> {
-            // Mark tx status. For now we don’t compute pubkeys here; Atlas pipeline will handle refresh via returned set
-            for ev in &data {
-                if !ev.transaction_hashes.is_empty() {
-                    let _ = sqlx::query("UPDATE transactions SET status = jsonb_set(COALESCE(status, '{}'), '{rolled_back}', 'true') WHERE txid = ANY($1)")
-                        .bind(&ev.transaction_hashes[..])
-                        .execute(&*self.pool)
-                        .await;
-                }
+            let mut all_txids: Vec<String> = Vec::new();
+            for ev in &data { all_txids.extend(ev.transaction_hashes.clone()); }
+            if !all_txids.is_empty() {
+                let _ = sqlx::query("UPDATE transactions SET status = jsonb_set(COALESCE(status, '{}'), '{rolled_back}', 'true') WHERE txid = ANY($1)")
+                    .bind(&all_txids[..])
+                    .execute(&*self.pool)
+                    .await;
             }
-            Ok(HashSet::new())
+            let mut pubkeys: HashSet<arch_program::pubkey::Pubkey> = HashSet::new();
+            if let Ok(set) = resolve_pubkeys_for_txids(&self.pool, &self.rpc, &all_txids).await { pubkeys = set; }
+            let _ = metrics.increment_counter("rollback_refresh_pubkeys", pubkeys.len() as u64).await;
+            Ok(pubkeys)
         }
     }
 
-    struct ReappliedTxProcessor { pool: Arc<PgPool> }
+    struct ReappliedTxProcessor { pool: Arc<PgPool>, rpc: Arc<crate::arch_rpc::ArchRpcClient> }
     #[async_trait::async_trait]
     impl core::processor::Processor for ReappliedTxProcessor {
         type InputType = core::datasource::ReappliedTransactionsEvent;
@@ -504,23 +567,27 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         async fn process(
             &mut self,
             data: Vec<Self::InputType>,
-            _metrics: Arc<core::metrics::MetricsCollection>,
+            metrics: Arc<core::metrics::MetricsCollection>,
         ) -> core::error::IndexerResult<Self::OutputType> {
-            for ev in &data {
-                if !ev.transaction_hashes.is_empty() {
-                    let _ = sqlx::query("UPDATE transactions SET status = (status - 'rolled_back') WHERE txid = ANY($1)")
-                        .bind(&ev.transaction_hashes[..])
-                        .execute(&*self.pool)
-                        .await;
-                }
+            let mut all_txids: Vec<String> = Vec::new();
+            for ev in &data { all_txids.extend(ev.transaction_hashes.clone()); }
+            if !all_txids.is_empty() {
+                let _ = sqlx::query("UPDATE transactions SET status = (status - 'rolled_back') WHERE txid = ANY($1)")
+                    .bind(&all_txids[..])
+                    .execute(&*self.pool)
+                    .await;
             }
-            Ok(HashSet::new())
+            let mut pubkeys: HashSet<arch_program::pubkey::Pubkey> = HashSet::new();
+            if let Ok(set) = resolve_pubkeys_for_txids(&self.pool, &self.rpc, &all_txids).await { pubkeys = set; }
+            let _ = metrics.increment_counter("reapplied_refresh_pubkeys", pubkeys.len() as u64).await;
+            Ok(pubkeys)
         }
     }
 
-    let rb_proc = RolledbackTxProcessor { pool: db_pool.clone() };
+    let rpc_for_resolver = Arc::new(crate::arch_rpc::ArchRpcClient::new(rpc_url.to_string()));
+    let rb_proc = RolledbackTxProcessor { pool: db_pool.clone(), rpc: rpc_for_resolver.clone() };
     pipeline_builder = pipeline_builder.rolledback_transactions(rb_proc);
-    let rp_proc = ReappliedTxProcessor { pool: db_pool.clone() };
+    let rp_proc = ReappliedTxProcessor { pool: db_pool.clone(), rpc: rpc_for_resolver.clone() };
     pipeline_builder = pipeline_builder.reapplied_transactions(rp_proc);
 
     // Accounts processor: upsert into accounts table
