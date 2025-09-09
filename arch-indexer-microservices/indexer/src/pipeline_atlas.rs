@@ -6,14 +6,15 @@ use anyhow::Result;
 use async_trait::async_trait;
 use tokio_util::sync::CancellationToken;
 
-use atlas_core as core;
+use atlas_arch as core;
 use core::datasource::{Datasource, DatasourceId, UpdateType, Updates};
 use core::metrics::{Metrics, MetricsCollection};
 use core::pipeline::{Pipeline, ShutdownStrategy};
 use core::sync::{CheckpointStore, SyncConfig, SyncingDatasource, TipSource, BackfillSource, LiveSource};
 
 use atlas_arch_rpc_datasource::{ArchBackfillDatasource, ArchDatasourceConfig, ArchLiveDatasource};
-use atlas_rocksdb_checkpoint_store::RocksCheckpointStore;
+use std::fs;
+use std::path::PathBuf;
 use sqlx::{PgPool, QueryBuilder};
 use tokio_postgres::{NoTls};
 use std::collections::{VecDeque, HashSet};
@@ -73,8 +74,30 @@ pub async fn run_minimal_pipeline() -> Result<()> {
 
 /// Run full syncing pipeline using Atlas SyncingDatasource wired to Arch RPC + WS and RocksDB checkpoint.
 pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str, db_pool: Arc<PgPool>) -> Result<()> {
-    let checkpoint = RocksCheckpointStore::open(rocks_path)
-        .map_err(|e| anyhow::anyhow!("open rocks checkpoint: {:?}", e))?;
+    // Simple file-based checkpoint store compatible with atlas-arch::sync::CheckpointStore
+    struct FileCheckpointStore { path: PathBuf }
+    #[async_trait]
+    impl core::sync::CheckpointStore for FileCheckpointStore {
+        async fn last_indexed_height(&self) -> core::error::IndexerResult<u64> {
+            match tokio::fs::read_to_string(&self.path).await {
+                Ok(s) => s.trim().parse::<u64>().map_err(|e| core::error::Error::Custom(format!("parse checkpoint: {}", e))),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+                Err(e) => Err(core::error::Error::Custom(format!("read checkpoint: {}", e))),
+            }
+        }
+        async fn set_last_indexed_height(&self, height: u64) -> core::error::IndexerResult<()> {
+            let tmp = self.path.with_extension("tmp");
+            tokio::fs::write(&tmp, height.to_string())
+                .await
+                .map_err(|e| core::error::Error::Custom(format!("write tmp cp: {}", e)))?;
+            tokio::fs::rename(&tmp, &self.path)
+                .await
+                .map_err(|e| core::error::Error::Custom(format!("persist cp: {}", e)))?
+            ;
+            Ok(())
+        }
+    }
+    let checkpoint = FileCheckpointStore { path: PathBuf::from(rocks_path).join("checkpoint.height") };
 
     // Datasource implementations
     // Read tuning knobs from env with sensible defaults
@@ -140,7 +163,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
     struct EmptyCollection;
     impl core::collection::InstructionDecoderCollection for EmptyCollection {
         type InstructionType = ();
-        fn parse_instruction(_instruction: &arch_program_atlas::instruction::Instruction) -> Option<core::instruction::DecodedInstruction<Self>> { None }
+        fn parse_instruction(_instruction: &arch_program::instruction::Instruction) -> Option<core::instruction::DecodedInstruction<Self>> { None }
         fn get_type(&self) -> Self::InstructionType { () }
     }
 
@@ -454,7 +477,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
     #[async_trait::async_trait]
     impl core::processor::Processor for RolledbackTxProcessor {
         type InputType = core::datasource::RolledbackTransactionsEvent;
-        type OutputType = HashSet<arch_program_atlas::pubkey::Pubkey>;
+        type OutputType = HashSet<arch_program::pubkey::Pubkey>;
         async fn process(
             &mut self,
             data: Vec<Self::InputType>,
@@ -477,7 +500,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
     #[async_trait::async_trait]
     impl core::processor::Processor for ReappliedTxProcessor {
         type InputType = core::datasource::ReappliedTransactionsEvent;
-        type OutputType = HashSet<arch_program_atlas::pubkey::Pubkey>;
+        type OutputType = HashSet<arch_program::pubkey::Pubkey>;
         async fn process(
             &mut self,
             data: Vec<Self::InputType>,
