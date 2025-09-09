@@ -54,6 +54,11 @@ variable "db_init_image" {
   type        = string
 }
 
+variable "https_certificate_arn" {
+  description = "ACM certificate ARN to attach to ALB HTTPS listener"
+  type        = string
+}
+
 variable "ssm_db_password_name" {
   description = "SSM Parameter name (SecureString) holding the DB password"
   type        = string
