@@ -157,7 +157,6 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         sync_cfg,
     );
 
-    // (simulation datasources removed before merge)
 
     // Transaction bridge processor wiring
     // Define a minimal instruction decoder collection (no-op)
