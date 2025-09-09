@@ -454,7 +454,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
     #[async_trait::async_trait]
     impl core::processor::Processor for RolledbackTxProcessor {
         type InputType = core::datasource::RolledbackTransactionsEvent;
-        type OutputType = HashSet<arch_program::pubkey::Pubkey>;
+        type OutputType = HashSet<arch_program_atlas::pubkey::Pubkey>;
         async fn process(
             &mut self,
             data: Vec<Self::InputType>,
@@ -477,7 +477,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
     #[async_trait::async_trait]
     impl core::processor::Processor for ReappliedTxProcessor {
         type InputType = core::datasource::ReappliedTransactionsEvent;
-        type OutputType = HashSet<arch_program::pubkey::Pubkey>;
+        type OutputType = HashSet<arch_program_atlas::pubkey::Pubkey>;
         async fn process(
             &mut self,
             data: Vec<Self::InputType>,
