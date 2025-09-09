@@ -157,77 +157,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         sync_cfg,
     );
 
-    // Optional simulation datasources for testing rollback/reapplied flows
-    struct TestRollbackDatasource { txids: Vec<String> }
-    #[async_trait::async_trait]
-    impl Datasource for TestRollbackDatasource {
-        async fn consume(
-            &self,
-            _id: DatasourceId,
-            sender: tokio::sync::mpsc::Sender<(Updates, DatasourceId)>,
-            _cancellation: CancellationToken,
-            _metrics: Arc<MetricsCollection>,
-        ) -> core::error::IndexerResult<()> {
-            if self.txids.is_empty() { return Ok(()); }
-            let id = DatasourceId::new_named("sim_rollback");
-            let evt = core::datasource::RolledbackTransactionsEvent { height: 0, transaction_hashes: self.txids.clone() };
-            let _ = sender.send((Updates::RolledbackTransactions(vec![evt]), id)).await;
-            Ok(())
-        }
-        fn update_types(&self) -> Vec<UpdateType> { vec![UpdateType::RolledbackTransactions] }
-    }
-
-    struct TestReappliedDatasource { txids: Vec<String> }
-    #[async_trait::async_trait]
-    impl Datasource for TestReappliedDatasource {
-        async fn consume(
-            &self,
-            _id: DatasourceId,
-            sender: tokio::sync::mpsc::Sender<(Updates, DatasourceId)>,
-            _cancellation: CancellationToken,
-            _metrics: Arc<MetricsCollection>,
-        ) -> core::error::IndexerResult<()> {
-            if self.txids.is_empty() { return Ok(()); }
-            let id = DatasourceId::new_named("sim_reapplied");
-            let evt = core::datasource::ReappliedTransactionsEvent { height: 0, transaction_hashes: self.txids.clone() };
-            let _ = sender.send((Updates::ReappliedTransactions(vec![evt]), id)).await;
-            Ok(())
-        }
-        fn update_types(&self) -> Vec<UpdateType> { vec![UpdateType::ReappliedTransactions] }
-    }
-
-    // Combine two datasources into one emitter
-    struct CombinedDatasource<A, B> { a: A, b: B }
-    #[async_trait::async_trait]
-    impl<A, B> Datasource for CombinedDatasource<A, B>
-    where
-        A: Datasource + Send + Sync,
-        B: Datasource + Send + Sync,
-    {
-        async fn consume(
-            &self,
-            id: DatasourceId,
-            sender: tokio::sync::mpsc::Sender<(Updates, DatasourceId)>,
-            cancellation: CancellationToken,
-            metrics: Arc<MetricsCollection>,
-        ) -> core::error::IndexerResult<()> {
-            let s1 = sender.clone();
-            let c1 = cancellation.clone();
-            let m1 = metrics.clone();
-            let a_fut = self.a.consume(id.clone(), s1, c1, m1);
-            let s2 = sender;
-            let c2 = cancellation;
-            let m2 = metrics;
-            let b_fut = self.b.consume(id, s2, c2, m2);
-            let (_ra, _rb) = tokio::join!(a_fut, b_fut);
-            Ok(())
-        }
-        fn update_types(&self) -> Vec<UpdateType> {
-            let mut types = self.a.update_types();
-            types.extend(self.b.update_types());
-            types
-        }
-    }
+    // (simulation datasources removed before merge)
 
     // Transaction bridge processor wiring
     // Define a minimal instruction decoder collection (no-op)
@@ -348,22 +278,8 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         }
     }
 
-    // Build simulation datasources from env (comma-separated txids), default empty
-    let simulate_rb: Vec<String> = std::env::var("SIMULATE_ROLLBACK_TXIDS")
-        .ok()
-        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
-        .unwrap_or_else(|| Vec::new());
-    let simulate_ra: Vec<String> = std::env::var("SIMULATE_REAPPLIED_TXIDS")
-        .ok()
-        .map(|s| s.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect())
-        .unwrap_or_else(|| Vec::new());
-
-    let sim_rb_ds = TestRollbackDatasource { txids: simulate_rb };
-    let sim_ra_ds = TestReappliedDatasource { txids: simulate_ra };
-    let combined_ds = CombinedDatasource { a: syncing_ds, b: CombinedDatasource { a: sim_rb_ds, b: sim_ra_ds } };
-
     let mut pipeline_builder = Pipeline::builder()
-        .datasource(combined_ds)
+        .datasource(syncing_ds)
         .metrics(Arc::new(PromMetrics))
         .account_datasource(Arc::new(account_provider))
         .shutdown_strategy(ShutdownStrategy::Immediate);
