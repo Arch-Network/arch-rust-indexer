@@ -80,33 +80,51 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
 
-    // Choose runtime path
-    #[cfg(feature = "atlas_ingestion")]
-    {
-        let rpc_url = &settings.arch_node.url;
-        let ws_url = &settings.arch_node.websocket_url;
-        let rocks_path = std::env::var("ATLAS_CHECKPOINT_PATH").unwrap_or_else(|_| "./.atlas_checkpoints".to_string());
-        info!("🧪 Atlas ingestion mode enabled; starting syncing pipeline (rpc={}, ws={})", rpc_url, ws_url);
-        if let Err(e) = pipeline_atlas::run_syncing_pipeline(rpc_url, ws_url, &rocks_path, std::sync::Arc::new(pool)).await {
-            error!("Atlas syncing pipeline failed: {}", e);
-            std::process::exit(1);
+    // Choose runtime path via env: INDEXER_RUNTIME=atlas|legacy (default atlas if compiled)
+    let runtime = env::var("INDEXER_RUNTIME").unwrap_or_else(|_| "atlas".to_string());
+    let rpc_url_env = env::var("ARCH_NODE_URL").ok();
+    let ws_url_env = env::var("ARCH_NODE_WEBSOCKET_URL").ok();
+    match runtime.as_str() {
+        "atlas" => {
+            #[cfg(feature = "atlas_ingestion")]
+            {
+                let rpc_fallback = &settings.arch_node.url;
+                let ws_fallback = &settings.arch_node.websocket_url;
+                let rpc_url = rpc_url_env.as_deref().unwrap_or(rpc_fallback);
+                let ws_url = ws_url_env.as_deref().unwrap_or(ws_fallback);
+                let rocks_path = std::env::var("ATLAS_CHECKPOINT_PATH").unwrap_or_else(|_| "./.atlas_checkpoints".to_string());
+                info!("🧪 INDEXER_RUNTIME=atlas; starting syncing pipeline (rpc={}, ws={})", rpc_url, ws_url);
+                if let Err(e) = pipeline_atlas::run_syncing_pipeline(rpc_url, ws_url, &rocks_path, std::sync::Arc::new(pool)).await {
+                    error!("Atlas syncing pipeline failed: {}", e);
+                    std::process::exit(1);
+                }
+            }
+            #[cfg(not(feature = "atlas_ingestion"))]
+            {
+                error!("INDEXER_RUNTIME=atlas set but atlas_ingestion feature not compiled; falling back to legacy runtime");
+                let hybrid_sync = HybridSync::new(
+                    std::sync::Arc::new(settings),
+                    std::sync::Arc::new(pool),
+                );
+                info!("🚀 Starting legacy indexer...");
+                if let Err(e) = hybrid_sync.start().await {
+                    error!("❌ Indexer failed to start: {}", e);
+                    std::process::exit(1);
+                }
+            }
         }
-    }
-
-    #[cfg(not(feature = "atlas_ingestion"))]
-    {
-        // Create and start hybrid sync
-        info!("🔧 Creating hybrid sync...");
-        let hybrid_sync = HybridSync::new(
-            std::sync::Arc::new(settings),
-            std::sync::Arc::new(pool),
-        );
-
-        // Start the indexer
-        info!("🚀 Starting indexer...");
-        if let Err(e) = hybrid_sync.start().await {
-            error!("❌ Indexer failed to start: {}", e);
-            std::process::exit(1);
+        _ => {
+            // Legacy runtime
+            info!("🔧 INDEXER_RUNTIME=legacy; starting legacy path");
+            let hybrid_sync = HybridSync::new(
+                std::sync::Arc::new(settings),
+                std::sync::Arc::new(pool),
+            );
+            info!("🚀 Starting indexer...");
+            if let Err(e) = hybrid_sync.start().await {
+                error!("❌ Indexer failed to start: {}", e);
+                std::process::exit(1);
+            }
         }
     }
 

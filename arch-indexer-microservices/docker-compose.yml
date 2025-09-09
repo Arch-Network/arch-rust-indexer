@@ -25,6 +25,7 @@ services:
       args:
         CARGO_FEATURES: atlas_ingestion
     environment:
+      INDEXER_RUNTIME: atlas
       DATABASE_URL: postgresql://postgres:postgres@postgres:5432/archindexer
       REDIS_URL: redis://redis:6379
       ARCH_NODE_URL: http://44.196.173.35:8081
