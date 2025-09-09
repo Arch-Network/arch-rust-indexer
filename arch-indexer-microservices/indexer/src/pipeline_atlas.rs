@@ -16,7 +16,7 @@ use atlas_arch_rpc_datasource::{ArchBackfillDatasource, ArchDatasourceConfig, Ar
 use atlas_rocksdb_checkpoint_store::RocksCheckpointStore;
 use sqlx::{PgPool, QueryBuilder};
 use tokio_postgres::{NoTls};
-use std::collections::VecDeque;
+use std::collections::{VecDeque, HashSet};
 use std::sync::atomic::{AtomicI64, Ordering};
 use std::time::{Duration, Instant};
 use tracing::info;
@@ -154,6 +154,9 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
 
     let use_copy_bulk = std::env::var("ATLAS_USE_COPY_BULK").ok().as_deref() == Some("1");
 
+    // Provide AccountDatasource to enable account refresh after rollback/reapply
+    let account_provider = atlas_arch_rpc_datasource::ArchRpcClient::new(rpc_url);
+
     // Processor that writes transactions into the existing DB
     struct TransactionDbProcessor {
         pool: Arc<PgPool>,
@@ -253,6 +256,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
     let mut pipeline_builder = Pipeline::builder()
         .datasource(syncing_ds)
         .metrics(Arc::new(PromMetrics))
+        .account_datasource(Arc::new(account_provider))
         .shutdown_strategy(ShutdownStrategy::Immediate);
 
     // Register transaction bridge
@@ -444,6 +448,57 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
         use_copy_bulk,
     };
     pipeline_builder = pipeline_builder.block_details(block_proc);
+
+    // Rollback/Reapplied processors: update transactions + request account refresh
+    struct RolledbackTxProcessor { pool: Arc<PgPool> }
+    #[async_trait::async_trait]
+    impl core::processor::Processor for RolledbackTxProcessor {
+        type InputType = core::datasource::RolledbackTransactionsEvent;
+        type OutputType = HashSet<arch_program_atlas::pubkey::Pubkey>;
+        async fn process(
+            &mut self,
+            data: Vec<Self::InputType>,
+            _metrics: Arc<core::metrics::MetricsCollection>,
+        ) -> core::error::IndexerResult<Self::OutputType> {
+            // Mark tx status. For now we don’t compute pubkeys here; Atlas pipeline will handle refresh via returned set
+            for ev in &data {
+                if !ev.transaction_hashes.is_empty() {
+                    let _ = sqlx::query("UPDATE transactions SET status = jsonb_set(COALESCE(status, '{}'), '{rolled_back}', 'true') WHERE txid = ANY($1)")
+                        .bind(&ev.transaction_hashes[..])
+                        .execute(&*self.pool)
+                        .await;
+                }
+            }
+            Ok(HashSet::new())
+        }
+    }
+
+    struct ReappliedTxProcessor { pool: Arc<PgPool> }
+    #[async_trait::async_trait]
+    impl core::processor::Processor for ReappliedTxProcessor {
+        type InputType = core::datasource::ReappliedTransactionsEvent;
+        type OutputType = HashSet<arch_program_atlas::pubkey::Pubkey>;
+        async fn process(
+            &mut self,
+            data: Vec<Self::InputType>,
+            _metrics: Arc<core::metrics::MetricsCollection>,
+        ) -> core::error::IndexerResult<Self::OutputType> {
+            for ev in &data {
+                if !ev.transaction_hashes.is_empty() {
+                    let _ = sqlx::query("UPDATE transactions SET status = (status - 'rolled_back') WHERE txid = ANY($1)")
+                        .bind(&ev.transaction_hashes[..])
+                        .execute(&*self.pool)
+                        .await;
+                }
+            }
+            Ok(HashSet::new())
+        }
+    }
+
+    let rb_proc = RolledbackTxProcessor { pool: db_pool.clone() };
+    pipeline_builder = pipeline_builder.rolledback_transactions(rb_proc);
+    let rp_proc = ReappliedTxProcessor { pool: db_pool.clone() };
+    pipeline_builder = pipeline_builder.reapplied_transactions(rp_proc);
 
     // Accounts processor: upsert into accounts table
     struct RawAccountDecoder;

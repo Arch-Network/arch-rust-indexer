@@ -141,45 +141,14 @@ resource "aws_lb_listener_rule" "api" {
   }
 }
 
-# HTTPS support
-data "aws_route53_zone" "test_arch" {
-  name         = "test.arch.network."
-  private_zone = false
-}
-
-resource "aws_acm_certificate" "explorer" {
-  domain_name       = "explorer-gamma.test.arch.network"
-  validation_method = "DNS"
-  tags = { Name = "explorer-gamma.test.arch.network" }
-}
-
-resource "aws_route53_record" "explorer_validation" {
-  for_each = {
-    for dvo in aws_acm_certificate.explorer.domain_validation_options :
-    dvo.domain_name => {
-      name  = dvo.resource_record_name
-      type  = dvo.resource_record_type
-      value = dvo.resource_record_value
-    }
-  }
-  zone_id = data.aws_route53_zone.test_arch.zone_id
-  name    = each.value.name
-  type    = each.value.type
-  ttl     = 60
-  records = [each.value.value]
-}
-
-resource "aws_acm_certificate_validation" "explorer" {
-  certificate_arn         = aws_acm_certificate.explorer.arn
-  validation_record_fqdns = [for r in aws_route53_record.explorer_validation : r.fqdn]
-}
+## HTTPS support: provide ACM cert ARN from external certs stack
 
 resource "aws_lb_listener" "https" {
   load_balancer_arn = aws_lb.main.arn
   port              = 443
   protocol          = "HTTPS"
   ssl_policy        = "ELBSecurityPolicy-2016-08"
-  certificate_arn   = aws_acm_certificate_validation.explorer.certificate_arn
+  certificate_arn   = var.https_certificate_arn
   default_action {
     type             = "forward"
     target_group_arn = aws_lb_target_group.frontend.arn
@@ -198,16 +167,7 @@ resource "aws_lb_listener_rule" "api_https" {
   }
 }
 
-resource "aws_route53_record" "explorer_alias" {
-  zone_id = data.aws_route53_zone.test_arch.zone_id
-  name    = "explorer-gamma.test.arch.network"
-  type    = "A"
-  alias {
-    name                   = aws_lb.main.dns_name
-    zone_id                = aws_lb.main.zone_id
-    evaluate_target_health = true
-  }
-}
+## Route53 alias is managed by the separate terraform-certs stack
 
 # Create subnet groups
 resource "aws_db_subnet_group" "postgres" {
