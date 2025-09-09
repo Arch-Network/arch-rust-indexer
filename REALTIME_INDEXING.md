@@ -4,6 +4,38 @@
 
 The Arch Indexer now supports **real-time indexing** via WebSocket connections, providing instant access to blockchain events as they occur. This system combines real-time WebSocket streaming with traditional polling sync for maximum reliability and performance.
 
+## Atlas mode (runtime selection)
+
+Atlas is a high-performance ingestion path powered by the public `atlas-arch` crates.
+
+- Select runtime at startup:
+```bash
+export INDEXER_RUNTIME=atlas   # or legacy
+```
+
+- Build/run with Atlas locally:
+```bash
+cargo build --features atlas_ingestion
+INDEXER_RUNTIME=atlas \
+  ARCH_NODE_URL=http://localhost:8081 \
+  ARCH_NODE_WEBSOCKET_URL=ws://localhost:10081 \
+  cargo run --features atlas_ingestion --bin indexer
+```
+
+- Recommended env (override config.yml):
+```bash
+ARCH_NODE_URL=http://<arch-node-host>:8081
+ARCH_NODE_WEBSOCKET_URL=ws://<arch-node-host>:10081
+ATLAS_CHECKPOINT_PATH=/data/.atlas_checkpoints
+ARCH_MAX_CONCURRENCY=192
+ARCH_BULK_BATCH_SIZE=5000
+ARCH_FETCH_WINDOW_SIZE=16384
+ARCH_INITIAL_BACKOFF_MS=10
+ARCH_MAX_RETRIES=5
+ATLAS_USE_COPY_BULK=1
+METRICS_ADDR=0.0.0.0:9090
+```
+
 ## ✨ Features
 
 ### 🔌 Real-Time WebSocket Support
@@ -64,9 +96,10 @@ export WEBSOCKET_URL=ws://44.196.173.35:10081
 # Or update config.yml
 ```
 
-### 2. Start the Indexer
+### 2. Start the Indexer (Docker Compose)
 ```bash
-cargo run
+cd arch-indexer-microservices
+docker compose up -d --build
 ```
 
 ### 3. Monitor Real-Time Status
@@ -202,8 +235,8 @@ RUST_LOG=indexer::realtime_processor=debug cargo run
 
 ### Metrics
 ```bash
-# View Prometheus metrics
-curl http://localhost:3000/metrics
+# View Prometheus metrics (default on 9090)
+curl http://localhost:9090/metrics
 ```
 
 ### Health Checks
@@ -217,11 +250,11 @@ curl http://localhost:3000/api/sync-status
 
 ## 🚨 Troubleshooting
 
-### WebSocket Connection Issues
-1. **Check endpoint**: Verify `websocket_url` in config
-2. **Network connectivity**: Ensure firewall allows WebSocket connections
-3. **Server status**: Verify WebSocket server is running
-4. **Reconnection**: Check reconnection settings
+### WebSocket/RPC Connection Issues
+1. **Check endpoints**: `ARCH_NODE_URL` / `ARCH_NODE_WEBSOCKET_URL`
+2. **Network connectivity**: Ensure firewall allows HTTP(S)/WS
+3. **Server status**: Verify Arch node is running
+4. **Reconnection**: WS handles reconnection internally
 
 ### Event Processing Issues
 1. **Database connectivity**: Verify PostgreSQL connection
@@ -234,6 +267,7 @@ curl http://localhost:3000/api/sync-status
 2. **Connection pooling**: Optimize database connection settings
 3. **Indexing**: Ensure proper database indexes
 4. **Resource limits**: Check system resource usage
+5. **Atlas tuning**: `ARCH_MAX_CONCURRENCY`, `ARCH_FETCH_WINDOW_SIZE`, `ARCH_BULK_BATCH_SIZE`, `ARCH_INITIAL_BACKOFF_MS`, `ARCH_MAX_RETRIES`
 
 ## 🔮 Future Enhancements
 
@@ -252,10 +286,8 @@ curl http://localhost:3000/api/sync-status
 
 ## 📚 References
 
-- [Arch Network WebSocket Protocol](https://github.com/arch-network/arch-network)
-- [Tokio WebSocket](https://docs.rs/tokio-tungstenite)
-- [SQLx Async Database](https://docs.rs/sqlx)
-- [Axum Web Framework](https://docs.rs/axum)
+- Runtime toggles and config (Issue #9): https://github.com/Arch-Network/arch-rust-indexer/issues/9
+- Atlas documentation task (Issue #11): https://github.com/Arch-Network/arch-rust-indexer/issues/11
 
 ## 🤝 Contributing
 
