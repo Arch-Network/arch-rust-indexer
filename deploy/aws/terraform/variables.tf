@@ -21,6 +21,24 @@ variable "arch_node_url" {
   default     = "http://leader:9002"
 }
 
+variable "arch_node_ws_url" {
+  description = "WebSocket URL of the Arch Node"
+  type        = string
+  default     = "ws://leader:10081"
+}
+
+variable "metrics_port" {
+  description = "Container port for Prometheus metrics"
+  type        = number
+  default     = 9090
+}
+
+variable "atlas_checkpoint_backend" {
+  description = "Checkpoint backend: file or postgres"
+  type        = string
+  default     = "file"
+}
+
 # ECR image URIs (including tag) for each service
 variable "api_image" {
   description = "ECR image for api-server"
