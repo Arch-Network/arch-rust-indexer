@@ -27,6 +27,8 @@ INDEXER_RUNTIME=atlas \
 ARCH_NODE_URL=http://<arch-node-host>:8081
 ARCH_NODE_WEBSOCKET_URL=ws://<arch-node-host>:10081
 ATLAS_CHECKPOINT_PATH=/data/.atlas_checkpoints
+# Backend for checkpoint: file (default) or postgres
+ATLAS_CHECKPOINT_BACKEND=postgres
 ARCH_MAX_CONCURRENCY=192
 ARCH_BULK_BATCH_SIZE=5000
 ARCH_FETCH_WINDOW_SIZE=16384
