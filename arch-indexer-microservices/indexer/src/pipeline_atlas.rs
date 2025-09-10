@@ -97,7 +97,61 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
             Ok(())
         }
     }
-    let checkpoint = FileCheckpointStore { path: PathBuf::from(rocks_path).join("checkpoint.height") };
+    // Optional Postgres-backed checkpoint store
+    struct PgCheckpointStore { pool: Arc<PgPool> }
+    #[async_trait]
+    impl core::sync::CheckpointStore for PgCheckpointStore {
+        async fn last_indexed_height(&self) -> core::error::IndexerResult<u64> {
+            let res: Option<i64> = sqlx::query_scalar("SELECT height FROM atlas_checkpoint WHERE id = $1")
+                .bind("default")
+                .fetch_optional(&*self.pool)
+                .await
+                .map_err(|e| core::error::Error::Custom(format!("pg cp select: {}", e)))?;
+            Ok(res.unwrap_or(0) as u64)
+        }
+        async fn set_last_indexed_height(&self, height: u64) -> core::error::IndexerResult<()> {
+            sqlx::query("INSERT INTO atlas_checkpoint (id, height) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET height = EXCLUDED.height, updated_at = now()")
+                .bind("default")
+                .bind(height as i64)
+                .execute(&*self.pool)
+                .await
+                .map_err(|e| core::error::Error::Custom(format!("pg cp upsert: {}", e)))?;
+            Ok(())
+        }
+    }
+
+    // Choose checkpoint backend: postgres|file (default file)
+    let backend = std::env::var("ATLAS_CHECKPOINT_BACKEND").unwrap_or_else(|_| "file".to_string());
+    let checkpoint: Arc<dyn CheckpointStore> = if backend.eq_ignore_ascii_case("postgres") {
+        // Ensure table exists
+        sqlx::query("CREATE TABLE IF NOT EXISTS atlas_checkpoint (id TEXT PRIMARY KEY, height BIGINT NOT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+            .execute(&*db_pool)
+            .await
+            .map_err(|e| anyhow::anyhow!("create atlas_checkpoint: {}", e))?;
+
+        // Seed from file checkpoint if row missing and file exists
+        let existing: Option<i64> = sqlx::query_scalar("SELECT height FROM atlas_checkpoint WHERE id = $1")
+            .bind("default")
+            .fetch_optional(&*db_pool)
+            .await
+            .unwrap_or(None);
+        if existing.is_none() {
+            let file_path = PathBuf::from(rocks_path).join("checkpoint.height");
+            if let Ok(s) = tokio::fs::read_to_string(&file_path).await {
+                if let Ok(h) = s.trim().parse::<u64>() {
+                    let _ = sqlx::query("INSERT INTO atlas_checkpoint (id, height) VALUES ($1, $2) ON CONFLICT (id) DO UPDATE SET height = EXCLUDED.height")
+                        .bind("default")
+                        .bind(h as i64)
+                        .execute(&*db_pool)
+                        .await;
+                }
+            }
+        }
+
+        Arc::new(PgCheckpointStore { pool: db_pool.clone() })
+    } else {
+        Arc::new(FileCheckpointStore { path: PathBuf::from(rocks_path).join("checkpoint.height") })
+    };
 
     // Datasource implementations
     // Read tuning knobs from env with sensible defaults
@@ -137,7 +191,7 @@ pub async fn run_syncing_pipeline(rpc_url: &str, ws_url: &str, rocks_path: &str,
     let tip: Arc<dyn TipSource> = Arc::new(backfill.clone());
     let backfill_src: Arc<dyn BackfillSource> = Arc::new(backfill);
     let live_src: Arc<dyn LiveSource> = Arc::new(live);
-    let checkpoint_store: Arc<dyn CheckpointStore> = Arc::new(checkpoint);
+    let checkpoint_store: Arc<dyn CheckpointStore> = checkpoint;
 
     let update_types = vec![
         core::datasource::UpdateType::BlockDetails,

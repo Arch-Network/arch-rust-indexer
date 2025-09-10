@@ -31,6 +31,8 @@ services:
       ARCH_NODE_URL: http://44.196.173.35:8081
       ARCH_NODE_WEBSOCKET_URL: ws://44.196.173.35:10081
       ATLAS_CHECKPOINT_PATH: /data/.atlas_checkpoints
+      # Checkpoint backend: file (default) | postgres
+      ATLAS_CHECKPOINT_BACKEND: file
       RUST_LOG: indexer=info,atlas_core=info,atlas_progress=info
       ENABLE_REALTIME: true
       WEBSOCKET_ENABLED: true
