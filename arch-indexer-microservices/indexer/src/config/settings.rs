@@ -1,4 +1,4 @@
-use config::{Config, ConfigError};
+use config::{Config, ConfigError, Environment};
 use serde::Deserialize;
 use std::env;
 
@@ -165,7 +165,9 @@ impl Settings {
     pub fn load() -> Result<Self, ConfigError> {
         // First, try to load from config file
         let mut config = Config::builder()
-            .add_source(config::File::with_name("config").required(false));
+            .add_source(config::File::with_name("config").required(false))
+            // Allow nested ENV like DATABASE__PASSWORD to populate settings
+            .add_source(Environment::default().separator("__"));
         // Provide sane defaults at the config layer so deserialization never fails due to
         // missing sections/fields in production (ECS) where we rely on env vars.
         config = config
