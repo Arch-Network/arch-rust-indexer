@@ -2750,9 +2750,16 @@ pub async fn get_network_stats(
     debug!("  Average TPS: {}", average_tps);
     debug!("  Peak TPS: {}", peak_tps);
 
+    let network_total_blocks = node_tip.saturating_add(1);
+    let indexed_height = stats.max_height.unwrap_or(0);
+    let indexed_blocks = indexed_height.saturating_add(1);
+
     let response = NetworkStats {
         total_transactions: stats.total_tx.unwrap_or(0),
         total_blocks: stats.total_blocks.unwrap_or(0),
+        indexed_height,
+        indexed_blocks,
+        network_total_blocks,
         latest_block_height: node_tip,
         block_height: node_tip,
         slot_height: node_tip,

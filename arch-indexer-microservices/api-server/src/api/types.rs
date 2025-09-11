@@ -50,6 +50,12 @@ struct ErrorResponse {
 pub struct NetworkStats {
     pub total_transactions: i64,
     pub total_blocks: i64,
+    // Height of the highest indexed block in our DB
+    pub indexed_height: i64,
+    // Count form for indexed height (assumes genesis at height 0)
+    pub indexed_blocks: i64,
+    // Network total blocks based on node tip (height + 1)
+    pub network_total_blocks: i64,
     pub latest_block_height: i64,
     pub block_height: i64,
     pub slot_height: i64,
