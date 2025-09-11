@@ -359,9 +359,10 @@ export default function Home() {
 
   const calculateSyncProgress = () => {
     if (!stats) return { percentage: 0, synced: 0, total: 0 };
-    const synced = stats.total_blocks;
-    const total = stats.latest_block_height + 1;
-    const percentage = Math.round((synced / total) * 100);
+    const total = (stats.latest_block_height ?? 0) + 1;
+    const rawSynced = stats.total_blocks ?? 0;
+    const synced = Math.min(rawSynced, total);
+    const percentage = Math.round((synced / Math.max(total, 1)) * 100);
     return { percentage, synced, total };
   };
 
