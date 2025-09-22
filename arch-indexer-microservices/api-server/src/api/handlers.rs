@@ -1536,14 +1536,14 @@ pub async fn get_blocks(
 
 /// Return ranges of missing block heights within current indexed bounds and a total count
 pub async fn get_block_gaps(State(pool): State<Arc<PgPool>>) -> Result<Json<serde_json::Value>, ApiError> {
-    let bounds = sqlx::query!(
+    let bounds_row = sqlx::query(
         r#"SELECT MIN(height) AS min_height, MAX(height) AS max_height, COUNT(*) as total FROM blocks"#
     )
     .fetch_one(&*pool)
     .await?;
 
-    let min_height = bounds.min_height.unwrap_or(0);
-    let max_height = bounds.max_height.unwrap_or(0);
+    let min_height: i64 = bounds_row.get::<Option<i64>, _>("min_height").unwrap_or(Some(0)).unwrap_or(0);
+    let max_height: i64 = bounds_row.get::<Option<i64>, _>("max_height").unwrap_or(Some(0)).unwrap_or(0);
     if max_height <= min_height {
         return Ok(Json(json!({ "ranges": [], "missing_count": 0, "min": min_height, "max": max_height })));
     }
@@ -1554,15 +1554,15 @@ pub async fn get_block_gaps(State(pool): State<Arc<PgPool>>) -> Result<Json<serd
     let mut cursor = min_height;
     while cursor <= max_height {
         let end = (cursor + chunk_size - 1).min(max_height);
-        let rows = sqlx::query!(
-            r#"SELECT height FROM blocks WHERE height >= $1 AND height <= $2 ORDER BY height"#,
-            cursor,
-            end
+        let rows = sqlx::query(
+            r#"SELECT height FROM blocks WHERE height >= $1 AND height <= $2 ORDER BY height"#
         )
+        .bind(cursor)
+        .bind(end)
         .fetch_all(&*pool)
         .await?;
 
-        let set: HashSet<i64> = rows.iter().map(|r| r.height).collect();
+        let set: HashSet<i64> = rows.iter().map(|r| r.get::<i64, _>("height")).collect();
         let mut run_start: Option<i64> = None;
         for h in cursor..=end {
             if !set.contains(&h) {
@@ -1597,13 +1597,13 @@ pub async fn backfill_missing_blocks(
         .unwrap_or(5_000);
 
     // Compute missing heights (reuse logic from get_block_gaps but stop once we have enough)
-    let bounds = sqlx::query!(
+    let bounds_row = sqlx::query(
         r#"SELECT MIN(height) AS min_height, MAX(height) AS max_height FROM blocks"#
     )
     .fetch_one(&*pool)
     .await?;
-    let min_height = bounds.min_height.unwrap_or(0);
-    let max_height = bounds.max_height.unwrap_or(0);
+    let min_height: i64 = bounds_row.get::<Option<i64>, _>("min_height").unwrap_or(Some(0)).unwrap_or(0);
+    let max_height: i64 = bounds_row.get::<Option<i64>, _>("max_height").unwrap_or(Some(0)).unwrap_or(0);
 
     if max_height <= min_height {
         return Ok(Json(json!({ "processed": 0, "message": "no gaps detected" })));
@@ -1614,14 +1614,14 @@ pub async fn backfill_missing_blocks(
     let mut cursor = min_height;
     'outer: while cursor <= max_height {
         let end = (cursor + chunk_size - 1).min(max_height);
-        let rows = sqlx::query!(
-            r#"SELECT height FROM blocks WHERE height >= $1 AND height <= $2 ORDER BY height"#,
-            cursor,
-            end
+        let rows = sqlx::query(
+            r#"SELECT height FROM blocks WHERE height >= $1 AND height <= $2 ORDER BY height"#
         )
+        .bind(cursor)
+        .bind(end)
         .fetch_all(&*pool)
         .await?;
-        let set: HashSet<i64> = rows.iter().map(|r| r.height).collect();
+        let set: HashSet<i64> = rows.iter().map(|r| r.get::<i64, _>("height")).collect();
         for h in cursor..=end {
             if !set.contains(&h) {
                 to_fill.push(h);

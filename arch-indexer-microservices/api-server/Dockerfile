@@ -14,6 +14,7 @@ COPY src ./src
 COPY .sqlx ./.sqlx
 
 # Build the application
+ENV SQLX_OFFLINE=true
 RUN cargo build --release
 
 # Runtime stage
