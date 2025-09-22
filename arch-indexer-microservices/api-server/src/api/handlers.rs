@@ -1728,31 +1728,31 @@ pub async fn get_missing_block_heights(
     State(pool): State<Arc<PgPool>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    // Determine bounds from DB
+    // Determine current DB bounds
     let bounds_row = sqlx::query(
         r#"SELECT MIN(height) AS min_height, MAX(height) AS max_height FROM blocks"#
     )
     .fetch_one(&*pool)
     .await?;
 
-    let mut min_height: i64 = bounds_row.get::<Option<i64>, _>("min_height").unwrap_or(0);
-    let mut max_height: i64 = bounds_row.get::<Option<i64>, _>("max_height").unwrap_or(0);
+    let db_min: i64 = bounds_row.get::<Option<i64>, _>("min_height").unwrap_or(0);
+    let db_max: i64 = bounds_row.get::<Option<i64>, _>("max_height").unwrap_or(0);
 
-    // Optional overrides
-    if let Some(s) = params.get("start").and_then(|v| v.parse::<i64>().ok()) { min_height = s.max(min_height); }
-    if let Some(e) = params.get("end").and_then(|v| v.parse::<i64>().ok()) { max_height = e.min(max_height); }
+    // Allow scanning from genesis (0) by default; callers can override
+    let mut scan_start: i64 = params.get("start").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+    let mut scan_end: i64 = params.get("end").and_then(|v| v.parse::<i64>().ok()).unwrap_or(db_max);
 
-    if max_height <= min_height { return Ok(Json(json!({ "missing": [], "count": 0, "min": min_height, "max": max_height, "complete": true })));
+    if scan_end < scan_start { return Ok(Json(json!({ "missing": [], "count": 0, "min": scan_start, "max": scan_end, "complete": true })));
     }
 
     let limit: i64 = params.get("limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(10_000).max(1).min(1_000_000);
 
     let chunk_size: i64 = 100_000;
     let mut missing: Vec<i64> = Vec::new();
-    let mut cursor = min_height;
+    let mut cursor = scan_start;
     let mut complete = true;
-    'outer: while cursor <= max_height {
-        let end = (cursor + chunk_size - 1).min(max_height);
+    'outer: while cursor <= scan_end {
+        let end = (cursor + chunk_size - 1).min(scan_end);
         let rows = sqlx::query(
             r#"SELECT height FROM blocks WHERE height >= $1 AND height <= $2 ORDER BY height"#
         )
@@ -1773,8 +1773,10 @@ pub async fn get_missing_block_heights(
     Ok(Json(json!({
         "missing": missing,
         "count": missing.len(),
-        "min": min_height,
-        "max": max_height,
+        "min": scan_start,
+        "max": scan_end,
+        "db_min": db_min,
+        "db_max": db_max,
         "complete": complete
     })))
 }
