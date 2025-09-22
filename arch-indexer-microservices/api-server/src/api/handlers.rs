@@ -1809,15 +1809,15 @@ pub async fn backfill_block_range(
             Ok(hash) => {
                 match rpc.get_block(&hash, h).await {
                     Ok(block) => {
-                        let ts_seconds = block.timestamp as i64;
+                        let ts_dt = crate::utils::convert_arch_timestamp(block.timestamp);
                         let _ = sqlx::query(
                             r#"INSERT INTO blocks (height, hash, timestamp, bitcoin_block_height)
-                               VALUES ($1, $2, to_timestamp($3), $4)
+                               VALUES ($1, $2, $3, $4)
                                ON CONFLICT (height) DO UPDATE SET hash = EXCLUDED.hash, timestamp = EXCLUDED.timestamp, bitcoin_block_height = EXCLUDED.bitcoin_block_height"#
                         )
                         .bind(h)
                         .bind(&block.hash)
-                        .bind(ts_seconds)
+                        .bind(ts_dt)
                         .bind(block.bitcoin_block_height)
                         .execute(&*pool)
                         .await?;
