@@ -82,6 +82,12 @@ resource "aws_db_instance" "postgres" {
 
   backup_retention_period = 7
   skip_final_snapshot    = true
+
+  lifecycle {
+    ignore_changes = [
+      password,
+    ]
+  }
 }
 
 # Create Redis instance (equivalent to Memorystore)
@@ -195,9 +201,9 @@ resource "aws_ecs_task_definition" "api" {
         { name = "INDEXER_RUNTIME", value = "atlas" },
         { name = "METRICS_ADDR", value = "0.0.0.0:${var.metrics_port}" },
         { name = "ATLAS_CHECKPOINT_BACKEND", value = var.atlas_checkpoint_backend },
-        { name = "ARCH_MAX_CONCURRENCY", value = "192" },
-        { name = "ARCH_BULK_BATCH_SIZE", value = "5000" },
-        { name = "ARCH_FETCH_WINDOW_SIZE", value = "16384" },
+        { name = "ARCH_MAX_CONCURRENCY", value = "256" },
+        { name = "ARCH_BULK_BATCH_SIZE", value = "10000" },
+        { name = "ARCH_FETCH_WINDOW_SIZE", value = "32768" },
         { name = "ARCH_INITIAL_BACKOFF_MS", value = "10" },
         { name = "ARCH_MAX_RETRIES", value = "5" },
         { name = "ATLAS_USE_COPY_BULK", value = "1" },
@@ -316,26 +322,48 @@ resource "aws_ecs_task_definition" "indexer" {
       image = var.indexer_image
 
       environment = [
-        {
-          name  = "DATABASE__USERNAME"
-          value = var.db_username
-        },
-        {
-          name  = "DATABASE__PASSWORD"
-          value = var.db_password
-        },
-        {
-          name  = "DATABASE__HOST"
-          value = aws_db_instance.postgres.address
-        },
+        // Provide both nested DATABASE__* (used by config crate) and PG* (fallbacks)
+        { name = "DATABASE__USERNAME", value = var.db_username },
+        { name = "DATABASE__HOST", value = aws_db_instance.postgres.address },
         { name = "DATABASE__PORT", value = tostring(aws_db_instance.postgres.port) },
         { name = "DATABASE__DATABASE_NAME", value = "archindexer" },
+        // Provide a fully-composed DATABASE_URL as an additional fallback
+        { name = "DATABASE_URL", value = "postgresql://${var.db_username}:${data.aws_ssm_parameter.db_password.value}@${aws_db_instance.postgres.address}:${aws_db_instance.postgres.port}/archindexer" },
+        // PG* fallbacks consumed by Settings::load()
+        { name = "PGHOST", value = aws_db_instance.postgres.address },
+        { name = "PGUSER", value = var.db_username },
+        { name = "PGDATABASE", value = "archindexer" },
         { name = "ARCH_NODE__URL", value = var.arch_node_url },
+        { name = "ARCH_NODE_WEBSOCKET_URL", value = var.arch_node_ws_url },
         { name = "REDIS_URL", value = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:${aws_elasticache_cluster.redis.cache_nodes[0].port}" },
-        { name = "DATABASE_URL", value = "postgres://${var.db_username}:${var.db_password}@${aws_db_instance.postgres.address}:${aws_db_instance.postgres.port}/archindexer" },
+        { name = "INDEXER_RUNTIME", value = "atlas" },
+        { name = "METRICS_ADDR", value = "0.0.0.0:${var.metrics_port}" },
+        { name = "ATLAS_CHECKPOINT_BACKEND", value = var.atlas_checkpoint_backend },
+        { name = "ARCH_MAX_CONCURRENCY", value = "192" },
+        { name = "ARCH_BULK_BATCH_SIZE", value = "5000" },
+        { name = "ARCH_FETCH_WINDOW_SIZE", value = "16384" },
+        { name = "ARCH_INITIAL_BACKOFF_MS", value = "10" },
+        { name = "ARCH_MAX_RETRIES", value = "5" },
+        { name = "ATLAS_USE_COPY_BULK", value = "1" },
         # Align seeding behavior with docker-compose
         { name = "ARCH_BUILTIN_PROGRAMS", value = "0000000000000000000000000000000000000000000000000000000000000001,ComputeBudget111111111111111111111111111111,VoteProgram111111111111111111111,StakeProgram11111111111111111111,BpfLoader11111111111111111111111,NativeLoader11111111111111111111,AplToken111111111111111111111111" },
-        { name = "ARCH_FAST_FORWARD_WINDOW", value = "0" }
+        { name = "ARCH_FAST_FORWARD_WINDOW", value = "0" },
+        { name = "ARCH_BACKFILL_PREFIX_ON_START", value = "1" },
+        { name = "ARCH_PREFIX_BACKFILL_BATCH", value = "500" },
+        { name = "ARCH_HEAL_MISSING_ON_START", value = "1" },
+        { name = "ARCH_HEAL_CHUNK_SIZE", value = "100000" }
+      ]
+
+      secrets = [
+        {
+          name      = "DATABASE__PASSWORD"
+          valueFrom = data.aws_ssm_parameter.db_password.arn
+        },
+        // Also provide PGPASSWORD for PG* fallback path
+        {
+          name      = "PGPASSWORD"
+          valueFrom = data.aws_ssm_parameter.db_password.arn
+        }
       ]
 
       portMappings = [
@@ -358,7 +386,7 @@ resource "aws_ecs_service" "indexer" {
   name            = "arch-indexer-indexer"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.indexer.arn
-  desired_count   = 1
+  desired_count   = 2
   launch_type     = "FARGATE"
 
   network_configuration {
@@ -386,7 +414,8 @@ resource "aws_ecs_task_definition" "frontend" {
       ]
       environment = [
         { name = "NEXT_PUBLIC_API_URL", value = "http://${aws_lb.main.dns_name}" },
-        { name = "NEXT_PUBLIC_WS_URL",  value = "ws://${aws_lb.main.dns_name}/ws" }
+        { name = "NEXT_PUBLIC_WS_URL",  value = "ws://${aws_lb.main.dns_name}/ws" },
+        { name = "ROLLOUT_TIMESTAMP",   value = tostring(timestamp()) }
       ]
       logConfiguration = {
         logDriver = "awslogs"

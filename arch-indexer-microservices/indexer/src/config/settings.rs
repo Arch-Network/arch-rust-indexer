@@ -1,4 +1,4 @@
-use config::{Config, ConfigError};
+use config::{Config, ConfigError, Environment};
 use serde::Deserialize;
 use std::env;
 
@@ -165,7 +165,9 @@ impl Settings {
     pub fn load() -> Result<Self, ConfigError> {
         // First, try to load from config file
         let mut config = Config::builder()
-            .add_source(config::File::with_name("config").required(false));
+            .add_source(config::File::with_name("config").required(false))
+            // Allow nested ENV like DATABASE__PASSWORD to populate settings
+            .add_source(Environment::default().separator("__"));
         // Provide sane defaults at the config layer so deserialization never fails due to
         // missing sections/fields in production (ECS) where we rely on env vars.
         config = config
@@ -186,6 +188,7 @@ impl Settings {
             .set_default("websocket.max_reconnect_attempts", default_websocket_max_reconnect_attempts() as i64)?;
         
         // Check for environment variables and override config file values
+        // 1) Full DATABASE_URL
         if let Ok(database_url) = env::var("DATABASE_URL") {
             // Parse DATABASE_URL to extract components
             if let Ok(parsed_url) = url::Url::parse(&database_url) {
@@ -203,6 +206,25 @@ impl Settings {
                     .set_override("database.port", port)?
                     .set_override("database.database_name", database_name)?;
             }
+        }
+
+        // 2) Support PG* environment variables commonly provided in container setups
+        if let Ok(pg_host) = env::var("PGHOST") {
+            config = config.set_override("database.host", pg_host)?;
+        }
+        if let Ok(pg_user) = env::var("PGUSER") {
+            config = config.set_override("database.username", pg_user)?;
+        }
+        if let Ok(pg_database) = env::var("PGDATABASE") {
+            config = config.set_override("database.database_name", pg_database)?;
+        }
+        if let Ok(pg_port) = env::var("PGPORT") {
+            if let Ok(port) = pg_port.parse::<u16>() {
+                config = config.set_override("database.port", port as i64)?;
+            }
+        }
+        if let Ok(pg_password) = env::var("PGPASSWORD") {
+            config = config.set_override("database.password", pg_password)?;
         }
         
         if let Ok(redis_url) = env::var("REDIS_URL") {

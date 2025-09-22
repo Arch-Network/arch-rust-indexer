@@ -358,11 +358,13 @@ export default function Home() {
   };
 
   const calculateSyncProgress = () => {
-    if (!stats) return { percentage: 0, synced: 0, total: 0 };
-    const synced = stats.total_blocks;
-    const total = stats.latest_block_height + 1;
-    const percentage = Math.round((synced / total) * 100);
-    return { percentage, synced, total };
+    if (!stats) return { percentage: 0, synced: 0, total: 0, lag: 0 };
+    // Use COUNT(blocks) as the source of truth for how many blocks are actually indexed
+    const total = Number((stats as any).network_total_blocks) || ((stats?.latest_block_height ?? 0) + 1);
+    const synced = Number((stats as any).total_blocks) || 0;
+    const percentage = Math.floor((synced / Math.max(total, 1)) * 100);
+    const lag = Math.max(total - synced, 0);
+    return { percentage, synced, total, lag };
   };
 
   const syncProgress = calculateSyncProgress();
@@ -440,10 +442,20 @@ export default function Home() {
           <div className={styles.statCard}>
             <h3>Synchronization</h3>
             <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', alignItems: 'center', gap: 16 }}>
-              <DonutProgress percent={syncProgress.percentage} label="Synced" sublabel={syncProgress.percentage >= 100 ? 'Fully synchronized' : `${syncProgress.synced.toLocaleString()} / ${syncProgress.total.toLocaleString()} blocks`} />
+              <DonutProgress
+                percent={syncProgress.percentage}
+                label={syncProgress.synced === syncProgress.total ? 'Synced' : 'Syncing'}
+                sublabel={syncProgress.synced === syncProgress.total
+                  ? 'Fully synchronized'
+                  : `${syncProgress.synced.toLocaleString()} / ${syncProgress.total.toLocaleString()} blocks`}
+              />
               <div className={styles.progressStats}>
                 <div>Head: {stats?.latest_block_height?.toLocaleString?.() ?? '—'}</div>
                 <div>Indexed: {stats?.total_blocks?.toLocaleString?.() ?? '—'}</div>
+                <div>Lag: {syncProgress.lag.toLocaleString()}</div>
+                {typeof (stats as any)?.missing_blocks === 'number' && (
+                  <div>Gaps: {(stats as any).missing_blocks.toLocaleString?.() ?? (stats as any).missing_blocks}</div>
+                )}
               </div>
             </div>
           </div>

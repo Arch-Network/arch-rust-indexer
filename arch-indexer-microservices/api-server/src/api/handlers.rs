@@ -18,6 +18,8 @@ use super::types::{ApiError, NetworkStats, SyncStatus, ProgramStats};
 use super::program_ids as pid;
 use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::BlockProcessor};
 use crate::arch_rpc::ArchRpcClient;
+use std::collections::HashSet;
+use axum::http::StatusCode as AxStatusCode;
 
 fn key_to_bytes(v: &serde_json::Value) -> Option<Vec<u8>> {
     if let Some(arr) = v.as_array() {
@@ -1533,6 +1535,310 @@ pub async fn get_blocks(
     Ok(Json(response))
 }
 
+/// Simple health check. Verifies DB connectivity and returns 200 OK on success.
+pub async fn health_check(State(pool): State<Arc<PgPool>>) -> axum::response::Response {
+    let ok = sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&*pool)
+        .await
+        .map(|v| v == 1)
+        .unwrap_or(false);
+    if ok {
+        (AxStatusCode::OK, "OK").into_response()
+    } else {
+        (AxStatusCode::INTERNAL_SERVER_ERROR, "DB not ready").into_response()
+    }
+}
+
+/// Return ranges of missing block heights within current indexed bounds and a total count
+pub async fn get_block_gaps(State(pool): State<Arc<PgPool>>) -> Result<Json<serde_json::Value>, ApiError> {
+    let bounds_row = sqlx::query(
+        r#"SELECT MIN(height) AS min_height, MAX(height) AS max_height, COUNT(*) as total FROM blocks"#
+    )
+    .fetch_one(&*pool)
+    .await?;
+
+    let min_height: i64 = bounds_row.get::<Option<i64>, _>("min_height").unwrap_or(0);
+    let max_height: i64 = bounds_row.get::<Option<i64>, _>("max_height").unwrap_or(0);
+    if max_height <= min_height {
+        return Ok(Json(json!({ "ranges": [], "missing_count": 0, "min": min_height, "max": max_height })));
+    }
+
+    let chunk_size: i64 = 100_000;
+    let mut missing: Vec<(i64, i64)> = Vec::new();
+    let mut missing_count: i64 = 0;
+    let mut cursor = min_height;
+    while cursor <= max_height {
+        let end = (cursor + chunk_size - 1).min(max_height);
+        let rows = sqlx::query(
+            r#"SELECT height FROM blocks WHERE height >= $1 AND height <= $2 ORDER BY height"#
+        )
+        .bind(cursor)
+        .bind(end)
+        .fetch_all(&*pool)
+        .await?;
+
+        let set: HashSet<i64> = rows.iter().map(|r| r.get::<i64, _>("height")).collect();
+        let mut run_start: Option<i64> = None;
+        for h in cursor..=end {
+            if !set.contains(&h) {
+                missing_count += 1;
+                if run_start.is_none() { run_start = Some(h); }
+            } else if let Some(s) = run_start.take() {
+                missing.push((s, h - 1));
+            }
+        }
+        if let Some(s) = run_start.take() { missing.push((s, end)); }
+        cursor = end + 1;
+    }
+
+    Ok(Json(json!({
+        "ranges": missing.into_iter().map(|(s,e)| json!({"start": s, "end": e})).collect::<Vec<_>>(),
+        "missing_count": missing_count,
+        "min": min_height,
+        "max": max_height,
+    })))
+}
+
+/// Backfill missing blocks by fetching from RPC and inserting into DB.
+/// WARNING: Long-running; use small limits in production.
+pub async fn backfill_missing_blocks(
+    State(pool): State<Arc<PgPool>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let max_to_process: i64 = params
+        .get("limit")
+        .and_then(|v| v.parse::<i64>().ok())
+        .map(|v| v.max(1).min(20_000))
+        .unwrap_or(5_000);
+
+    // Compute missing heights (reuse logic from get_block_gaps but stop once we have enough)
+    let bounds_row = sqlx::query(
+        r#"SELECT MIN(height) AS min_height, MAX(height) AS max_height FROM blocks"#
+    )
+    .fetch_one(&*pool)
+    .await?;
+    let min_height: i64 = bounds_row.get::<Option<i64>, _>("min_height").unwrap_or(0);
+    let max_height: i64 = bounds_row.get::<Option<i64>, _>("max_height").unwrap_or(0);
+
+    if max_height <= min_height {
+        return Ok(Json(json!({ "processed": 0, "message": "no gaps detected" })));
+    }
+
+    let chunk_size: i64 = 100_000;
+    let mut to_fill: Vec<i64> = Vec::new();
+    let mut cursor = min_height;
+    'outer: while cursor <= max_height {
+        let end = (cursor + chunk_size - 1).min(max_height);
+        let rows = sqlx::query(
+            r#"SELECT height FROM blocks WHERE height >= $1 AND height <= $2 ORDER BY height"#
+        )
+        .bind(cursor)
+        .bind(end)
+        .fetch_all(&*pool)
+        .await?;
+        let set: HashSet<i64> = rows.iter().map(|r| r.get::<i64, _>("height")).collect();
+        for h in cursor..=end {
+            if !set.contains(&h) {
+                to_fill.push(h);
+                if (to_fill.len() as i64) >= max_to_process { break 'outer; }
+            }
+        }
+        cursor = end + 1;
+    }
+
+    if to_fill.is_empty() {
+        return Ok(Json(json!({ "processed": 0, "message": "no gaps detected" })));
+    }
+
+    let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+    let arch_client = ArchRpcClient::new(rpc_url);
+
+    let mut processed: i64 = 0;
+    for &height in &to_fill {
+        // Fetch block
+        let hash = match arch_client.get_block_hash(height).await {
+            Ok(h) => h,
+            Err(e) => { error!("backfill: get_block_hash {} failed: {:?}", height, e); continue; }
+        };
+        let block = match arch_client.get_block(&hash, height).await {
+            Ok(b) => b,
+            Err(e) => { error!("backfill: get_block {} failed: {:?}", height, e); continue; }
+        };
+
+        // Insert block
+        let timestamp = crate::utils::convert_arch_timestamp(block.timestamp);
+        if let Err(e) = sqlx::query(
+            r#"INSERT INTO blocks (height, hash, timestamp, bitcoin_block_height)
+               VALUES ($1, $2, $3, $4)
+               ON CONFLICT (height) DO UPDATE SET hash = EXCLUDED.hash, timestamp = EXCLUDED.timestamp, bitcoin_block_height = EXCLUDED.bitcoin_block_height"#
+        )
+        .bind(block.height)
+        .bind(&block.hash)
+        .bind(timestamp)
+        .bind(block.bitcoin_block_height)
+        .execute(&*pool)
+        .await {
+            error!("backfill: insert block {} failed: {:?}", height, e);
+            continue;
+        }
+
+        // Insert transactions (if any) – fetch full details first
+        for txid in &block.transactions {
+            let ptx = match arch_client.get_processed_transaction(txid).await {
+                Ok(t) => t,
+                Err(e) => { error!("backfill: get_processed_transaction {} failed: {:?}", txid, e); continue; }
+            };
+
+            let compute_units: Option<i32> = if let Some(logs) = ptx.runtime_transaction.get("logs") {
+                if let Some(arr) = logs.as_array() {
+                    arr.iter().filter_map(|log| log.as_str()).find_map(|log| {
+                        if log.contains("Consumed") { log.split_whitespace().filter_map(|w| w.parse::<i32>().ok()).next() } else { None }
+                    })
+                } else { None }
+            } else { None };
+
+            if let Err(e) = sqlx::query(
+                r#"INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at, logs, rollback_status, accounts_tags, compute_units_consumed)
+                    VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, $6, $7, $8, $9)
+                    ON CONFLICT (txid) DO UPDATE SET block_height = EXCLUDED.block_height, data = EXCLUDED.data, status = EXCLUDED.status, bitcoin_txids = EXCLUDED.bitcoin_txids, logs = EXCLUDED.logs, rollback_status = EXCLUDED.rollback_status, accounts_tags = EXCLUDED.accounts_tags, compute_units_consumed = EXCLUDED.compute_units_consumed"#
+            )
+            .bind(txid)
+            .bind(block.height)
+            .bind(serde_json::to_value(&ptx.runtime_transaction).unwrap_or(serde_json::Value::Null))
+            .bind(serde_json::to_value(&ptx.status).unwrap_or(serde_json::Value::Null))
+            .bind(ptx.bitcoin_txids.as_ref().map(|v| v.as_slice()))
+            .bind(serde_json::to_value(ptx.runtime_transaction.get("logs").unwrap_or(&serde_json::Value::Array(vec![]))).unwrap_or(serde_json::Value::Null))
+            .bind(serde_json::to_value("NotRolledback").unwrap_or(serde_json::Value::Null))
+            .bind(serde_json::to_value(&ptx.accounts_tags).unwrap_or(serde_json::Value::Array(vec![])))
+            .bind(compute_units)
+            .execute(&*pool)
+            .await {
+                error!("backfill: upsert tx {}@{} failed: {:?}", txid, height, e);
+            }
+        }
+
+        processed += 1;
+    }
+
+    Ok(Json(json!({ "requested": max_to_process, "processed": processed, "remaining_estimate": (to_fill.len() as i64 - processed).max(0) })))
+}
+
+/// Return explicit list of missing block heights, with optional bounds and limit
+pub async fn get_missing_block_heights(
+    State(pool): State<Arc<PgPool>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Determine current DB bounds
+    let bounds_row = sqlx::query(
+        r#"SELECT MIN(height) AS min_height, MAX(height) AS max_height FROM blocks"#
+    )
+    .fetch_one(&*pool)
+    .await?;
+
+    let db_min: i64 = bounds_row.get::<Option<i64>, _>("min_height").unwrap_or(0);
+    let db_max: i64 = bounds_row.get::<Option<i64>, _>("max_height").unwrap_or(0);
+
+    // Allow scanning from genesis (0) by default; callers can override
+    let mut scan_start: i64 = params.get("start").and_then(|v| v.parse::<i64>().ok()).unwrap_or(0);
+    let mut scan_end: i64 = params.get("end").and_then(|v| v.parse::<i64>().ok()).unwrap_or(db_max);
+
+    if scan_end < scan_start { return Ok(Json(json!({ "missing": [], "count": 0, "min": scan_start, "max": scan_end, "complete": true })));
+    }
+
+    let limit: i64 = params.get("limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(10_000).max(1).min(1_000_000);
+
+    let chunk_size: i64 = 100_000;
+    let mut missing: Vec<i64> = Vec::new();
+    let mut cursor = scan_start;
+    let mut complete = true;
+    'outer: while cursor <= scan_end {
+        let end = (cursor + chunk_size - 1).min(scan_end);
+        let rows = sqlx::query(
+            r#"SELECT height FROM blocks WHERE height >= $1 AND height <= $2 ORDER BY height"#
+        )
+        .bind(cursor)
+        .bind(end)
+        .fetch_all(&*pool)
+        .await?;
+        let set: HashSet<i64> = rows.iter().map(|r| r.get::<i64, _>("height")).collect();
+        for h in cursor..=end {
+            if !set.contains(&h) {
+                missing.push(h);
+                if (missing.len() as i64) >= limit { complete = false; break 'outer; }
+            }
+        }
+        cursor = end + 1;
+    }
+
+    Ok(Json(json!({
+        "missing": missing,
+        "count": missing.len(),
+        "min": scan_start,
+        "max": scan_end,
+        "db_min": db_min,
+        "db_max": db_max,
+        "complete": complete
+    })))
+}
+
+/// Backfill an explicit height range [start, end], inserting only heights not present
+pub async fn backfill_block_range(
+    State(pool): State<Arc<PgPool>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let start: i64 = params.get("start").and_then(|v| v.parse::<i64>().ok()).ok_or_else(|| ApiError::BadRequest("start is required".to_string()))?;
+    let end: i64 = params.get("end").and_then(|v| v.parse::<i64>().ok()).ok_or_else(|| ApiError::BadRequest("end is required".to_string()))?;
+    if end < start { return Ok(Json(json!({"processed": 0, "message": "empty range"}))); }
+
+    let rpc = ArchRpcClient::new(std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string()));
+
+    let mut processed = 0i64;
+    let mut inserted = 0i64;
+    let mut skipped = 0i64;
+    for h in start..=end {
+        // Skip if exists
+        if let Some(_) = sqlx::query_scalar::<_, i64>("SELECT 1 FROM blocks WHERE height = $1")
+            .bind(h)
+            .fetch_optional(&*pool)
+            .await? {
+            skipped += 1; processed += 1; continue;
+        }
+
+        // Fetch block by height -> hash -> block data
+        match rpc.get_block_hash(h).await {
+            Ok(hash) => {
+                match rpc.get_block(&hash, h).await {
+                    Ok(block) => {
+                        let ts_dt = crate::utils::convert_arch_timestamp(block.timestamp);
+                        let _ = sqlx::query(
+                            r#"INSERT INTO blocks (height, hash, timestamp, bitcoin_block_height)
+                               VALUES ($1, $2, $3, $4)
+                               ON CONFLICT (height) DO UPDATE SET hash = EXCLUDED.hash, timestamp = EXCLUDED.timestamp, bitcoin_block_height = EXCLUDED.bitcoin_block_height"#
+                        )
+                        .bind(h)
+                        .bind(&block.hash)
+                        .bind(ts_dt)
+                        .bind(block.bitcoin_block_height)
+                        .execute(&*pool)
+                        .await?;
+                        inserted += 1;
+                    },
+                    Err(e) => {
+                        return Ok(Json(json!({"processed": processed, "inserted": inserted, "skipped": skipped, "error": format!("get_block failed at {}: {}", h, e)})));
+                    }
+                }
+            },
+            Err(e) => {
+                return Ok(Json(json!({"processed": processed, "inserted": inserted, "skipped": skipped, "error": format!("get_block_hash failed at {}: {}", h, e)})));
+            }
+        }
+        processed += 1;
+        if processed % 500 == 0 { tokio::task::yield_now().await; }
+    }
+
+    Ok(Json(json!({"processed": processed, "inserted": inserted, "skipped": skipped})))
+}
+
 fn format_time(seconds: f64) -> String {
     let hours = (seconds / 3600.0).floor();
     let minutes = ((seconds % 3600.0) / 60.0).floor();
@@ -2750,16 +3056,28 @@ pub async fn get_network_stats(
     debug!("  Average TPS: {}", average_tps);
     debug!("  Peak TPS: {}", peak_tps);
 
+    let network_total_blocks = node_tip.saturating_add(1);
+    let indexed_height = stats.max_height.unwrap_or(0);
+    let indexed_blocks = indexed_height.saturating_add(1);
+
+    // Compute missing blocks (gaps) quickly: network_total_blocks - COUNT(blocks)
+    let missing_count: i64 = network_total_blocks.saturating_sub(stats.total_blocks.unwrap_or(0).max(0));
+
     let response = NetworkStats {
         total_transactions: stats.total_tx.unwrap_or(0),
         total_blocks: stats.total_blocks.unwrap_or(0),
+        indexed_height,
+        indexed_blocks,
+        network_total_blocks,
         latest_block_height: node_tip,
         block_height: node_tip,
         slot_height: node_tip,
         current_tps,
         average_tps,
         peak_tps,
-        daily_transactions: stats.daily_tx.unwrap_or(0)
+        daily_transactions: stats.daily_tx.unwrap_or(0),
+        // new field (serde will ignore unknown on clients not using it)
+        missing_blocks: missing_count.max(0),
     };
 
     info!("Network stats response prepared successfully");

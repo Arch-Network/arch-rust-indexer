@@ -5,7 +5,7 @@ use tokio::time::Duration;
 use tracing::{error, info};
 
 use crate::config::Settings;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use crate::arch_rpc::ArchRpcClient;
 use crate::arch_rpc::websocket::WebSocketClient;
@@ -256,12 +256,80 @@ impl HybridSync {
             let rpc = Arc::new(ArchRpcClient::new(settings.arch_node.url.clone()));
             info!("🌐 Bulk sync using RPC endpoint: {}", settings.arch_node.url);
 
+            // Optional prefix backfill on startup: fill [0, DB_MIN-1] if DB_MIN > 0
+            let enable_prefix = std::env::var("ARCH_BACKFILL_PREFIX_ON_START").ok().unwrap_or_else(|| "1".to_string()) == "1";
+            if enable_prefix {
+                if let Ok(db_min) = sqlx::query_scalar::<_, Option<i64>>("SELECT MIN(height) FROM blocks").fetch_one(&*pool).await {
+                    if let Some(db_min) = db_min {
+                        if db_min > 0 {
+                            let start = 0i64;
+                            let end = db_min - 1;
+                            let chunk: i64 = std::env::var("ARCH_PREFIX_BACKFILL_BATCH").ok().and_then(|v| v.parse::<i64>().ok()).filter(|&n| n > 0 && n <= 2000).unwrap_or(500);
+                            info!("🧩 Prefix backfill enabled. Filling missing prefix blocks {}..{} in chunks of {}", start, end, chunk);
+                            let mut cursor = start;
+                            while cursor <= end {
+                                let hi = (cursor + chunk - 1).min(end);
+                                info!("🧩 Prefix backfill chunk {}..{}", cursor, hi);
+                                for h in cursor..=hi {
+                                    if let Err(e) = process_block_via_rpc(&pool, &rpc, h).await {
+                                        error!("Prefix backfill: block {} failed: {}", h, e);
+                                    }
+                                }
+                                cursor = hi + 1;
+                            }
+                            info!("✅ Prefix backfill complete up to {}", end);
+                        }
+                    }
+                }
+            } else {
+                info!("🧩 Prefix backfill disabled (ARCH_BACKFILL_PREFIX_ON_START!=1)");
+            }
+
             // Determine starting height
             let last_height: Option<i64> = sqlx::query_scalar("SELECT MAX(height) FROM blocks")
                 .fetch_optional(&*pool)
                 .await
                 .ok()
                 .flatten();
+
+            // Heal internal gaps across existing range [0..MAX] before proceeding
+            let enable_heal = std::env::var("ARCH_HEAL_MISSING_ON_START").ok().unwrap_or_else(|| "1".to_string()) == "1";
+            if enable_heal {
+                if let Some(max_in_db) = last_height {
+                    if max_in_db >= 0 {
+                        let heal_chunk: i64 = std::env::var("ARCH_HEAL_CHUNK_SIZE").ok().and_then(|v| v.parse::<i64>().ok()).filter(|&n| n > 0 && n <= 500_000).unwrap_or(100_000);
+                        info!("🧩 Heal pass enabled. Scanning for missing blocks in [0..{}] with chunk {}", max_in_db, heal_chunk);
+                        let mut cursor = 0i64;
+                        let mut healed: i64 = 0;
+                        while cursor <= max_in_db {
+                            let end = (cursor + heal_chunk - 1).min(max_in_db);
+                            let rows = sqlx::query(
+                                r#"SELECT height FROM blocks WHERE height >= $1 AND height <= $2 ORDER BY height"#
+                            )
+                            .bind(cursor)
+                            .bind(end)
+                            .fetch_all(&*pool)
+                            .await;
+                            let rows = match rows { Ok(r) => r, Err(e) => { error!("heal: query heights {}..{} failed: {}", cursor, end, e); break; } };
+                            let present: std::collections::HashSet<i64> = rows.iter().map(|r| r.get::<i64, _>("height")).collect();
+                            let mut missing_in_chunk: i64 = 0;
+                            for h in cursor..=end {
+                                if !present.contains(&h) {
+                                    missing_in_chunk += 1;
+                                    if let Err(e) = process_block_via_rpc(&pool, &rpc, h).await {
+                                        error!("heal: block {} failed: {}", h, e);
+                                    } else { healed += 1; }
+                                }
+                            }
+                            if missing_in_chunk > 0 { info!("🧩 Healed {} missing blocks in chunk {}..{} (total healed: {})", missing_in_chunk, cursor, end, healed); }
+                            cursor = end + 1;
+                        }
+                        info!("✅ Heal pass complete. Total healed: {}", healed);
+                    }
+                }
+            } else {
+                info!("🧩 Heal pass disabled (ARCH_HEAL_MISSING_ON_START!=1)");
+            }
             let mut start_height = last_height.unwrap_or(-1) + 1;
 
             // Fetch current tip
