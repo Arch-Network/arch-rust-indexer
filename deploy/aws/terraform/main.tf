@@ -349,7 +349,9 @@ resource "aws_ecs_task_definition" "indexer" {
         { name = "ARCH_BUILTIN_PROGRAMS", value = "0000000000000000000000000000000000000000000000000000000000000001,ComputeBudget111111111111111111111111111111,VoteProgram111111111111111111111,StakeProgram11111111111111111111,BpfLoader11111111111111111111111,NativeLoader11111111111111111111,AplToken111111111111111111111111" },
         { name = "ARCH_FAST_FORWARD_WINDOW", value = "0" },
         { name = "ARCH_BACKFILL_PREFIX_ON_START", value = "1" },
-        { name = "ARCH_PREFIX_BACKFILL_BATCH", value = "500" }
+        { name = "ARCH_PREFIX_BACKFILL_BATCH", value = "500" },
+        { name = "ARCH_HEAL_MISSING_ON_START", value = "1" },
+        { name = "ARCH_HEAL_CHUNK_SIZE", value = "100000" }
       ]
 
       secrets = [
