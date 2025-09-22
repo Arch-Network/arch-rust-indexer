@@ -1786,8 +1786,8 @@ pub async fn backfill_block_range(
     State(pool): State<Arc<PgPool>>,
     Query(params): Query<HashMap<String, String>>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let start: i64 = params.get("start").and_then(|v| v.parse::<i64>().ok()).ok_or_else(|| ApiError::bad_request("start is required"))?;
-    let end: i64 = params.get("end").and_then(|v| v.parse::<i64>().ok()).ok_or_else(|| ApiError::bad_request("end is required"))?;
+    let start: i64 = params.get("start").and_then(|v| v.parse::<i64>().ok()).ok_or_else(|| ApiError::BadRequest("start is required".to_string()))?;
+    let end: i64 = params.get("end").and_then(|v| v.parse::<i64>().ok()).ok_or_else(|| ApiError::BadRequest("end is required".to_string()))?;
     if end < start { return Ok(Json(json!({"processed": 0, "message": "empty range"}))); }
 
     let rpc = ArchRpcClient::new(std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string()));
