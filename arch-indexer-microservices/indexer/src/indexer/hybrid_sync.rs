@@ -259,8 +259,8 @@ impl HybridSync {
             // Optional prefix backfill on startup: fill [0, DB_MIN-1] if DB_MIN > 0
             let enable_prefix = std::env::var("ARCH_BACKFILL_PREFIX_ON_START").ok().unwrap_or_else(|| "1".to_string()) == "1";
             if enable_prefix {
-                if let Ok(db_min_opt) = sqlx::query_scalar::<_, Option<i64>>("SELECT MIN(height) FROM blocks").fetch_optional(&*pool).await {
-                    if let Some(Some(db_min)) = db_min_opt.map(Some) {
+                if let Ok(db_min) = sqlx::query_scalar::<_, Option<i64>>("SELECT MIN(height) FROM blocks").fetch_one(&*pool).await {
+                    if let Some(db_min) = db_min {
                         if db_min > 0 {
                             let start = 0i64;
                             let end = db_min - 1;
