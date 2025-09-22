@@ -13,6 +13,7 @@ pub fn create_router(pool: Arc<PgPool>) -> Router {
         .route("/health", get(handlers::health_check))
         .route("/api/blocks", get(handlers::get_blocks))
         .route("/api/blocks/gaps", get(handlers::get_block_gaps))
+        .route("/api/blocks/missing", get(handlers::get_missing_block_heights))
         .route("/api/blocks/backfill-missing", get(handlers::backfill_missing_blocks))
         .route("/api/blocks/height/:height", get(handlers::get_block_by_height))
         .route("/api/blocks/:blockhash", get(handlers::get_block_by_hash))

@@ -1723,6 +1723,62 @@ pub async fn backfill_missing_blocks(
     Ok(Json(json!({ "requested": max_to_process, "processed": processed, "remaining_estimate": (to_fill.len() as i64 - processed).max(0) })))
 }
 
+/// Return explicit list of missing block heights, with optional bounds and limit
+pub async fn get_missing_block_heights(
+    State(pool): State<Arc<PgPool>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    // Determine bounds from DB
+    let bounds_row = sqlx::query(
+        r#"SELECT MIN(height) AS min_height, MAX(height) AS max_height FROM blocks"#
+    )
+    .fetch_one(&*pool)
+    .await?;
+
+    let mut min_height: i64 = bounds_row.get::<Option<i64>, _>("min_height").unwrap_or(0);
+    let mut max_height: i64 = bounds_row.get::<Option<i64>, _>("max_height").unwrap_or(0);
+
+    // Optional overrides
+    if let Some(s) = params.get("start").and_then(|v| v.parse::<i64>().ok()) { min_height = s.max(min_height); }
+    if let Some(e) = params.get("end").and_then(|v| v.parse::<i64>().ok()) { max_height = e.min(max_height); }
+
+    if max_height <= min_height { return Ok(Json(json!({ "missing": [], "count": 0, "min": min_height, "max": max_height, "complete": true })));
+    }
+
+    let limit: i64 = params.get("limit").and_then(|v| v.parse::<i64>().ok()).unwrap_or(10_000).max(1).min(1_000_000);
+
+    let chunk_size: i64 = 100_000;
+    let mut missing: Vec<i64> = Vec::new();
+    let mut cursor = min_height;
+    let mut complete = true;
+    'outer: while cursor <= max_height {
+        let end = (cursor + chunk_size - 1).min(max_height);
+        let rows = sqlx::query(
+            r#"SELECT height FROM blocks WHERE height >= $1 AND height <= $2 ORDER BY height"#
+        )
+        .bind(cursor)
+        .bind(end)
+        .fetch_all(&*pool)
+        .await?;
+        let set: HashSet<i64> = rows.iter().map(|r| r.get::<i64, _>("height")).collect();
+        for h in cursor..=end {
+            if !set.contains(&h) {
+                missing.push(h);
+                if (missing.len() as i64) >= limit { complete = false; break 'outer; }
+            }
+        }
+        cursor = end + 1;
+    }
+
+    Ok(Json(json!({
+        "missing": missing,
+        "count": missing.len(),
+        "min": min_height,
+        "max": max_height,
+        "complete": complete
+    })))
+}
+
 fn format_time(seconds: f64) -> String {
     let hours = (seconds / 3600.0).floor();
     let minutes = ((seconds % 3600.0) / 60.0).floor();
