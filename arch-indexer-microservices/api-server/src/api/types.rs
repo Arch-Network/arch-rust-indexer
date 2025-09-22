@@ -62,7 +62,10 @@ pub struct NetworkStats {
     pub current_tps: f64,
     pub average_tps: f64,
     pub peak_tps: f64,
-    pub daily_transactions: i64
+    pub daily_transactions: i64,
+    // new optional field: how many blocks behind we are
+    #[serde(default)]
+    pub missing_blocks: i64,
 }
 
 #[derive(Serialize)]
