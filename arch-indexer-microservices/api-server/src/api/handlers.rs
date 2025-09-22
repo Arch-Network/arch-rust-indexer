@@ -1542,8 +1542,8 @@ pub async fn get_block_gaps(State(pool): State<Arc<PgPool>>) -> Result<Json<serd
     .fetch_one(&*pool)
     .await?;
 
-    let min_height: i64 = bounds_row.get::<Option<i64>, _>("min_height").unwrap_or(Some(0)).unwrap_or(0);
-    let max_height: i64 = bounds_row.get::<Option<i64>, _>("max_height").unwrap_or(Some(0)).unwrap_or(0);
+    let min_height: i64 = bounds_row.get::<Option<i64>, _>("min_height").unwrap_or(0);
+    let max_height: i64 = bounds_row.get::<Option<i64>, _>("max_height").unwrap_or(0);
     if max_height <= min_height {
         return Ok(Json(json!({ "ranges": [], "missing_count": 0, "min": min_height, "max": max_height })));
     }
@@ -1602,8 +1602,8 @@ pub async fn backfill_missing_blocks(
     )
     .fetch_one(&*pool)
     .await?;
-    let min_height: i64 = bounds_row.get::<Option<i64>, _>("min_height").unwrap_or(Some(0)).unwrap_or(0);
-    let max_height: i64 = bounds_row.get::<Option<i64>, _>("max_height").unwrap_or(Some(0)).unwrap_or(0);
+    let min_height: i64 = bounds_row.get::<Option<i64>, _>("min_height").unwrap_or(0);
+    let max_height: i64 = bounds_row.get::<Option<i64>, _>("max_height").unwrap_or(0);
 
     if max_height <= min_height {
         return Ok(Json(json!({ "processed": 0, "message": "no gaps detected" })));
@@ -1667,24 +1667,38 @@ pub async fn backfill_missing_blocks(
             continue;
         }
 
-        // Insert transactions (if any)
-        for tx in &block.transactions {
-            let data_json = serde_json::to_value(&tx.data).unwrap_or(serde_json::Value::Null);
-            let status_json = serde_json::to_value(&tx.status).unwrap_or(serde_json::Value::Null);
-            let bitcoin_txids = tx.bitcoin_txids.clone();
+        // Insert transactions (if any) – fetch full details first
+        for txid in &block.transactions {
+            let ptx = match arch_client.get_processed_transaction(txid).await {
+                Ok(t) => t,
+                Err(e) => { error!("backfill: get_processed_transaction {} failed: {:?}", txid, e); continue; }
+            };
+
+            let compute_units: Option<i32> = if let Some(logs) = ptx.runtime_transaction.get("logs") {
+                if let Some(arr) = logs.as_array() {
+                    arr.iter().filter_map(|log| log.as_str()).find_map(|log| {
+                        if log.contains("Consumed") { log.split_whitespace().filter_map(|w| w.parse::<i32>().ok()).next() } else { None }
+                    })
+                } else { None }
+            } else { None };
+
             if let Err(e) = sqlx::query(
-                r#"INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at)
-                    VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
-                    ON CONFLICT (txid) DO UPDATE SET block_height = EXCLUDED.block_height, data = EXCLUDED.data, status = EXCLUDED.status, bitcoin_txids = EXCLUDED.bitcoin_txids"#
+                r#"INSERT INTO transactions (txid, block_height, data, status, bitcoin_txids, created_at, logs, rollback_status, accounts_tags, compute_units_consumed)
+                    VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP, $6, $7, $8, $9)
+                    ON CONFLICT (txid) DO UPDATE SET block_height = EXCLUDED.block_height, data = EXCLUDED.data, status = EXCLUDED.status, bitcoin_txids = EXCLUDED.bitcoin_txids, logs = EXCLUDED.logs, rollback_status = EXCLUDED.rollback_status, accounts_tags = EXCLUDED.accounts_tags, compute_units_consumed = EXCLUDED.compute_units_consumed"#
             )
-            .bind(&tx.txid)
+            .bind(txid)
             .bind(block.height)
-            .bind(data_json)
-            .bind(status_json)
-            .bind(bitcoin_txids)
+            .bind(serde_json::to_value(&ptx.runtime_transaction).unwrap_or(serde_json::Value::Null))
+            .bind(serde_json::to_value(&ptx.status).unwrap_or(serde_json::Value::Null))
+            .bind(ptx.bitcoin_txids.as_ref().map(|v| v.as_slice()))
+            .bind(serde_json::to_value(ptx.runtime_transaction.get("logs").unwrap_or(&serde_json::Value::Array(vec![]))).unwrap_or(serde_json::Value::Null))
+            .bind(serde_json::to_value("NotRolledback").unwrap_or(serde_json::Value::Null))
+            .bind(serde_json::to_value(&ptx.accounts_tags).unwrap_or(serde_json::Value::Array(vec![])))
+            .bind(compute_units)
             .execute(&*pool)
             .await {
-                error!("backfill: upsert tx {}@{} failed: {:?}", tx.txid, height, e);
+                error!("backfill: upsert tx {}@{} failed: {:?}", txid, height, e);
             }
         }
 
