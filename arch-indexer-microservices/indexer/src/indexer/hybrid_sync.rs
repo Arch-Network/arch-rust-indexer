@@ -5,7 +5,7 @@ use tokio::time::Duration;
 use tracing::{error, info};
 
 use crate::config::Settings;
-use sqlx::PgPool;
+use sqlx::{PgPool, Row};
 
 use crate::arch_rpc::ArchRpcClient;
 use crate::arch_rpc::websocket::WebSocketClient;
