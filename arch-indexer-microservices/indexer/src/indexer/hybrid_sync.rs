@@ -256,6 +256,35 @@ impl HybridSync {
             let rpc = Arc::new(ArchRpcClient::new(settings.arch_node.url.clone()));
             info!("🌐 Bulk sync using RPC endpoint: {}", settings.arch_node.url);
 
+            // Optional prefix backfill on startup: fill [0, DB_MIN-1] if DB_MIN > 0
+            let enable_prefix = std::env::var("ARCH_BACKFILL_PREFIX_ON_START").ok().unwrap_or_else(|| "1".to_string()) == "1";
+            if enable_prefix {
+                if let Ok(db_min_opt) = sqlx::query_scalar::<_, Option<i64>>("SELECT MIN(height) FROM blocks").fetch_optional(&*pool).await {
+                    if let Some(Some(db_min)) = db_min_opt.map(Some) {
+                        if db_min > 0 {
+                            let start = 0i64;
+                            let end = db_min - 1;
+                            let chunk: i64 = std::env::var("ARCH_PREFIX_BACKFILL_BATCH").ok().and_then(|v| v.parse::<i64>().ok()).filter(|&n| n > 0 && n <= 2000).unwrap_or(500);
+                            info!("🧩 Prefix backfill enabled. Filling missing prefix blocks {}..{} in chunks of {}", start, end, chunk);
+                            let mut cursor = start;
+                            while cursor <= end {
+                                let hi = (cursor + chunk - 1).min(end);
+                                info!("🧩 Prefix backfill chunk {}..{}", cursor, hi);
+                                for h in cursor..=hi {
+                                    if let Err(e) = process_block_via_rpc(&pool, &rpc, h).await {
+                                        error!("Prefix backfill: block {} failed: {}", h, e);
+                                    }
+                                }
+                                cursor = hi + 1;
+                            }
+                            info!("✅ Prefix backfill complete up to {}", end);
+                        }
+                    }
+                }
+            } else {
+                info!("🧩 Prefix backfill disabled (ARCH_BACKFILL_PREFIX_ON_START!=1)");
+            }
+
             // Determine starting height
             let last_height: Option<i64> = sqlx::query_scalar("SELECT MAX(height) FROM blocks")
                 .fetch_optional(&*pool)

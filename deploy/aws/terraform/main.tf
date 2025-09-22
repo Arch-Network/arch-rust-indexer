@@ -201,9 +201,9 @@ resource "aws_ecs_task_definition" "api" {
         { name = "INDEXER_RUNTIME", value = "atlas" },
         { name = "METRICS_ADDR", value = "0.0.0.0:${var.metrics_port}" },
         { name = "ATLAS_CHECKPOINT_BACKEND", value = var.atlas_checkpoint_backend },
-        { name = "ARCH_MAX_CONCURRENCY", value = "192" },
-        { name = "ARCH_BULK_BATCH_SIZE", value = "5000" },
-        { name = "ARCH_FETCH_WINDOW_SIZE", value = "16384" },
+        { name = "ARCH_MAX_CONCURRENCY", value = "256" },
+        { name = "ARCH_BULK_BATCH_SIZE", value = "10000" },
+        { name = "ARCH_FETCH_WINDOW_SIZE", value = "32768" },
         { name = "ARCH_INITIAL_BACKOFF_MS", value = "10" },
         { name = "ARCH_MAX_RETRIES", value = "5" },
         { name = "ATLAS_USE_COPY_BULK", value = "1" },
@@ -347,7 +347,9 @@ resource "aws_ecs_task_definition" "indexer" {
         { name = "ATLAS_USE_COPY_BULK", value = "1" },
         # Align seeding behavior with docker-compose
         { name = "ARCH_BUILTIN_PROGRAMS", value = "0000000000000000000000000000000000000000000000000000000000000001,ComputeBudget111111111111111111111111111111,VoteProgram111111111111111111111,StakeProgram11111111111111111111,BpfLoader11111111111111111111111,NativeLoader11111111111111111111,AplToken111111111111111111111111" },
-        { name = "ARCH_FAST_FORWARD_WINDOW", value = "0" }
+        { name = "ARCH_FAST_FORWARD_WINDOW", value = "0" },
+        { name = "ARCH_BACKFILL_PREFIX_ON_START", value = "1" },
+        { name = "ARCH_PREFIX_BACKFILL_BATCH", value = "500" }
       ]
 
       secrets = [
@@ -382,7 +384,7 @@ resource "aws_ecs_service" "indexer" {
   name            = "arch-indexer-indexer"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.indexer.arn
-  desired_count   = 1
+  desired_count   = 2
   launch_type     = "FARGATE"
 
   network_configuration {
@@ -410,7 +412,8 @@ resource "aws_ecs_task_definition" "frontend" {
       ]
       environment = [
         { name = "NEXT_PUBLIC_API_URL", value = "http://${aws_lb.main.dns_name}" },
-        { name = "NEXT_PUBLIC_WS_URL",  value = "ws://${aws_lb.main.dns_name}/ws" }
+        { name = "NEXT_PUBLIC_WS_URL",  value = "ws://${aws_lb.main.dns_name}/ws" },
+        { name = "ROLLOUT_TIMESTAMP",   value = tostring(timestamp()) }
       ]
       logConfiguration = {
         logDriver = "awslogs"
