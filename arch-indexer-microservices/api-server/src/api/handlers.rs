@@ -1781,6 +1781,64 @@ pub async fn get_missing_block_heights(
     })))
 }
 
+/// Backfill an explicit height range [start, end], inserting only heights not present
+pub async fn backfill_block_range(
+    State(pool): State<Arc<PgPool>>,
+    Query(params): Query<HashMap<String, String>>,
+) -> Result<Json<serde_json::Value>, ApiError> {
+    let start: i64 = params.get("start").and_then(|v| v.parse::<i64>().ok()).ok_or_else(|| ApiError::bad_request("start is required"))?;
+    let end: i64 = params.get("end").and_then(|v| v.parse::<i64>().ok()).ok_or_else(|| ApiError::bad_request("end is required"))?;
+    if end < start { return Ok(Json(json!({"processed": 0, "message": "empty range"}))); }
+
+    let rpc = ArchRpcClient::new(std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string()));
+
+    let mut processed = 0i64;
+    let mut inserted = 0i64;
+    let mut skipped = 0i64;
+    for h in start..=end {
+        // Skip if exists
+        if let Some(_) = sqlx::query_scalar::<_, i64>("SELECT 1 FROM blocks WHERE height = $1")
+            .bind(h)
+            .fetch_optional(&*pool)
+            .await? {
+            skipped += 1; processed += 1; continue;
+        }
+
+        // Fetch block by height -> hash -> block data
+        match rpc.get_block_hash(h).await {
+            Ok(hash) => {
+                match rpc.get_block(&hash, h).await {
+                    Ok(block) => {
+                        let ts_seconds = block.timestamp as i64;
+                        let _ = sqlx::query(
+                            r#"INSERT INTO blocks (height, hash, timestamp, bitcoin_block_height)
+                               VALUES ($1, $2, to_timestamp($3), $4)
+                               ON CONFLICT (height) DO UPDATE SET hash = EXCLUDED.hash, timestamp = EXCLUDED.timestamp, bitcoin_block_height = EXCLUDED.bitcoin_block_height"#
+                        )
+                        .bind(h)
+                        .bind(&block.hash)
+                        .bind(ts_seconds)
+                        .bind(block.bitcoin_block_height)
+                        .execute(&*pool)
+                        .await?;
+                        inserted += 1;
+                    },
+                    Err(e) => {
+                        return Ok(Json(json!({"processed": processed, "inserted": inserted, "skipped": skipped, "error": format!("get_block failed at {}: {}", h, e)})));
+                    }
+                }
+            },
+            Err(e) => {
+                return Ok(Json(json!({"processed": processed, "inserted": inserted, "skipped": skipped, "error": format!("get_block_hash failed at {}: {}", h, e)})));
+            }
+        }
+        processed += 1;
+        if processed % 500 == 0 { tokio::task::yield_now().await; }
+    }
+
+    Ok(Json(json!({"processed": processed, "inserted": inserted, "skipped": skipped})))
+}
+
 fn format_time(seconds: f64) -> String {
     let hours = (seconds / 3600.0).floor();
     let minutes = ((seconds % 3600.0) / 60.0).floor();

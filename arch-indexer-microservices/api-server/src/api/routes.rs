@@ -15,6 +15,7 @@ pub fn create_router(pool: Arc<PgPool>) -> Router {
         .route("/api/blocks/gaps", get(handlers::get_block_gaps))
         .route("/api/blocks/missing", get(handlers::get_missing_block_heights))
         .route("/api/blocks/backfill-missing", get(handlers::backfill_missing_blocks))
+        .route("/api/blocks/backfill-range", get(handlers::backfill_block_range))
         .route("/api/blocks/height/:height", get(handlers::get_block_by_height))
         .route("/api/blocks/:blockhash", get(handlers::get_block_by_hash))
         .route("/api/transactions", get(handlers::get_transactions))
