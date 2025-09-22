@@ -10,6 +10,7 @@ use crate::api::handlers;
 
 pub fn create_router(pool: Arc<PgPool>) -> Router {
     Router::new()
+        .route("/health", get(handlers::health_check))
         .route("/api/blocks", get(handlers::get_blocks))
         .route("/api/blocks/gaps", get(handlers::get_block_gaps))
         .route("/api/blocks/backfill-missing", get(handlers::backfill_missing_blocks))

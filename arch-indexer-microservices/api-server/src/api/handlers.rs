@@ -19,6 +19,7 @@ use super::program_ids as pid;
 use crate::{db::models::{Block, Transaction, BlockWithTransactions}, indexer::BlockProcessor};
 use crate::arch_rpc::ArchRpcClient;
 use std::collections::HashSet;
+use axum::http::StatusCode as AxStatusCode;
 
 fn key_to_bytes(v: &serde_json::Value) -> Option<Vec<u8>> {
     if let Some(arr) = v.as_array() {
@@ -1532,6 +1533,20 @@ pub async fn get_blocks(
     response.insert("blocks".to_string(), serde_json::to_value(blocks)?);
 
     Ok(Json(response))
+}
+
+/// Simple health check. Verifies DB connectivity and returns 200 OK on success.
+pub async fn health_check(State(pool): State<Arc<PgPool>>) -> axum::response::Response {
+    let ok = sqlx::query_scalar::<_, i64>("SELECT 1")
+        .fetch_one(&*pool)
+        .await
+        .map(|v| v == 1)
+        .unwrap_or(false);
+    if ok {
+        (AxStatusCode::OK, "OK").into_response()
+    } else {
+        (AxStatusCode::INTERNAL_SERVER_ERROR, "DB not ready").into_response()
+    }
 }
 
 /// Return ranges of missing block heights within current indexed bounds and a total count
