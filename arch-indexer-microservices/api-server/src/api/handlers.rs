@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use hex;
 use bs58;
 use tracing::{info, debug, error};
+use sqlx::Row;
 use redis::AsyncCommands;
 use axum::http::StatusCode;
 use axum::extract::Path as AxPath;
@@ -3007,7 +3008,7 @@ pub async fn get_network_stats(
     }
 
     // Optimized query: conditional aggregation + 24h per-minute peak CTE
-    let stats = match sqlx::query!(
+    let row = match sqlx::query(
         r#"
         WITH tx_agg AS (
             SELECT
@@ -3042,16 +3043,23 @@ pub async fn get_network_stats(
     )
     .fetch_one(&*pool)
     .await {
-        Ok(stats) => {
+        Ok(row) => {
             info!("Successfully fetched network stats");
-            debug!("Raw stats: {:?}", stats);
-            stats
+            row
         }
         Err(e) => {
             error!("Failed to fetch network stats: {:?}", e);
             return Err(ApiError::Database(e));
         }
     };
+
+    let total_tx: i64 = row.try_get::<i64, _>("total_tx").unwrap_or(0);
+    let daily_tx: i64 = row.try_get::<i64, _>("daily_tx").unwrap_or(0);
+    let hourly_tx: i64 = row.try_get::<i64, _>("hourly_tx").unwrap_or(0);
+    let minute_tx: i64 = row.try_get::<i64, _>("minute_tx").unwrap_or(0);
+    let max_height_opt: Option<i64> = row.try_get::<Option<i64>, _>("max_height").unwrap_or(None);
+    let total_blocks: i64 = row.try_get::<i64, _>("total_blocks").unwrap_or(0);
+    let peak_tps_val: f64 = row.try_get::<f64, _>("peak_tps").unwrap_or(0.0);
 
     // Fetch chain head from RPC, cached via Redis for 10s
     let node_tip = {
@@ -3088,9 +3096,9 @@ pub async fn get_network_stats(
     };
 
     // Calculate different TPS metrics with logging
-    let current_tps = stats.minute_tx.unwrap_or(0) as f64 / 60.0;
-    let average_tps = stats.hourly_tx.unwrap_or(0) as f64 / 3600.0;
-    let peak_tps = stats.peak_tps.unwrap_or(0.0) as f64;
+    let current_tps = minute_tx as f64 / 60.0;
+    let average_tps = hourly_tx as f64 / 3600.0;
+    let peak_tps = peak_tps_val as f64;
 
     debug!("Calculated metrics:");
     debug!("  Current TPS: {}", current_tps);
@@ -3098,15 +3106,15 @@ pub async fn get_network_stats(
     debug!("  Peak TPS: {}", peak_tps);
 
     let network_total_blocks = node_tip.saturating_add(1);
-    let indexed_height = stats.max_height.unwrap_or(0);
+    let indexed_height = max_height_opt.unwrap_or(0);
     let indexed_blocks = indexed_height.saturating_add(1);
 
     // Compute missing blocks (gaps) quickly: network_total_blocks - COUNT(blocks)
-    let missing_count: i64 = network_total_blocks.saturating_sub(stats.total_blocks.unwrap_or(0).max(0));
+    let missing_count: i64 = network_total_blocks.saturating_sub(total_blocks.max(0));
 
     let response = NetworkStats {
-        total_transactions: stats.total_tx.unwrap_or(0),
-        total_blocks: stats.total_blocks.unwrap_or(0),
+        total_transactions: total_tx,
+        total_blocks: total_blocks,
         indexed_height,
         indexed_blocks,
         network_total_blocks,
@@ -3116,7 +3124,7 @@ pub async fn get_network_stats(
         current_tps,
         average_tps,
         peak_tps,
-        daily_transactions: stats.daily_tx.unwrap_or(0),
+        daily_transactions: daily_tx,
         missing_blocks: missing_count.max(0),
     };
 
