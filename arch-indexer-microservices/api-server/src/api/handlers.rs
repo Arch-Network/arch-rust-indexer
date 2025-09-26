@@ -11,7 +11,6 @@ use chrono::{DateTime, Utc};
 use hex;
 use bs58;
 use tracing::{info, debug, error};
-use sqlx::Row;
 use redis::AsyncCommands;
 use axum::http::StatusCode;
 use axum::extract::Path as AxPath;
@@ -3089,7 +3088,7 @@ pub async fn get_network_stats(
                 }
                 Err(e) => {
                     error!("Failed to fetch block count from RPC: {:?}", e);
-                    stats.max_height.unwrap_or(0)
+                    max_height_opt.unwrap_or(0)
                 }
             }
         }
