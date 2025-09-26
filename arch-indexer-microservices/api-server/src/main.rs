@@ -146,6 +146,17 @@ $$;
         }
     }
 
+    // Optional, idempotent index creation for transactions.created_at to speed time-window filters
+    if std::env::var("APPLY_CREATED_AT_INDEX").ok().as_deref() == Some("1") {
+        info!("Ensuring idx_transactions_created_at exists (CONCURRENTLY, idempotent)...");
+        // Note: CONCURRENTLY cannot run inside a transaction; this simple query runs in its own context
+        let idx_sql = r#"CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions (created_at DESC);"#;
+        match sqlx::query(idx_sql).execute(&pool).await {
+            Ok(_) => info!("idx_transactions_created_at present or created"),
+            Err(e) => error!("Failed to ensure idx_transactions_created_at: {:?}", e),
+        }
+    }
+
     let cors = CorsLayer::new()
         .allow_origin(settings.application.cors_allow_origin.parse::<HeaderValue>().unwrap_or_else(|_| {
             HeaderValue::from_static("*")

@@ -198,6 +198,7 @@ resource "aws_ecs_task_definition" "api" {
         # Ensure nested config picks up arch_node.url
         { name = "ARCH_NODE__URL", value = var.arch_node_url },
         { name = "ARCH_NODE_WEBSOCKET_URL", value = var.arch_node_ws_url },
+        { name = "ARCH_NODE__WEBSOCKET_URL", value = var.arch_node_ws_url },
         { name = "INDEXER_RUNTIME", value = "atlas" },
         { name = "METRICS_ADDR", value = "0.0.0.0:${var.metrics_port}" },
         { name = "ATLAS_CHECKPOINT_BACKEND", value = var.atlas_checkpoint_backend },
@@ -211,6 +212,8 @@ resource "aws_ecs_task_definition" "api" {
         { name = "ARCH_NODE_URL", value = var.arch_node_url },
         # Apply DB TIMESTAMPTZ fix on startup (idempotent). AWS-only, does not affect local.
         { name = "APPLY_TS_TZ_FIX", value = "1" },
+        # Ensure created_at index exists in prod clusters during rollout
+        { name = "APPLY_CREATED_AT_INDEX", value = "1" },
         { name = "REDIS_URL", value = "redis://${aws_elasticache_cluster.redis.cache_nodes[0].address}:${aws_elasticache_cluster.redis.cache_nodes[0].port}" },
         # Avoid embedding password in env
       ]
@@ -339,19 +342,24 @@ resource "aws_ecs_task_definition" "indexer" {
         { name = "INDEXER_RUNTIME", value = "atlas" },
         { name = "METRICS_ADDR", value = "0.0.0.0:${var.metrics_port}" },
         { name = "ATLAS_CHECKPOINT_BACKEND", value = var.atlas_checkpoint_backend },
-        { name = "ARCH_MAX_CONCURRENCY", value = "192" },
-        { name = "ARCH_BULK_BATCH_SIZE", value = "5000" },
-        { name = "ARCH_FETCH_WINDOW_SIZE", value = "16384" },
+        { name = "ARCH_MAX_CONCURRENCY", value = "256" },
+        { name = "ARCH_BULK_BATCH_SIZE", value = "10000" },
+        { name = "ARCH_FETCH_WINDOW_SIZE", value = "32768" },
         { name = "ARCH_INITIAL_BACKOFF_MS", value = "10" },
         { name = "ARCH_MAX_RETRIES", value = "5" },
         { name = "ATLAS_USE_COPY_BULK", value = "1" },
         # Align seeding behavior with docker-compose
         { name = "ARCH_BUILTIN_PROGRAMS", value = "0000000000000000000000000000000000000000000000000000000000000001,ComputeBudget111111111111111111111111111111,VoteProgram111111111111111111111,StakeProgram11111111111111111111,BpfLoader11111111111111111111111,NativeLoader11111111111111111111,AplToken111111111111111111111111" },
         { name = "ARCH_FAST_FORWARD_WINDOW", value = "0" },
-        { name = "ARCH_BACKFILL_PREFIX_ON_START", value = "1" },
+        { name = "ARCH_BACKFILL_PREFIX_ON_START", value = "0" },
         { name = "ARCH_PREFIX_BACKFILL_BATCH", value = "500" },
-        { name = "ARCH_HEAL_MISSING_ON_START", value = "1" },
-        { name = "ARCH_HEAL_CHUNK_SIZE", value = "100000" }
+        { name = "ARCH_HEAL_MISSING_ON_START", value = "0" },
+        { name = "ARCH_HEAL_CHUNK_SIZE", value = "100000" },
+        # Realtime ingestion via websocket
+        { name = "INDEXER__ENABLE_REALTIME", value = "1" },
+        { name = "WEBSOCKET__ENABLED", value = "1" },
+        { name = "WEBSOCKET__RECONNECT_INTERVAL_SECONDS", value = "1" },
+        { name = "WEBSOCKET__MAX_RECONNECT_ATTEMPTS", value = "0" }
       ]
 
       secrets = [
@@ -386,7 +394,7 @@ resource "aws_ecs_service" "indexer" {
   name            = "arch-indexer-indexer"
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.indexer.arn
-  desired_count   = 2
+  desired_count   = 4
   launch_type     = "FARGATE"
 
   network_configuration {

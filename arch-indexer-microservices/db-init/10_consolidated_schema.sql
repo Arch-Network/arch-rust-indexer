@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS transactions (
 
 -- Create base indexes
 CREATE INDEX IF NOT EXISTS idx_transactions_block_height ON transactions(block_height);
+CREATE INDEX IF NOT EXISTS idx_transactions_created_at ON transactions(created_at DESC);
 CREATE INDEX IF NOT EXISTS idx_blocks_bitcoin_block_height ON blocks(bitcoin_block_height);
 CREATE INDEX IF NOT EXISTS idx_blocks_timestamp ON blocks(timestamp);
 

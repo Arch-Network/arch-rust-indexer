@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use hex;
 use bs58;
 use tracing::{info, debug, error};
+use redis::AsyncCommands;
 use axum::http::StatusCode;
 use axum::extract::Path as AxPath;
 
@@ -2990,36 +2991,53 @@ pub async fn get_network_stats(
     State(pool): State<Arc<PgPool>>,
 ) -> Result<Json<NetworkStats>, ApiError> {
     info!("Fetching network stats...");
-    
+
+    // Attempt to serve from Redis cache first
+    let redis_url = std::env::var("REDIS_URL").or_else(|_| std::env::var("REDIS__URL")).unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let cache_key = "cache:network_stats:v2";
+    if let Ok(client) = redis::Client::open(redis_url.as_str()) {
+        if let Ok(mut conn) = client.get_async_connection().await {
+            if let Ok(Some(json_str)) = conn.get::<_, Option<String>>(cache_key).await {
+                if let Ok(stats) = serde_json::from_str::<NetworkStats>(&json_str) {
+                    debug!("Cache hit for {}", cache_key);
+                    return Ok(Json(stats));
+                }
+            }
+        }
+    }
+
+    // Optimized query: conditional aggregation + 24h per-minute peak CTE
     let stats = match sqlx::query!(
         r#"
-        WITH time_windows AS (
-            SELECT 
-                COUNT(*) as total_tx,
-                (SELECT COUNT(*) FROM transactions 
-                 WHERE created_at >= NOW() - INTERVAL '24 hours') as daily_tx,
-                (SELECT COUNT(*) FROM transactions 
-                 WHERE created_at >= NOW() - INTERVAL '1 hour') as hourly_tx,
-                (SELECT COUNT(*) FROM transactions 
-                 WHERE created_at >= NOW() - INTERVAL '1 minute') as minute_tx,
-                (SELECT MAX(height) FROM blocks) as max_height,
-                (SELECT COUNT(*) FROM blocks) as total_blocks,
-                (SELECT COUNT(*) / 60 as peak_tps FROM transactions 
-                 WHERE created_at >= NOW() - INTERVAL '24 hours'
-                 GROUP BY DATE_TRUNC('minute', created_at)
-                 ORDER BY peak_tps DESC
-                 LIMIT 1) as peak_tps
+        WITH tx_agg AS (
+            SELECT
+                COUNT(*)::BIGINT AS total_tx,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours')::BIGINT AS daily_tx,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '1 hour')::BIGINT AS hourly_tx,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '1 minute')::BIGINT AS minute_tx
             FROM transactions
+        ),
+        blocks_agg AS (
+            SELECT MAX(height)::BIGINT AS max_height, COUNT(*)::BIGINT AS total_blocks FROM blocks
+        ),
+        peak AS (
+            SELECT COALESCE(MAX(cnt)::DOUBLE PRECISION / 60.0, 0.0) AS peak_tps
+            FROM (
+                SELECT COUNT(*)::BIGINT AS cnt
+                FROM transactions
+                WHERE created_at >= NOW() - INTERVAL '24 hours'
+                GROUP BY DATE_TRUNC('minute', created_at)
+            ) sub
         )
         SELECT 
-            total_tx,
-            daily_tx,
-            hourly_tx,
-            minute_tx,
-            max_height,
-            total_blocks,
-            COALESCE(peak_tps, 0) as peak_tps
-        FROM time_windows
+            tx_agg.total_tx,
+            tx_agg.daily_tx,
+            tx_agg.hourly_tx,
+            tx_agg.minute_tx,
+            blocks_agg.max_height,
+            blocks_agg.total_blocks,
+            peak.peak_tps
+        FROM tx_agg, blocks_agg, peak
         "#
     )
     .fetch_one(&*pool)
@@ -3035,21 +3053,44 @@ pub async fn get_network_stats(
         }
     };
 
-    // Fetch chain head from RPC to report accurate network tip
-    let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
-    let arch_client = ArchRpcClient::new(rpc_url);
-    let node_tip = match arch_client.get_block_count().await {
-        Ok(h) => h,
-        Err(e) => {
-            error!("Failed to fetch block count from RPC: {:?}", e);
-            stats.max_height.unwrap_or(0)
+    // Fetch chain head from RPC, cached via Redis for 10s
+    let node_tip = {
+        let head_key = "cache:arch_node_head";
+        let mut head: Option<i64> = None;
+        if let Ok(client) = redis::Client::open(redis_url.as_str()) {
+            if let Ok(mut conn) = client.get_async_connection().await {
+                if let Ok(h) = conn.get::<_, Option<i64>>(head_key).await {
+                    head = h;
+                }
+            }
+        }
+        if let Some(h) = head {
+            debug!("Cache hit for {} => {}", head_key, h);
+            h
+        } else {
+            let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+            let arch_client = ArchRpcClient::new(rpc_url);
+            match arch_client.get_block_count().await {
+                Ok(h) => {
+                    if let Ok(client) = redis::Client::open(redis_url.as_str()) {
+                        if let Ok(mut conn) = client.get_async_connection().await {
+                            let _ = conn.set_ex::<_, _, ()>(head_key, h, 10).await;
+                        }
+                    }
+                    h
+                }
+                Err(e) => {
+                    error!("Failed to fetch block count from RPC: {:?}", e);
+                    stats.max_height.unwrap_or(0)
+                }
+            }
         }
     };
 
     // Calculate different TPS metrics with logging
     let current_tps = stats.minute_tx.unwrap_or(0) as f64 / 60.0;
     let average_tps = stats.hourly_tx.unwrap_or(0) as f64 / 3600.0;
-    let peak_tps = stats.peak_tps.unwrap_or(0) as f64;
+    let peak_tps = stats.peak_tps.unwrap_or(0.0) as f64;
 
     debug!("Calculated metrics:");
     debug!("  Current TPS: {}", current_tps);
@@ -3076,9 +3117,17 @@ pub async fn get_network_stats(
         average_tps,
         peak_tps,
         daily_transactions: stats.daily_tx.unwrap_or(0),
-        // new field (serde will ignore unknown on clients not using it)
         missing_blocks: missing_count.max(0),
     };
+
+    // Store in Redis cache for 10 seconds (best-effort)
+    if let Ok(client) = redis::Client::open(redis_url.as_str()) {
+        if let Ok(mut conn) = client.get_async_connection().await {
+            if let Ok(json_str) = serde_json::to_string(&response) {
+                let _ = conn.set_ex::<_, _, ()>(cache_key, json_str, 10).await;
+            }
+        }
+    }
 
     info!("Network stats response prepared successfully");
     debug!("Final response: {:?}", response);
