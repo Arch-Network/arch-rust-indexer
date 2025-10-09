@@ -144,6 +144,7 @@ resource "aws_lb_listener_rule" "api" {
 ## HTTPS support: provide ACM cert ARN from external certs stack
 
 resource "aws_lb_listener" "https" {
+  count             = var.https_certificate_arn != "" ? 1 : 0
   load_balancer_arn = aws_lb.main.arn
   port              = 443
   protocol          = "HTTPS"
@@ -156,7 +157,8 @@ resource "aws_lb_listener" "https" {
 }
 
 resource "aws_lb_listener_rule" "api_https" {
-  listener_arn = aws_lb_listener.https.arn
+  count        = var.https_certificate_arn != "" ? 1 : 0
+  listener_arn = aws_lb_listener.https[0].arn
   priority     = 10
   action {
     type             = "forward"

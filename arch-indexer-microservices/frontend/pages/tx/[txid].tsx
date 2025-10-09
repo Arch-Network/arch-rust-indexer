@@ -221,6 +221,20 @@ export default function TxDetailPage() {
                             </div>
                           );
                         }
+                        // System Program: AssignOwnership visualization
+                        if (ins.action && /assignownership|assign/.test(ins.action.toLowerCase())) {
+                          const account = d?.account || ins.accounts[0];
+                          const owner = d?.owner;
+                          if (account && owner) {
+                            return (
+                              <div className={styles.vizRow}>
+                                <Link href={`/accounts/${account}`} className={styles.hashButton}>{account}</Link>
+                                <span className={styles.arrow}>owner →</span>
+                                <Link href={`/accounts/${owner}`} className={styles.hashButton}>{owner}</Link>
+                              </div>
+                            );
+                          }
+                        }
                       } catch {}
                       return null;
                     })()}

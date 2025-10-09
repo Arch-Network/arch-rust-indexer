@@ -11,6 +11,7 @@ use chrono::{DateTime, Utc};
 use hex;
 use bs58;
 use tracing::{info, debug, error};
+use redis::AsyncCommands;
 use axum::http::StatusCode;
 use axum::extract::Path as AxPath;
 
@@ -2441,14 +2442,14 @@ pub async fn get_transaction_instructions(
                 }
             }
         }
-        // System Program transfer (Solana convention)
+        // System Program (Arch discriminators)
         if is_system_b58(program_b58)
             || program_hex.eq_ignore_ascii_case("0000000000000000000000000000000000000000000000000000000000000000")
             || program_hex.eq_ignore_ascii_case("0000000000000000000000000000000000000000000000000000000000000001") {
             if data.len() >= 4 {
                 let tag = u32_le(&data[0..4]).unwrap_or(9999);
-                // 1: Assign { owner: Pubkey }
-                if tag == 1 && data.len() >= 4 + 32 {
+                // Arch: 3 => AssignOwnership { owner: Pubkey }
+                if tag == 3 && data.len() >= 4 + 32 {
                     let owner_b58 = bs58::encode(&data[4..36]).into_string();
                     let account = accounts.get(0).cloned();
                     let decoded = json!({
@@ -2456,9 +2457,9 @@ pub async fn get_transaction_instructions(
                         "owner": owner_b58,
                         "account": account,
                     });
-                    return (Some("System Program: Assign".to_string()), Some(decoded));
+                    return (Some("System Program: AssignOwnership".to_string()), Some(decoded));
                 }
-                // 0: CreateAccount { lamports: u64, space: u64, owner: Pubkey(32) }
+                // Arch: 0 => CreateAccount { lamports: u64, space: u64, owner: Pubkey(32) }
                 if tag == 0 && data.len() >= 4 + 8 + 8 + 32 {
                     let lamports = u64_le(&data[4..12]).unwrap_or(0);
                     let space = u64_le(&data[12..20]).unwrap_or(0);
@@ -2475,8 +2476,8 @@ pub async fn get_transaction_instructions(
                     });
                     return (Some("System Program: CreateAccount".to_string()), Some(decoded));
                 }
-                // 2 (or 4 on some variants): Transfer { lamports: u64 }
-                if (tag == 2 || tag == 4) && data.len() >= 12 {
+                // Arch: 4 => Transfer { lamports: u64 }
+                if tag == 4 && data.len() == 12 {
                     let lamports = u64_le(&data[4..12]).unwrap_or(0);
                     let src = accounts.get(0).cloned();
                     let dst = accounts.get(1).cloned();
@@ -2488,18 +2489,29 @@ pub async fn get_transaction_instructions(
                     });
                     return (Some("System Program: Transfer".to_string()), Some(decoded));
                 }
-                // Fallback: classic 12-byte payload with two accounts -> transfer
-                if data.len() == 12 && accounts.len() >= 2 {
-                    let lamports = u64_le(&data[4..12]).unwrap_or(0);
-                    let src = accounts.get(0).cloned();
-                    let dst = accounts.get(1).cloned();
+                // Arch: 2 => MakeExecutable (no payload)
+                if tag == 2 {
+                    let account = accounts.get(0).cloned();
                     let decoded = json!({
                         "discriminator": {"type":"u32", "data": tag},
-                        "lamports": {"type":"u64", "data": lamports},
-                        "source": src,
-                        "destination": dst,
+                        "account": account,
                     });
-                    return (Some("System Program: Transfer".to_string()), Some(decoded));
+                    return (Some("System Program: MakeExecutable".to_string()), Some(decoded));
+                }
+                // Arch: 1 => WriteBytes { offset: u64, len: u64, bytes: [..] }
+                if tag == 1 && data.len() >= 4 + 8 + 8 {
+                    let offset = u64_le(&data[4..12]).unwrap_or(0);
+                    let len = u64_le(&data[12..20]).unwrap_or(0) as usize;
+                    let bytes_hex = if data.len() >= 20 + len { Some(hex::encode(&data[20..20+len])) } else { None };
+                    let account = accounts.get(0).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u32", "data": tag},
+                        "offset": {"type":"u64", "data": offset},
+                        "len": {"type":"u64", "data": len as u64},
+                        "bytes_hex": bytes_hex,
+                        "account": account,
+                    });
+                    return (Some("System Program: WriteBytes".to_string()), Some(decoded));
                 }
                 // 8: Allocate { space: u64 }
                 if tag == 8 && data.len() >= 4 + 8 {
@@ -2990,44 +3002,60 @@ pub async fn get_network_stats(
     State(pool): State<Arc<PgPool>>,
 ) -> Result<Json<NetworkStats>, ApiError> {
     info!("Fetching network stats...");
-    
-    let stats = match sqlx::query!(
+
+    // Attempt to serve from Redis cache first
+    let redis_url = std::env::var("REDIS_URL").or_else(|_| std::env::var("REDIS__URL")).unwrap_or_else(|_| "redis://localhost:6379".to_string());
+    let cache_key = "cache:network_stats:v2";
+    if let Ok(client) = redis::Client::open(redis_url.as_str()) {
+        if let Ok(mut conn) = client.get_async_connection().await {
+            if let Ok(Some(json_str)) = conn.get::<_, Option<String>>(cache_key).await {
+                if let Ok(stats) = serde_json::from_str::<NetworkStats>(&json_str) {
+                    debug!("Cache hit for {}", cache_key);
+                    return Ok(Json(stats));
+                }
+            }
+        }
+    }
+
+    // Optimized query: conditional aggregation + 24h per-minute peak CTE
+    let row = match sqlx::query(
         r#"
-        WITH time_windows AS (
-            SELECT 
-                COUNT(*) as total_tx,
-                (SELECT COUNT(*) FROM transactions 
-                 WHERE created_at >= NOW() - INTERVAL '24 hours') as daily_tx,
-                (SELECT COUNT(*) FROM transactions 
-                 WHERE created_at >= NOW() - INTERVAL '1 hour') as hourly_tx,
-                (SELECT COUNT(*) FROM transactions 
-                 WHERE created_at >= NOW() - INTERVAL '1 minute') as minute_tx,
-                (SELECT MAX(height) FROM blocks) as max_height,
-                (SELECT COUNT(*) FROM blocks) as total_blocks,
-                (SELECT COUNT(*) / 60 as peak_tps FROM transactions 
-                 WHERE created_at >= NOW() - INTERVAL '24 hours'
-                 GROUP BY DATE_TRUNC('minute', created_at)
-                 ORDER BY peak_tps DESC
-                 LIMIT 1) as peak_tps
+        WITH tx_agg AS (
+            SELECT
+                COUNT(*)::BIGINT AS total_tx,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '24 hours')::BIGINT AS daily_tx,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '1 hour')::BIGINT AS hourly_tx,
+                COUNT(*) FILTER (WHERE created_at >= NOW() - INTERVAL '1 minute')::BIGINT AS minute_tx
             FROM transactions
+        ),
+        blocks_agg AS (
+            SELECT MAX(height)::BIGINT AS max_height, COUNT(*)::BIGINT AS total_blocks FROM blocks
+        ),
+        peak AS (
+            SELECT COALESCE(MAX(cnt)::DOUBLE PRECISION / 60.0, 0.0) AS peak_tps
+            FROM (
+                SELECT COUNT(*)::BIGINT AS cnt
+                FROM transactions
+                WHERE created_at >= NOW() - INTERVAL '24 hours'
+                GROUP BY DATE_TRUNC('minute', created_at)
+            ) sub
         )
         SELECT 
-            total_tx,
-            daily_tx,
-            hourly_tx,
-            minute_tx,
-            max_height,
-            total_blocks,
-            COALESCE(peak_tps, 0) as peak_tps
-        FROM time_windows
+            tx_agg.total_tx,
+            tx_agg.daily_tx,
+            tx_agg.hourly_tx,
+            tx_agg.minute_tx,
+            blocks_agg.max_height,
+            blocks_agg.total_blocks,
+            peak.peak_tps
+        FROM tx_agg, blocks_agg, peak
         "#
     )
     .fetch_one(&*pool)
     .await {
-        Ok(stats) => {
+        Ok(row) => {
             info!("Successfully fetched network stats");
-            debug!("Raw stats: {:?}", stats);
-            stats
+            row
         }
         Err(e) => {
             error!("Failed to fetch network stats: {:?}", e);
@@ -3035,21 +3063,52 @@ pub async fn get_network_stats(
         }
     };
 
-    // Fetch chain head from RPC to report accurate network tip
-    let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
-    let arch_client = ArchRpcClient::new(rpc_url);
-    let node_tip = match arch_client.get_block_count().await {
-        Ok(h) => h,
-        Err(e) => {
-            error!("Failed to fetch block count from RPC: {:?}", e);
-            stats.max_height.unwrap_or(0)
+    let total_tx: i64 = row.try_get::<i64, _>("total_tx").unwrap_or(0);
+    let daily_tx: i64 = row.try_get::<i64, _>("daily_tx").unwrap_or(0);
+    let hourly_tx: i64 = row.try_get::<i64, _>("hourly_tx").unwrap_or(0);
+    let minute_tx: i64 = row.try_get::<i64, _>("minute_tx").unwrap_or(0);
+    let max_height_opt: Option<i64> = row.try_get::<Option<i64>, _>("max_height").unwrap_or(None);
+    let total_blocks: i64 = row.try_get::<i64, _>("total_blocks").unwrap_or(0);
+    let peak_tps_val: f64 = row.try_get::<f64, _>("peak_tps").unwrap_or(0.0);
+
+    // Fetch chain head from RPC, cached via Redis for 10s
+    let node_tip = {
+        let head_key = "cache:arch_node_head";
+        let mut head: Option<i64> = None;
+        if let Ok(client) = redis::Client::open(redis_url.as_str()) {
+            if let Ok(mut conn) = client.get_async_connection().await {
+                if let Ok(h) = conn.get::<_, Option<i64>>(head_key).await {
+                    head = h;
+                }
+            }
+        }
+        if let Some(h) = head {
+            debug!("Cache hit for {} => {}", head_key, h);
+            h
+        } else {
+            let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
+            let arch_client = ArchRpcClient::new(rpc_url);
+            match arch_client.get_block_count().await {
+                Ok(h) => {
+                    if let Ok(client) = redis::Client::open(redis_url.as_str()) {
+                        if let Ok(mut conn) = client.get_async_connection().await {
+                            let _ = conn.set_ex::<_, _, ()>(head_key, h, 10).await;
+                        }
+                    }
+                    h
+                }
+                Err(e) => {
+                    error!("Failed to fetch block count from RPC: {:?}", e);
+                    max_height_opt.unwrap_or(0)
+                }
+            }
         }
     };
 
     // Calculate different TPS metrics with logging
-    let current_tps = stats.minute_tx.unwrap_or(0) as f64 / 60.0;
-    let average_tps = stats.hourly_tx.unwrap_or(0) as f64 / 3600.0;
-    let peak_tps = stats.peak_tps.unwrap_or(0) as f64;
+    let current_tps = minute_tx as f64 / 60.0;
+    let average_tps = hourly_tx as f64 / 3600.0;
+    let peak_tps = peak_tps_val as f64;
 
     debug!("Calculated metrics:");
     debug!("  Current TPS: {}", current_tps);
@@ -3057,15 +3116,15 @@ pub async fn get_network_stats(
     debug!("  Peak TPS: {}", peak_tps);
 
     let network_total_blocks = node_tip.saturating_add(1);
-    let indexed_height = stats.max_height.unwrap_or(0);
+    let indexed_height = max_height_opt.unwrap_or(0);
     let indexed_blocks = indexed_height.saturating_add(1);
 
     // Compute missing blocks (gaps) quickly: network_total_blocks - COUNT(blocks)
-    let missing_count: i64 = network_total_blocks.saturating_sub(stats.total_blocks.unwrap_or(0).max(0));
+    let missing_count: i64 = network_total_blocks.saturating_sub(total_blocks.max(0));
 
     let response = NetworkStats {
-        total_transactions: stats.total_tx.unwrap_or(0),
-        total_blocks: stats.total_blocks.unwrap_or(0),
+        total_transactions: total_tx,
+        total_blocks: total_blocks,
         indexed_height,
         indexed_blocks,
         network_total_blocks,
@@ -3075,10 +3134,18 @@ pub async fn get_network_stats(
         current_tps,
         average_tps,
         peak_tps,
-        daily_transactions: stats.daily_tx.unwrap_or(0),
-        // new field (serde will ignore unknown on clients not using it)
+        daily_transactions: daily_tx,
         missing_blocks: missing_count.max(0),
     };
+
+    // Store in Redis cache for 10 seconds (best-effort)
+    if let Ok(client) = redis::Client::open(redis_url.as_str()) {
+        if let Ok(mut conn) = client.get_async_connection().await {
+            if let Ok(json_str) = serde_json::to_string(&response) {
+                let _ = conn.set_ex::<_, _, ()>(cache_key, json_str, 10).await;
+            }
+        }
+    }
 
     info!("Network stats response prepared successfully");
     debug!("Final response: {:?}", response);
@@ -3923,9 +3990,10 @@ fn compute_native_balance_delta_for_address_in_tx(data: &serde_json::Value, addr
         let acc_idx: Vec<usize> = ins.get("accounts").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as usize)).collect()).unwrap_or_default();
         let accounts_b58: Vec<String> = acc_idx.iter().filter_map(|i| keys_b58.get(*i)).cloned().collect();
         let data_vec: Vec<u8> = ins.get("data").and_then(|d| d.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as u8)).collect()).unwrap_or_default();
-        if data_vec.len() < 4 || accounts_b58.len() < 2 { continue; }
+        if data_vec.len() < 4 { continue; }
         let tag = v2_u32_le(&data_vec[0..4]).unwrap_or(9999);
-        if tag == 0 || tag == 2 || tag == 4 || data_vec.len() == 12 {
+        // Arch: Transfer is tag 4 with exact 12-byte payload and at least 2 accounts
+        if tag == 4 && data_vec.len() == 12 && accounts_b58.len() >= 2 {
             let lamports = v2_u64_le(&data_vec[4..12]).unwrap_or(0) as i128;
             let src = accounts_b58.get(0);
             let dst = accounts_b58.get(1);
@@ -3977,14 +4045,20 @@ fn build_instruction_summaries_from_tx(data: &serde_json::Value) -> Vec<serde_js
                 }
             }
         }
-        // System transfer summary
-        if v2_is_system_b58(&program_b58) && data_vec.len() >= 12 {
+        // System summary (Arch discriminators)
+        if v2_is_system_b58(&program_b58) && data_vec.len() >= 4 {
             let tag = v2_u32_le(&data_vec[0..4]).unwrap_or(9999);
-            if tag == 2 || tag == 4 {
+            if tag == 4 && data_vec.len() == 12 && accounts.len() >= 2 {
                 let lamports = v2_u64_le(&data_vec[4..12]).unwrap_or(0);
                 let src = accounts.get(0).cloned();
                 let dst = accounts.get(1).cloned();
                 out.push(json!({"action":"System: Transfer","decoded": {"lamports": {"type":"u64","data": lamports}, "source": src, "destination": dst}}));
+                continue;
+            }
+            if tag == 3 && data_vec.len() >= 36 {
+                let owner_b58 = bs58::encode(&data_vec[4..36]).into_string();
+                let account = accounts.get(0).cloned();
+                out.push(json!({"action":"System: AssignOwnership","decoded": {"owner": owner_b58, "account": account, "discriminator": {"type":"u32","data": tag}}}));
                 continue;
             }
         }
