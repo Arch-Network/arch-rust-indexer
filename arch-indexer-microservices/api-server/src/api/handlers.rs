@@ -2442,14 +2442,14 @@ pub async fn get_transaction_instructions(
                 }
             }
         }
-        // System Program transfer (Solana convention)
+        // System Program (Arch discriminators)
         if is_system_b58(program_b58)
             || program_hex.eq_ignore_ascii_case("0000000000000000000000000000000000000000000000000000000000000000")
             || program_hex.eq_ignore_ascii_case("0000000000000000000000000000000000000000000000000000000000000001") {
             if data.len() >= 4 {
                 let tag = u32_le(&data[0..4]).unwrap_or(9999);
-                // 1: Assign { owner: Pubkey }
-                if tag == 1 && data.len() >= 4 + 32 {
+                // Arch: 3 => AssignOwnership { owner: Pubkey }
+                if tag == 3 && data.len() >= 4 + 32 {
                     let owner_b58 = bs58::encode(&data[4..36]).into_string();
                     let account = accounts.get(0).cloned();
                     let decoded = json!({
@@ -2457,9 +2457,9 @@ pub async fn get_transaction_instructions(
                         "owner": owner_b58,
                         "account": account,
                     });
-                    return (Some("System Program: Assign".to_string()), Some(decoded));
+                    return (Some("System Program: AssignOwnership".to_string()), Some(decoded));
                 }
-                // 0: CreateAccount { lamports: u64, space: u64, owner: Pubkey(32) }
+                // Arch: 0 => CreateAccount { lamports: u64, space: u64, owner: Pubkey(32) }
                 if tag == 0 && data.len() >= 4 + 8 + 8 + 32 {
                     let lamports = u64_le(&data[4..12]).unwrap_or(0);
                     let space = u64_le(&data[12..20]).unwrap_or(0);
@@ -2476,8 +2476,8 @@ pub async fn get_transaction_instructions(
                     });
                     return (Some("System Program: CreateAccount".to_string()), Some(decoded));
                 }
-                // 2 (or 4 on some variants): Transfer { lamports: u64 }
-                if (tag == 2 || tag == 4) && data.len() >= 12 {
+                // Arch: 4 => Transfer { lamports: u64 }
+                if tag == 4 && data.len() == 12 {
                     let lamports = u64_le(&data[4..12]).unwrap_or(0);
                     let src = accounts.get(0).cloned();
                     let dst = accounts.get(1).cloned();
@@ -2489,18 +2489,29 @@ pub async fn get_transaction_instructions(
                     });
                     return (Some("System Program: Transfer".to_string()), Some(decoded));
                 }
-                // Fallback: classic 12-byte payload with two accounts -> transfer
-                if data.len() == 12 && accounts.len() >= 2 {
-                    let lamports = u64_le(&data[4..12]).unwrap_or(0);
-                    let src = accounts.get(0).cloned();
-                    let dst = accounts.get(1).cloned();
+                // Arch: 2 => MakeExecutable (no payload)
+                if tag == 2 {
+                    let account = accounts.get(0).cloned();
                     let decoded = json!({
                         "discriminator": {"type":"u32", "data": tag},
-                        "lamports": {"type":"u64", "data": lamports},
-                        "source": src,
-                        "destination": dst,
+                        "account": account,
                     });
-                    return (Some("System Program: Transfer".to_string()), Some(decoded));
+                    return (Some("System Program: MakeExecutable".to_string()), Some(decoded));
+                }
+                // Arch: 1 => WriteBytes { offset: u64, len: u64, bytes: [..] }
+                if tag == 1 && data.len() >= 4 + 8 + 8 {
+                    let offset = u64_le(&data[4..12]).unwrap_or(0);
+                    let len = u64_le(&data[12..20]).unwrap_or(0) as usize;
+                    let bytes_hex = if data.len() >= 20 + len { Some(hex::encode(&data[20..20+len])) } else { None };
+                    let account = accounts.get(0).cloned();
+                    let decoded = json!({
+                        "discriminator": {"type":"u32", "data": tag},
+                        "offset": {"type":"u64", "data": offset},
+                        "len": {"type":"u64", "data": len as u64},
+                        "bytes_hex": bytes_hex,
+                        "account": account,
+                    });
+                    return (Some("System Program: WriteBytes".to_string()), Some(decoded));
                 }
                 // 8: Allocate { space: u64 }
                 if tag == 8 && data.len() >= 4 + 8 {
@@ -3979,9 +3990,10 @@ fn compute_native_balance_delta_for_address_in_tx(data: &serde_json::Value, addr
         let acc_idx: Vec<usize> = ins.get("accounts").and_then(|a| a.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as usize)).collect()).unwrap_or_default();
         let accounts_b58: Vec<String> = acc_idx.iter().filter_map(|i| keys_b58.get(*i)).cloned().collect();
         let data_vec: Vec<u8> = ins.get("data").and_then(|d| d.as_array()).map(|a| a.iter().filter_map(|v| v.as_i64().map(|n| n as u8)).collect()).unwrap_or_default();
-        if data_vec.len() < 4 || accounts_b58.len() < 2 { continue; }
+        if data_vec.len() < 4 { continue; }
         let tag = v2_u32_le(&data_vec[0..4]).unwrap_or(9999);
-        if tag == 0 || tag == 2 || tag == 4 || data_vec.len() == 12 {
+        // Arch: Transfer is tag 4 with exact 12-byte payload and at least 2 accounts
+        if tag == 4 && data_vec.len() == 12 && accounts_b58.len() >= 2 {
             let lamports = v2_u64_le(&data_vec[4..12]).unwrap_or(0) as i128;
             let src = accounts_b58.get(0);
             let dst = accounts_b58.get(1);
@@ -4033,14 +4045,20 @@ fn build_instruction_summaries_from_tx(data: &serde_json::Value) -> Vec<serde_js
                 }
             }
         }
-        // System transfer summary
-        if v2_is_system_b58(&program_b58) && data_vec.len() >= 12 {
+        // System summary (Arch discriminators)
+        if v2_is_system_b58(&program_b58) && data_vec.len() >= 4 {
             let tag = v2_u32_le(&data_vec[0..4]).unwrap_or(9999);
-            if tag == 2 || tag == 4 {
+            if tag == 4 && data_vec.len() == 12 && accounts.len() >= 2 {
                 let lamports = v2_u64_le(&data_vec[4..12]).unwrap_or(0);
                 let src = accounts.get(0).cloned();
                 let dst = accounts.get(1).cloned();
                 out.push(json!({"action":"System: Transfer","decoded": {"lamports": {"type":"u64","data": lamports}, "source": src, "destination": dst}}));
+                continue;
+            }
+            if tag == 3 && data_vec.len() >= 36 {
+                let owner_b58 = bs58::encode(&data_vec[4..36]).into_string();
+                let account = accounts.get(0).cloned();
+                out.push(json!({"action":"System: AssignOwnership","decoded": {"owner": owner_b58, "account": account, "discriminator": {"type":"u32","data": tag}}}));
                 continue;
             }
         }

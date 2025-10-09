@@ -1,11 +1,27 @@
 services:
-  frontend:
-    command: sh -lc "npm install --no-audit --no-fund && npm run dev -- -p 3000 -H 0.0.0.0"
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
+  indexer:
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:3001
-      NEXT_PUBLIC_WS_URL: ws://localhost:3001
-      CHOKIDAR_USEPOLLING: "1"
-      WATCHPACK_POLLING: "true"
+      ARCH_NODE_URL: https://rpc-beta.test.arch.network/
+      ARCH_NODE_WEBSOCKET_URL: wss://rpc-beta.test.arch.network/
+      RUST_LOG: indexer=debug,atlas_core=debug,atlas_progress=debug,atlas_arch=debug,atlas_arch_rpc_datasource=debug
+      ARCH_MAX_CONCURRENCY: "64"
+      ARCH_BULK_BATCH_SIZE: "1000"
+      ARCH_FETCH_WINDOW_SIZE: "4096"
+      ARCH_INITIAL_BACKOFF_MS: "50"
+      ARCH_MAX_RETRIES: "8"
+  api-server:
+    environment:
+      ARCH_NODE_URL: https://rpc-beta.test.arch.network/
+      ARCH_NODE_WEBSOCKET_URL: wss://rpc-beta.test.arch.network/
+    ports:
+      - "3101:3001"
+  frontend:
+    build:
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:3101
+        NEXT_PUBLIC_WS_URL: ws://localhost:3101
+    environment:
+      NEXT_PUBLIC_API_URL: http://localhost:3101
+      NEXT_PUBLIC_WS_URL: ws://localhost:3101
+      NEXT_PUBLIC_ARCH_NODE_URL: https://rpc-beta.test.arch.network/
+      NEXT_PUBLIC_ARCH_NODE_WS_URL: wss://rpc-beta.test.arch.network/
