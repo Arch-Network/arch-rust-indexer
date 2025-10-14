@@ -3432,7 +3432,7 @@ pub async fn get_transactions_by_program(
         FROM transactions t
         JOIN transaction_programs tp ON t.txid = tp.txid
         WHERE tp.program_id = $1
-        ORDER BY t.block_height DESC
+        ORDER BY t.created_at DESC, t.block_height DESC
         LIMIT $2 OFFSET $3
         "#,
         pid_hex,
