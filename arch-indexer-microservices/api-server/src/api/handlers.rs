@@ -3198,9 +3198,10 @@ pub async fn search_handler(
     } else { None };
 
     let program_fut = if forced.as_deref().map(|s| s=="program").unwrap_or(true) {
-        if let Some(q_hex) = q_hex_opt.clone() {
-            Some(sqlx::query("SELECT program_id, COALESCE(display_name, '') AS display_name FROM programs WHERE program_id = $1 LIMIT 1").bind(q_hex))
-        } else { None }
+        // Use DB's normalize_program_id to support both base58 and hex inputs consistently
+        Some(sqlx::query(
+            "SELECT program_id, COALESCE(display_name, '') AS display_name FROM programs WHERE program_id = normalize_program_id($1) LIMIT 1"
+        ).bind(q_for_futures.clone()))
     } else { None };
 
     let account_exists_fut = if forced.as_deref().map(|s| s=="addr" || s=="account").unwrap_or(true) {
@@ -3357,7 +3358,7 @@ pub async fn search_handler(
     }
     if let Some(arr) = results.get("blocks").and_then(|v| v.as_array()) { if arr.len() == 1 { if let Some(u) = arr[0].get("url").and_then(|v| v.as_str()) { candidates.push(("block".into(), u.to_string(), 0.95)); } } }
     if let Some(arr) = results.get("accounts").and_then(|v| v.as_array()) { if arr.len() == 1 { if let Some(u) = arr[0].get("url").and_then(|v| v.as_str()) { candidates.push(("account".into(), u.to_string(), 0.9)); } } }
-    if let Some(arr) = results.get("programs").and_then(|v| v.as_array()) { if arr.len() == 1 { if let Some(u) = arr[0].get("url").and_then(|v| v.as_str()) { candidates.push(("program".into(), u.to_string(), 0.9)); } } }
+    if let Some(arr) = results.get("programs").and_then(|v| v.as_array()) { if arr.len() == 1 { if let Some(u) = arr[0].get("url").and_then(|v| v.as_str()) { candidates.push(("program".into(), u.to_string(), 0.95)); } } }
     if let Some(arr) = results.get("tokens").and_then(|v| v.as_array()) { if arr.len() == 1 { if let Some(u) = arr[0].get("url").and_then(|v| v.as_str()) { candidates.push(("token".into(), u.to_string(), 0.9)); } } }
 
     let best_guess = if candidates.len() == 1 { let (t, u, c) = candidates.remove(0); json!({ "redirect": true, "type": t, "url": u, "confidence": c }) } else { json!({ "redirect": false }) };
