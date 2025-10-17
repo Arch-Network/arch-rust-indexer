@@ -64,6 +64,10 @@ path = "src/bin/test_websocket_server.rs"
 name = "test_realtime_indexing"
 path = "src/bin/test_realtime_indexing.rs"
 
+[[bin]]
+name = "websocket_test"
+path = "websocket_test.rs"
+
 [dev-dependencies]
 tokio = { version = "1.0", features = ["full"] }
 tower = { version = "0.4", features = ["util"] }

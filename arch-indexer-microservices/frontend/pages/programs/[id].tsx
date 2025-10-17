@@ -1,8 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import { useRouter } from 'next/router';
 import Layout from '../../components/Layout';
 import styles from '../../styles/Home.module.css';
 import { middleEllipsis } from '../../utils/format';
+import Pagination from '../../components/Pagination';
 
 type Program = {
   program_id_hex: string;
@@ -30,9 +31,12 @@ export default function ProgramDetailPage() {
   const id = router.query.id as string | undefined;
   const apiUrl = process.env.NEXT_PUBLIC_API_URL || '';
   const [program, setProgram] = useState<Program | null>(null);
-  const [recent, setRecent] = useState<any[]>([]);
+  const [transactions, setTransactions] = useState<any[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const pageSize = 100;
 
   // Canonicalize route on mount/change
   useEffect(() => {
@@ -72,6 +76,15 @@ export default function ProgramDetailPage() {
   }, [id, apiUrl, router]);
 
   useEffect(() => {
+    if (!router.isReady || !id || isHex(id)) return; // hex is handled by canonicalization above
+    // Initialize page from query once router is ready
+    const qp = Array.isArray(router.query.page) ? router.query.page[0] : router.query.page;
+    const initialPage = Math.max(1, parseInt(String(qp || '1'), 10) || 1);
+    if (initialPage !== page) setPage(initialPage);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [router.isReady, id]);
+
+  useEffect(() => {
     if (!id || isHex(id)) return; // hex is handled by canonicalization above
     (async () => {
       try {
@@ -89,7 +102,6 @@ export default function ProgramDetailPage() {
           last_seen_at: p.last_seen_at,
           display_name: p.display_name || null,
         });
-        setRecent(json.recent_transactions || []);
       } catch (e: any) {
         setError('Program not found');
       } finally {
@@ -97,6 +109,36 @@ export default function ProgramDetailPage() {
       }
     })();
   }, [id, apiUrl]);
+
+  // Fetch paginated transactions for the program
+  useEffect(() => {
+    if (!id || isHex(id)) return;
+    (async () => {
+      try {
+        setError(null);
+        const offset = (page - 1) * pageSize;
+        const url = `${apiUrl}/api/programs/${encodeURIComponent(id)}/transactions?limit=${pageSize}&offset=${offset}`;
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        setTransactions(data.transactions || []);
+        setTotal(data.total_count || 0);
+      } catch (e: any) {
+        setError('Failed to load transactions');
+      }
+    })();
+  }, [apiUrl, id, page]);
+
+  const onPageChange = (p: number) => {
+    setPage(p);
+    if (id) {
+      const href = `/programs/${encodeURIComponent(id)}?page=${p}`;
+      // Shallow routing to avoid full page reload
+      router.replace(href, undefined, { shallow: true });
+    }
+  };
+
+  const rows = useMemo(() => transactions, [transactions]);
 
   return (
     <Layout>
@@ -137,9 +179,9 @@ export default function ProgramDetailPage() {
         )}
       </section>
 
-      {recent.length > 0 && (
-        <section className={styles.searchSection}>
-          <h2>Recent Transactions</h2>
+      <section className={styles.searchSection}>
+        <h2>Transactions</h2>
+        <div className={styles.tableScroll}>
           <table className={styles.transactionsTable}>
             <thead>
               <tr>
@@ -149,17 +191,18 @@ export default function ProgramDetailPage() {
               </tr>
             </thead>
             <tbody>
-              {recent.map((rt: any) => (
-                <tr key={rt.txid}>
-                  <td><a className={styles.hashButton} href={`/tx/${rt.txid}`}>{middleEllipsis(rt.txid, 8)}</a></td>
-                  <td><a className={styles.hashButton} href={`/blocks/${rt.block_height}`}>{rt.block_height}</a></td>
-                  <td>{rt.created_at ? new Date(rt.created_at).toLocaleString() : '—'}</td>
+              {rows.map((tx: any) => (
+                <tr key={tx.txid}>
+                  <td><a className={styles.hashButton} href={`/tx/${tx.txid}`}>{middleEllipsis(tx.txid, 8)}</a></td>
+                  <td><a className={styles.hashButton} href={`/blocks/${tx.block_height}`}>{tx.block_height}</a></td>
+                  <td>{tx.created_at ? new Date(tx.created_at).toLocaleString() : '—'}</td>
                 </tr>
               ))}
             </tbody>
           </table>
-        </section>
-      )}
+        </div>
+        <Pagination page={page} pageSize={pageSize} total={total} onPageChange={onPageChange} />
+      </section>
     </Layout>
   );
 }
