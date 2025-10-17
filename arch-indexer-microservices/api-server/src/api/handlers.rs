@@ -3409,13 +3409,13 @@ pub async fn get_transactions_by_program(
         JOIN transaction_programs tp ON t.txid = tp.txid
         WHERE tp.program_id = $1 OR tp.program_id = normalize_program_id($2)
         ORDER BY t.created_at DESC, t.block_height DESC
-        LIMIT $2 OFFSET $3
+        LIMIT $3 OFFSET $4
         "#
     )
-    .bind(&pid_hex)
-    .bind(&program_id)
-    .bind(limit)
-    .bind(offset)
+    .bind(&pid_hex)      // $1
+    .bind(&program_id)   // $2
+    .bind(limit)         // $3
+    .bind(offset)        // $4
     .fetch_all(&*pool)
     .await?;
 
@@ -3437,8 +3437,8 @@ pub async fn get_transactions_by_program(
         WHERE tp.program_id = $1 OR tp.program_id = normalize_program_id($2)
         "#
     )
-    .bind(&pid_hex)
-    .bind(&program_id)
+    .bind(&pid_hex)     // $1
+    .bind(&program_id)  // $2
     .fetch_one(&*pool)
     .await
     .unwrap_or(0);
