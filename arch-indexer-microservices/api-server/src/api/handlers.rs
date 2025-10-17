@@ -3159,239 +3159,214 @@ pub async fn search_handler(
     Query(params): Query<HashMap<String, String>>,
     State(pool): State<Arc<PgPool>>,
 ) -> impl IntoResponse {
-    if let Some(term) = params.get("term") {
-        // Check if the term is a transaction ID
-        if let Ok(Some(transaction)) = sqlx::query_as!(
-            TransactionRecord,
-            r#"
-            SELECT 
-                txid,
-                block_height,
-                data,
-                status,
-                bitcoin_txids, 
-                created_at::timestamptz as "created_at!: chrono::DateTime<chrono::Utc>"
-            FROM transactions 
-            WHERE txid = $1
-            "#,
-            term
-        )
-        .fetch_optional(&*pool)
-        .await
-        {
-            return Json(json!({ "type": "transaction", "data": transaction }));
-        }
-
-        // Check if the term is a block hash
-        if let Ok(Some(r)) = sqlx::query(
-            r#"
-            SELECT 
-                b.height,
-                b.hash,
-                b.timestamp,
-                b.bitcoin_block_height,
-                COUNT(t.txid) as transaction_count,
-                b.previous_block_hash
-                , NULL::bigint as block_size_bytes
-            FROM blocks b
-            LEFT JOIN transactions t ON b.height = t.block_height
-            WHERE b.hash = $1
-            GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height, b.previous_block_hash
-            "#
-        )
-        .bind(term)
-        .fetch_optional(&*pool)
-        .await
-        {
-            let ts_utc = r.get::<chrono::DateTime<Utc>, _>("timestamp");
-            let mut block = Block {
-                    height: r.get::<i64, _>("height"),
-                    hash: r.get::<String, _>("hash"),
-                    timestamp: ts_utc,
-                    bitcoin_block_height: r.try_get::<Option<i64>, _>("bitcoin_block_height").ok().flatten(),
-                    transaction_count: r.get::<i64, _>("transaction_count"),
-                    block_size_bytes: r.try_get::<Option<i64>, _>("block_size_bytes").ok().flatten(),
-                    previous_block_hash: r.try_get::<Option<String>, _>("previous_block_hash").ok().flatten(),
-            };
-
-            // Fallback: if previous_block_hash is missing, fetch from RPC
-            if block.previous_block_hash.is_none() {
-                let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
-                let arch_client = crate::arch_rpc::ArchRpcClient::new(rpc_url);
-                if let Ok(rb) = arch_client.get_block(&block.hash, block.height).await {
-                    block.previous_block_hash = rb.previous_block_hash;
-                }
-            }
-
-            // Attach transactions list and compute approximate block size
-            let tx_rows = sqlx::query(
-                r#"
-                SELECT 
-                    txid,
-                    block_height,
-                    data,
-                    status,
-                    bitcoin_txids,
-                    created_at::timestamptz as created_at
-                FROM transactions
-                WHERE block_height = $1
-                ORDER BY txid
-                LIMIT 500
-                "#
-            )
-            .bind(block.height)
-            .fetch_all(&*pool)
-            .await
-            .unwrap_or_default();
-
-            let txs: Vec<Transaction> = tx_rows
-                .into_iter()
-                .map(|row| Transaction {
-                    txid: row.get::<String, _>("txid"),
-                    block_height: row.get::<i64, _>("block_height"),
-                    data: row.get::<sqlx::types::JsonValue, _>("data"),
-                    status: row.get::<serde_json::Value, _>("status"),
-                    bitcoin_txids: row.try_get::<Option<Vec<String>>, _>("bitcoin_txids").unwrap_or(None),
-                    created_at: row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
-                })
-                .collect();
-
-            // Compute approximate bytes from serialized tx structure
-            let approx_bytes: i64 = txs.iter()
-                .map(|t| estimate_tx_size(&t.data))
-                .sum();
-            if block.block_size_bytes.is_none() {
-                block.block_size_bytes = Some(approx_bytes);
-            }
-
-            return Json(json!({ "type": "block", "data": {
-                "height": block.height,
-                "hash": block.hash,
-                "timestamp": block.timestamp,
-                "bitcoin_block_height": block.bitcoin_block_height,
-                "transaction_count": block.transaction_count,
-                "block_size_bytes": block.block_size_bytes,
-                "previous_block_hash": block.previous_block_hash,
-                "transactions": txs,
-            }}));
-        }
-
-        // Check if the term is a block height
-        if let Ok(height) = term.parse::<i64>() {
-            if let Ok(Some(row)) = sqlx::query(
-                r#"
-                SELECT 
-                    b.height,
-                    b.hash,
-                    b.timestamp,
-                    b.bitcoin_block_height,
-                    COUNT(t.txid) as transaction_count,
-                    b.previous_block_hash,
-                    NULL::bigint as block_size_bytes
-                FROM blocks b
-                LEFT JOIN transactions t ON b.height = t.block_height
-                WHERE b.height = $1
-                GROUP BY b.height, b.hash, b.timestamp, b.bitcoin_block_height, b.previous_block_hash
-                "#
-            )
-            .bind(height)
-            .fetch_optional(&*pool)
-            .await
-            {
-                let r = row;
-                let ts_utc = r.get::<chrono::DateTime<Utc>, _>("timestamp");
-                let mut block = Block {
-                    height: r.get::<i64, _>("height"),
-                    hash: r.get::<String, _>("hash"),
-                    timestamp: ts_utc,
-                    bitcoin_block_height: r.try_get::<Option<i64>, _>("bitcoin_block_height").ok().flatten(),
-                    transaction_count: r.get::<i64, _>("transaction_count"),
-                    block_size_bytes: r.try_get::<Option<i64>, _>("block_size_bytes").ok().flatten(),
-                    previous_block_hash: r.try_get::<Option<String>, _>("previous_block_hash").ok().flatten(),
-                };
-
-                // Attach transactions for richer search result UX (no sqlx macros)
-                let tx_rows = sqlx::query(
-                    r#"
-                    SELECT 
-                        txid,
-                        block_height,
-                        data,
-                        status,
-                        bitcoin_txids,
-                        created_at
-                    FROM transactions
-                    WHERE block_height = $1
-                    ORDER BY txid
-                    LIMIT 500
-                    "#
-                )
-                .bind(block.height)
-                .fetch_all(&*pool)
-                .await
-                .unwrap_or_default();
-
-                let txs: Vec<Transaction> = tx_rows
-                    .into_iter()
-                    .map(|row| Transaction {
-                        txid: row.get::<String, _>("txid"),
-                        block_height: row.get::<i64, _>("block_height"),
-                        data: row.get::<sqlx::types::JsonValue, _>("data"),
-                        status: row.get::<serde_json::Value, _>("status"),
-                        bitcoin_txids: row.try_get::<Option<Vec<String>>, _>("bitcoin_txids").unwrap_or(None),
-                        created_at: row.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
-                    })
-                    .collect();
-
-                // Compute approximate bytes from serialized tx structure
-                if block.block_size_bytes.is_none() {
-                    let approx_bytes: i64 = txs.iter()
-                        .map(|t| estimate_tx_size(&t.data))
-                        .sum();
-                    block.block_size_bytes = Some(approx_bytes);
-                }
-
-                // Fallback: if previous_block_hash is missing, fetch from DB then RPC
-                if block.previous_block_hash.is_none() && block.height > 0 {
-                    if let Ok(prev_row) = sqlx::query(
-                        r#"SELECT hash FROM blocks WHERE height = $1"#
-                    )
-                    .bind(block.height - 1)
-                    .fetch_optional(&*pool)
-                    .await {
-                        if let Some(r) = prev_row {
-                            let prev_hash: String = r.get::<String, _>("hash");
-                            block.previous_block_hash = Some(prev_hash);
-                        }
-                    }
-                    if block.previous_block_hash.is_none() {
-                        let rpc_url = std::env::var("ARCH_NODE_URL").unwrap_or_else(|_| "http://localhost:8081".to_string());
-                        let arch_client = crate::arch_rpc::ArchRpcClient::new(rpc_url);
-                        if let Ok(rb) = arch_client.get_block(&block.hash, block.height).await {
-                            if rb.previous_block_hash.is_some() { block.previous_block_hash = rb.previous_block_hash; }
-                        }
-                    }
-                }
-
-                return Json(json!({ "type": "block", "data": {
-                    "height": block.height,
-                    "hash": block.hash,
-                    "timestamp": block.timestamp,
-                    "bitcoin_block_height": block.bitcoin_block_height,
-                    "transaction_count": block.transaction_count,
-                    "block_size_bytes": block.block_size_bytes,
-                    "previous_block_hash": block.previous_block_hash,
-                    "transactions": txs,
-                }}));
-            }
-        }
-
-        // If no match is found
-        return Json(json!({ "error": "No matching transaction or block found" }));
-    } else {
-        // Return an error response if the term is missing
+    // Accept both `q` and legacy `term`
+    let raw = params.get("q").cloned().or_else(|| params.get("term").cloned());
+    let Some(query_str) = raw.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) else {
         return Json(json!({ "error": "Missing search term" }));
+    };
+
+    // Optional typed prefixes
+    let (forced, q) = if let Some((prefix, rest)) = query_str.split_once(':') {
+        (Some(prefix.to_lowercase()), rest.trim().to_string())
+    } else { (None, query_str.clone()) };
+    let q_for_futures = q.clone();
+    let pool_for_futures = Arc::clone(&pool);
+
+    // Helper: classify
+    let is_numeric = q.chars().all(|c| c.is_ascii_digit());
+    let looks_base58 = q.chars().all(|c| matches!(c,
+        '1'..='9' | 'A'..='H' | 'J'..='N' | 'P'..='Z' | 'a'..='k' | 'm'..='z'));
+    let is_hex64 = q.len() == 64 && q.chars().all(|c| c.is_ascii_hexdigit());
+
+    // Normalize to hex for program/account-like identifiers when applicable
+    let q_hex_opt = if forced.as_deref() == Some("program") || forced.as_deref() == Some("addr") || forced.as_deref() == Some("account") || forced.as_deref() == Some("mint") || looks_base58 || is_hex64 {
+        normalize_program_param(&q)
+    } else { None };
+
+    // Build parallel exact-lookups per plausible category
+    let tx_fut = if forced.as_deref().map(|s| s=="tx" || s=="transaction").unwrap_or(true) {
+        Some(sqlx::query_scalar::<_, String>("SELECT txid FROM transactions WHERE txid = $1 LIMIT 1").bind(q_for_futures.clone()))
+    } else { None };
+
+    let block_hash_fut = if forced.as_deref().map(|s| s=="block" || s=="hash").unwrap_or(true) && (looks_base58 || is_hex64) {
+        Some(sqlx::query("SELECT height, hash FROM blocks WHERE hash = $1 LIMIT 1").bind(q_for_futures.clone()))
+    } else { None };
+
+    let block_height_fut = if forced.as_deref().map(|s| s=="height" || s=="block").unwrap_or(true) && is_numeric {
+        let h = q_for_futures.parse::<i64>().unwrap_or_default();
+        Some(sqlx::query("SELECT height, hash FROM blocks WHERE height = $1 LIMIT 1").bind(h))
+    } else { None };
+
+    let program_fut = if forced.as_deref().map(|s| s=="program").unwrap_or(true) {
+        if let Some(q_hex) = q_hex_opt.clone() {
+            Some(sqlx::query("SELECT program_id, COALESCE(display_name, '') AS display_name FROM programs WHERE program_id = $1 LIMIT 1").bind(q_hex))
+        } else { None }
+    } else { None };
+
+    let account_exists_fut = if forced.as_deref().map(|s| s=="addr" || s=="account").unwrap_or(true) {
+        if let Some(q_hex) = q_hex_opt.clone() {
+            let pool_clone = Arc::clone(&pool_for_futures);
+            Some(async move {
+                // Prefer account_participation if present, otherwise fallback to scanning
+                let has_participation: bool = sqlx::query_scalar(
+                    r#"SELECT to_regclass('public.account_participation') IS NOT NULL"#
+                ).fetch_one(&*pool_clone).await.unwrap_or(false);
+                if has_participation {
+                    sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM account_participation WHERE address_hex ILIKE $1)")
+                        .bind(q_hex)
+                        .fetch_one(&*pool_clone).await.unwrap_or(false)
+                } else {
+                    // Cheap EXISTS over transactions json
+                    sqlx::query_scalar::<_, bool>(
+                        r#"
+                        WITH accs AS (
+                          SELECT 1 AS one
+                          FROM transactions t
+                          CROSS JOIN LATERAL jsonb_array_elements(COALESCE(t.data#>'{message,account_keys}', t.data#>'{message,keys}', '[]'::jsonb)) AS acc(value)
+                          WHERE (
+                            CASE 
+                              WHEN jsonb_typeof(acc.value) = 'string' THEN normalize_program_id(trim(both '"' from (acc.value)::text))
+                              WHEN jsonb_typeof(acc.value) = 'array' THEN normalize_program_id(acc.value)
+                              WHEN jsonb_typeof(acc.value) = 'object' THEN normalize_program_id(acc.value->'pubkey')
+                              ELSE NULL
+                            END ILIKE $1
+                          )
+                          LIMIT 1
+                        )
+                        SELECT EXISTS(SELECT 1 FROM accs)
+                        "#
+                    ).bind(q_hex)
+                    .fetch_one(&*pool_clone).await.unwrap_or(false)
+                }
+            })
+        } else { None }
+    } else { None };
+
+    let tokens_fut = if forced.as_deref().map(|s| s=="mint" || s=="token" || s=="tokens").unwrap_or(true) {
+        if let Some(q_hex) = q_hex_opt.clone() {
+            let pool_clone = Arc::clone(&pool_for_futures);
+            let q_for_url = q_for_futures.clone();
+            Some(async move {
+                let has_mints: bool = sqlx::query_scalar(
+                    r#"SELECT to_regclass('public.token_mints') IS NOT NULL"#
+                ).fetch_one(&*pool_clone).await.unwrap_or(false);
+                let has_balances: bool = sqlx::query_scalar(
+                    r#"SELECT to_regclass('public.token_balances') IS NOT NULL"#
+                ).fetch_one(&*pool_clone).await.unwrap_or(false);
+                if has_mints {
+                    if let Some(r) = sqlx::query(
+                        "SELECT mint_address, decimals, COALESCE(symbol, '') AS symbol FROM token_mints WHERE mint_address = $1 LIMIT 1"
+                    ).bind(q_hex.clone()).fetch_optional(&*pool_clone).await.ok().flatten() {
+                        let mint_hex: String = r.get("mint_address");
+                        let mint_b58 = try_hex_to_base58(&mint_hex);
+                        let decimals: i32 = r.try_get("decimals").unwrap_or(0);
+                        let symbol: String = r.try_get::<String,_>("symbol").unwrap_or_default();
+                        return Some(json!({
+                            "mint": if mint_b58.is_empty() { mint_hex.clone() } else { mint_b58 },
+                            "mint_hex": mint_hex,
+                            "decimals": decimals,
+                            "symbol": if symbol.is_empty() { serde_json::Value::Null } else { json!(symbol) },
+                            "url": format!("/token/{}", q_for_url)
+                        }));
+                    }
+                }
+                if has_balances {
+                    if let Some(r) = sqlx::query("SELECT mint_address FROM token_balances WHERE mint_address = $1 LIMIT 1")
+                        .bind(q_hex).fetch_optional(&*pool_clone).await.ok().flatten() {
+                        let mint_hex: String = r.get("mint_address");
+                        let mint_b58 = try_hex_to_base58(&mint_hex);
+                        return Some(json!({
+                            "mint": if mint_b58.is_empty() { mint_hex.clone() } else { mint_b58 },
+                            "mint_hex": mint_hex,
+                            "url": format!("/token/{}", q_for_url)
+                        }));
+                    }
+                }
+                None
+            })
+        } else { None }
+    } else { None };
+
+    // Execute in parallel with short timeouts
+    use tokio::time::{timeout, Duration};
+
+    let tx_res = if let Some(qry) = tx_fut { timeout(Duration::from_millis(250), qry.fetch_optional(&*pool)).await.ok().and_then(|r| r.ok().flatten()) } else { None };
+    let bhash_res: Option<sqlx::postgres::PgRow> = if let Some(qry) = block_hash_fut { timeout(Duration::from_millis(250), qry.fetch_optional(&*pool)).await.ok().and_then(|r| r.ok().flatten()) } else { None };
+    let bheight_res: Option<sqlx::postgres::PgRow> = if let Some(qry) = block_height_fut { timeout(Duration::from_millis(250), qry.fetch_optional(&*pool)).await.ok().and_then(|r| r.ok().flatten()) } else { None };
+    let program_row: Option<sqlx::postgres::PgRow> = if let Some(qry) = program_fut { timeout(Duration::from_millis(250), qry.fetch_optional(&*pool)).await.ok().and_then(|r| r.ok().flatten()) } else { None };
+    let account_exists = if let Some(f) = account_exists_fut { timeout(Duration::from_millis(400), f).await.ok().unwrap_or(false) } else { false };
+    let token_item = if let Some(f) = tokens_fut { timeout(Duration::from_millis(300), f).await.ok().flatten() } else { None };
+
+    // Build results
+    let mut results = serde_json::Map::new();
+
+    // Transactions
+    if let Some(txid) = tx_res {
+        results.insert("transactions".to_string(), json!([{ "txid": txid.clone(), "url": format!("/tx/{}", txid) }]));
+    } else { results.insert("transactions".to_string(), json!([])); }
+
+    // Blocks
+    let mut blocks: Vec<serde_json::Value> = Vec::new();
+    if let Some(r) = bhash_res.as_ref() {
+        let h: i64 = r.get("height");
+        let hash: String = r.get("hash");
+        blocks.push(json!({ "height": h, "hash": hash, "url": format!("/blocks/{}", h) }));
     }
+    if let Some(r) = bheight_res.as_ref() {
+        let h: i64 = r.get("height");
+        let hash: String = r.get("hash");
+        blocks.push(json!({ "height": h, "hash": hash, "url": format!("/blocks/{}", h) }));
+    }
+    results.insert("blocks".to_string(), serde_json::Value::from(blocks));
+
+    // Programs
+    if let Some(r) = program_row.as_ref() {
+        let pid_hex: String = r.get("program_id");
+        let display_name: String = r.get("display_name");
+        let pid_b58 = try_hex_to_base58(&pid_hex);
+        results.insert("programs".to_string(), json!([{
+            "programId": if pid_b58.is_empty() { pid_hex.clone() } else { pid_b58.clone() },
+            "programIdHex": pid_hex,
+            "displayName": if display_name.is_empty() { serde_json::Value::Null } else { json!(display_name) },
+            "url": format!("/programs/{}", if pid_b58.is_empty() { pid_hex } else { pid_b58 })
+        }]));
+    } else { results.insert("programs".to_string(), json!([])); }
+
+    // Accounts
+    if account_exists {
+        // Prefer returning the input as address; also include hex when available
+        let addr_hex = q_hex_opt.clone().unwrap_or_default();
+        results.insert("accounts".to_string(), json!([{
+            "address": q.clone(),
+            "addressHex": addr_hex,
+            "url": format!("/accounts/{}", q)
+        }]));
+    } else { results.insert("accounts".to_string(), json!([])); }
+
+    // Tokens
+    if let Some(tok) = token_item {
+        results.insert("tokens".to_string(), json!([tok]));
+    } else { results.insert("tokens".to_string(), json!([])); }
+
+    // Determine bestGuess
+    let mut candidates: Vec<(String, String, f32)> = Vec::new();
+    if let Some(txid) = params.get("q").or_else(|| params.get("term")).cloned() {
+        if !results.get("transactions").unwrap_or(&json!([])).as_array().unwrap_or(&vec![]).is_empty() {
+            candidates.push(("transaction".into(), format!("/tx/{}", txid), 1.0));
+        }
+    }
+    if let Some(arr) = results.get("blocks").and_then(|v| v.as_array()) { if arr.len() == 1 { if let Some(u) = arr[0].get("url").and_then(|v| v.as_str()) { candidates.push(("block".into(), u.to_string(), 0.95)); } } }
+    if let Some(arr) = results.get("accounts").and_then(|v| v.as_array()) { if arr.len() == 1 { if let Some(u) = arr[0].get("url").and_then(|v| v.as_str()) { candidates.push(("account".into(), u.to_string(), 0.9)); } } }
+    if let Some(arr) = results.get("programs").and_then(|v| v.as_array()) { if arr.len() == 1 { if let Some(u) = arr[0].get("url").and_then(|v| v.as_str()) { candidates.push(("program".into(), u.to_string(), 0.9)); } } }
+    if let Some(arr) = results.get("tokens").and_then(|v| v.as_array()) { if arr.len() == 1 { if let Some(u) = arr[0].get("url").and_then(|v| v.as_str()) { candidates.push(("token".into(), u.to_string(), 0.9)); } } }
+
+    let best_guess = if candidates.len() == 1 { let (t, u, c) = candidates.remove(0); json!({ "redirect": true, "type": t, "url": u, "confidence": c }) } else { json!({ "redirect": false }) };
+
+    Json(json!({
+        "query": query_str,
+        "bestGuess": best_guess,
+        "results": results
+    }))
 }
 
 pub async fn get_transactions_by_program(
@@ -3418,9 +3393,8 @@ pub async fn get_transactions_by_program(
         }
     };
 
-    // Get paginated transactions
-    let transactions = sqlx::query_as!(
-        Transaction,
+    // Get paginated transactions (dynamic query - SQLx offline friendly)
+    let rows = sqlx::query(
         r#"
         SELECT DISTINCT 
             t.txid,
@@ -3428,32 +3402,41 @@ pub async fn get_transactions_by_program(
             t.data,
             t.status,
             t.bitcoin_txids,
-            t.created_at::timestamptz as "created_at!: chrono::DateTime<chrono::Utc>"
+            t.created_at::timestamptz as created_at
         FROM transactions t
         JOIN transaction_programs tp ON t.txid = tp.txid
         WHERE tp.program_id = $1
         ORDER BY t.created_at DESC, t.block_height DESC
         LIMIT $2 OFFSET $3
-        "#,
-        pid_hex,
-        limit,
-        offset
+        "#
     )
+    .bind(&pid_hex)
+    .bind(limit)
+    .bind(offset)
     .fetch_all(&*pool)
     .await?;
 
+    let transactions: Vec<Transaction> = rows.into_iter().map(|r| Transaction {
+        txid: r.get::<String, _>("txid"),
+        block_height: r.get::<i64, _>("block_height"),
+        data: r.get::<sqlx::types::JsonValue, _>("data"),
+        status: r.get::<serde_json::Value, _>("status"),
+        bitcoin_txids: r.try_get::<Option<Vec<String>>, _>("bitcoin_txids").ok().flatten(),
+        created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
+    }).collect();
+
     // Get total count of transactions for this program
-    let total_count = sqlx::query_scalar!(
+    let total_count: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(DISTINCT t.txid)
         FROM transactions t
         JOIN transaction_programs tp ON t.txid = tp.txid
         WHERE tp.program_id = $1
-        "#,
-        pid_hex
+        "#
     )
+    .bind(&pid_hex)
     .fetch_one(&*pool)
-    .await?
+    .await
     .unwrap_or(0);
 
     // Prepare the response

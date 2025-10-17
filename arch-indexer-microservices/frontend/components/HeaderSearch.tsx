@@ -13,24 +13,15 @@ export default function HeaderSearch() {
     if (!q) return;
     try {
       setLoading(true);
-      // Fast-path: numeric => block height
-      if (/^\d+$/.test(q)) {
-        router.push(`/blocks/${q}`);
+      const res = await fetch(`${apiUrl}/api/search?q=${encodeURIComponent(q)}`);
+      const data = await res.json();
+      // If server returns a bestGuess redirect, use it
+      if (data?.bestGuess?.redirect && data?.bestGuess?.url) {
+        router.push(data.bestGuess.url);
         return;
       }
-
-      const res = await fetch(`${apiUrl}/api/search?term=${encodeURIComponent(q)}`);
-      const json = await res.json();
-      if (json?.type === 'block' && json?.data?.height != null) {
-        router.push(`/blocks/${json.data.height}`);
-        return;
-      }
-      if (json?.type === 'transaction' && json?.data?.txid) {
-        router.push(`/tx/${json.data.txid}`);
-        return;
-      }
-      // Fallback: assume block hash
-      router.push(`/blocks/${q}`);
+      // Otherwise open search results page grouped by type
+      router.push(`/search?q=${encodeURIComponent(q)}`);
     } catch {
       alert('Not found');
     } finally {
@@ -43,7 +34,7 @@ export default function HeaderSearch() {
       <input
         type="text"
         className={styles.searchInput}
-        placeholder="Search height, block hash, txid, program id…"
+        placeholder="Search blocks, txs, accounts, programs, tokens…"
         value={term}
         onChange={(e) => setTerm(e.target.value)}
         onKeyDown={(e) => e.key === 'Enter' && go()}

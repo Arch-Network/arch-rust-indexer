@@ -136,10 +136,11 @@ dependencies = [
 
 [[package]]
 name = "arch_program"
-version = "0.5.8"
+version = "0.5.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2260ffb62964996663287e7f1a527b23ed47ef57464eda3c22ff8d8b6703e22b"
+checksum = "a814b77faddad1a60dd5dcbfab7ad2d7bb4205eda150194b6a03b8091e4d7fd8"
 dependencies = [
+ "base64 0.22.1",
  "bincode",
  "bitcode",
  "bitcoin",
@@ -165,9 +166,9 @@ dependencies = [
 
 [[package]]
 name = "arch_sdk"
-version = "0.5.8"
+version = "0.5.14"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "59b7ba7358a861fc80c06923631a0da99d8b20bce49002ed49e1b5279a1dd140"
+checksum = "a7b783d56191ad21c9e1e76c305eaf35c6a1cce7c137397fc20700fabffb6d7b"
 dependencies = [
  "anyhow",
  "arch_program",
@@ -189,6 +190,7 @@ dependencies = [
  "sha256",
  "snafu",
  "thiserror 1.0.69",
+ "titan-client",
  "tokio",
  "tokio-tungstenite 0.26.2",
  "tracing",
