@@ -3395,7 +3395,7 @@ pub async fn get_transactions_by_program(
         }
     };
 
-    // Get paginated transactions (accept hex or base58 by normalizing in SQL)
+    // Get paginated transactions (normalize to hex in server)
     let rows = sqlx::query(
         r#"
         SELECT DISTINCT 
@@ -3407,11 +3407,12 @@ pub async fn get_transactions_by_program(
             t.created_at::timestamptz as created_at
         FROM transactions t
         JOIN transaction_programs tp ON t.txid = tp.txid
-        WHERE tp.program_id = normalize_program_id($1)
+        WHERE tp.program_id = $1 OR tp.program_id = normalize_program_id($2)
         ORDER BY t.created_at DESC, t.block_height DESC
         LIMIT $2 OFFSET $3
         "#
     )
+    .bind(&pid_hex)
     .bind(&program_id)
     .bind(limit)
     .bind(offset)
@@ -3427,15 +3428,16 @@ pub async fn get_transactions_by_program(
         created_at: r.get::<chrono::DateTime<chrono::Utc>, _>("created_at"),
     }).collect();
 
-    // Get total count of transactions for this program (normalized)
+    // Get total count of transactions for this program
     let total_count: i64 = sqlx::query_scalar(
         r#"
         SELECT COUNT(DISTINCT t.txid)
         FROM transactions t
         JOIN transaction_programs tp ON t.txid = tp.txid
-        WHERE tp.program_id = normalize_program_id($1)
+        WHERE tp.program_id = $1 OR tp.program_id = normalize_program_id($2)
         "#
     )
+    .bind(&pid_hex)
     .bind(&program_id)
     .fetch_one(&*pool)
     .await
